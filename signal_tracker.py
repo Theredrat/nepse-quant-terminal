@@ -65,7 +65,7 @@ def log_signals(candidates):
         sym = row.get("symbol", "")
         sig = row.get("signal", "")
         ltp = float(row.get("ltp", 0))
-        if not sym or not ltp:
+        if not sym:
             continue
         # Avoid duplicate logging same symbol+signal on same day
         already = any(
