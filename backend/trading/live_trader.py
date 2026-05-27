@@ -24,6 +24,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import json
 import logging
@@ -32,10 +33,22 @@ import sqlite3
 import sys
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+    try:
+        import msvcrt
+    except ImportError:
+        msvcrt = None
+else:
+    msvcrt = None
 
 import pandas as pd
 
@@ -77,13 +90,28 @@ from backend.quant_pro.paths import (
     get_trading_runtime_dir,
     migrate_legacy_path,
 )
-from backend.quant_pro.signal_ranking import rank_signal_candidates
+from backend.quant_pro.signal_ranking import (
+    canonicalize_signal_symbol,
+    is_tradeable_signal_symbol,
+    rank_signal_candidates,
+)
 from backend.quant_pro.control_plane.command_service import build_live_trader_control_plane
 from backend.quant_pro.vendor_api import (
     fetch_latest_ltp,
     fetch_latest_ltps,
     fetch_ohlcv_chunk,
     get_latest_ltps_context,
+)
+# Live brokerage execution (TMS19) not included in public release.
+# Import stubs so dependent code doesn't fail to import.
+from backend.quant_pro.tms_models import (
+    ExecutionAction,
+    ExecutionIntent,
+    ExecutionResult,
+    ExecutionSource,
+    ExecutionStatus,
+    FillState,
+    utc_now_iso,
 )
 from backend.quant_pro.tms_audit import (
     load_execution_intent,
@@ -94,36 +122,53 @@ from backend.quant_pro.tms_audit import (
     save_tms_snapshot,
     update_execution_intent,
 )
-from backend.quant_pro.tms_executor import (
-    LocalTMSExecutionService,
-    TMSBrowserExecutor,
-)
-from backend.quant_pro.tms_models import (
-    ExecutionAction,
-    ExecutionIntent,
-    ExecutionResult,
-    ExecutionSource,
-    ExecutionStatus,
-    FillState,
-    utc_now_iso,
-)
-from backend.quant_pro.tms_session import load_tms_settings
-from backend.quant_pro.tms_session import validate_live_setup
+
+class _TmsStub:
+    def __init__(self, *args: Any, **kwargs: Any):
+        pass
+
+
+@dataclass
+class PaperOnlyLiveSettings:
+    """Safe live-execution settings stub for the public paper-only build."""
+
+    mode: str = "paper"
+    enabled: bool = False
+    strategy_automation_enabled: bool = False
+    auto_exits_enabled: bool = False
+    owner_confirm_required: bool = True
+    max_order_notional: float = 0.0
+    max_daily_orders: int = 0
+    symbol_cooldown_secs: int = 0
+    max_price_deviation_pct: float = 2.5
+
+
+def validate_live_setup(settings: PaperOnlyLiveSettings, *, interactive: bool = False) -> List[str]:
+    """Live brokerage connectors are intentionally unavailable in this build."""
+    return []
+
+TMSBrowserExecutor = _TmsStub
+
+from backend.trading import strategy_registry
 
 # Signal generators from simple_backtest
 from backend.backtesting.simple_backtest import (
     compute_market_regime,
     generate_low_volatility_signals_at_date,
+    generate_mean_reversion_signals_at_date,
     generate_momentum_signals_at_date,
     generate_quality_signals_at_date,
+    generate_quarterly_fundamental_signals_at_date,
     generate_volume_breakout_signals_at_date,
+    generate_xsec_momentum_signals_at_date,
     generate_52wk_high_signals_at_date,
     apply_amihud_tilt,
     get_symbol_sector,
     load_all_prices,
 )
+from backend.quant_pro.alpha_practical import SignalType
+from backend.quant_pro.quarterly_fundamental import QuarterlyFundamentalModel
 from backend.quant_pro.disposition import generate_cgo_signals_at_date
-from backend.quant_pro.lead_lag import generate_sector_leadlag_signals_at_date
 from backend.quant_pro.macro_signals import get_nrb_policy_regime
 from validation.transaction_costs import TransactionCostModel as NepseFees
 from validation.kill_switch import KillSwitch
@@ -148,6 +193,15 @@ DEFAULT_STATE_FILE = migrate_legacy_path(
     TRADING_RUNTIME_DIR / "paper_state.json",
     [PROJECT_ROOT / "paper_state.json"],
 )
+TUI_PAPER_ORDERS_FILE = migrate_legacy_path(
+    TRADING_RUNTIME_DIR / "tui_paper_orders.json",
+    [PROJECT_ROOT / "tui_paper_orders.json"],
+)
+TUI_PAPER_ORDER_HISTORY_FILE = migrate_legacy_path(
+    TRADING_RUNTIME_DIR / "tui_paper_order_history.json",
+    [PROJECT_ROOT / "tui_paper_order_history.json"],
+)
+LIVE_TRADER_PAPER_ORDER_SOURCES = {"strategy_paper", "strategy_exit_paper"}
 
 logging.basicConfig(
     level=logging.INFO,
@@ -244,6 +298,45 @@ def estimate_execution_price(
     else:
         raw = max(tick, ltp * (1.0 - band))
     return round(round(raw / tick) * tick, 1)
+
+
+def _calendar_holding_days(entry_date_str: str, exit_date_str: Optional[str] = None) -> int:
+    """Calendar holding days for CGT thresholds on listed securities."""
+    try:
+        entry_date = datetime.strptime(str(entry_date_str)[:10], "%Y-%m-%d").date()
+    except Exception:
+        return 0
+    try:
+        exit_date = (
+            datetime.strptime(str(exit_date_str)[:10], "%Y-%m-%d").date()
+            if exit_date_str
+            else now_nst().date()
+        )
+    except Exception:
+        exit_date = now_nst().date()
+    return max(0, (exit_date - entry_date).days)
+
+
+def _realized_sell_breakdown(pos: "Position", exit_price: float, *, exit_date_str: Optional[str] = None) -> Dict[str, float]:
+    """Net realized sell accounting including NEPSE capital gains tax."""
+    gross_pnl = (float(exit_price) - float(pos.entry_price)) * float(pos.shares)
+    holding_days = _calendar_holding_days(pos.entry_date, exit_date_str)
+    sell_fees = float(NepseFees.total_fees(pos.shares, exit_price, is_sell=True))
+    cgt = float(NepseFees.capital_gains_tax(gross_pnl, holding_days))
+    total_sell_cost = sell_fees + cgt
+    proceeds = float(pos.shares) * float(exit_price) - total_sell_cost
+    net_pnl = gross_pnl - float(pos.buy_fees) - total_sell_cost
+    pnl_pct = net_pnl / float(pos.cost_basis) if float(pos.cost_basis) > 0 else 0.0
+    return {
+        "gross_pnl": gross_pnl,
+        "holding_days": float(holding_days),
+        "sell_fees": sell_fees,
+        "cgt": cgt,
+        "total_sell_cost": total_sell_cost,
+        "proceeds": proceeds,
+        "net_pnl": net_pnl,
+        "pnl_pct": pnl_pct,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -519,6 +612,165 @@ def save_runtime_state(path: str, state: Dict[str, Any]) -> None:
     tmp.replace(p)
 
 
+def _lock_file_exclusive(handle) -> None:
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        return
+    if msvcrt is not None:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        return
+    raise RuntimeError("No file-lock implementation available on this platform")
+
+
+def _unlock_file(handle) -> None:
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return
+    if msvcrt is not None:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+    raise RuntimeError("No file-lock implementation available on this platform")
+
+
+def _append_json_list_entry_locked(path: str | Path, entry: Dict[str, Any]) -> None:
+    """Append one entry to a JSON list file shared across trader and TUI processes."""
+    target = _ensure_parent_path(path)
+    with target.open("a+", encoding="utf-8") as handle:
+        _lock_file_exclusive(handle)
+        try:
+            handle.seek(0)
+            try:
+                payload = json.load(handle)
+                if not isinstance(payload, list):
+                    payload = []
+            except Exception:
+                payload = []
+            payload.append(dict(entry))
+            handle.seek(0)
+            handle.truncate()
+            json.dump(payload, handle, ensure_ascii=True, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        finally:
+            _unlock_file(handle)
+
+
+def _load_json_list_file(path: str | Path) -> List[Dict[str, Any]]:
+    target = Path(path).expanduser()
+    if not target.exists():
+        return []
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    return list(payload) if isinstance(payload, list) else []
+
+
+def _mutate_json_list_locked(path: str | Path, mutator) -> Any:
+    target = _ensure_parent_path(path)
+    with target.open("a+", encoding="utf-8") as handle:
+        _lock_file_exclusive(handle)
+        try:
+            handle.seek(0)
+            try:
+                payload = json.load(handle)
+                if not isinstance(payload, list):
+                    payload = []
+            except Exception:
+                payload = []
+            result = mutator(payload)
+            handle.seek(0)
+            handle.truncate()
+            json.dump(payload, handle, ensure_ascii=True, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+            return result
+        finally:
+            _unlock_file(handle)
+
+
+def _source_owned_by_live_trader(source: Optional[str]) -> bool:
+    return str(source or "").strip().lower() in LIVE_TRADER_PAPER_ORDER_SOURCES
+
+
+def _record_tui_paper_order(
+    *,
+    action: str,
+    symbol: str,
+    qty: int,
+    limit_price: float,
+    status: str,
+    fill_price: float = 0.0,
+    filled_qty: Optional[int] = None,
+    created_at: Optional[str] = None,
+    updated_at: Optional[str] = None,
+    slippage_pct: float = 0.0,
+    source: str = "live_trader",
+    reason: str = "",
+) -> None:
+    """Mirror paper execution events into the TUI order feed."""
+    created_ts = str(created_at or now_nst().strftime("%Y-%m-%d %H:%M:%S"))
+    updated_ts = str(updated_at or created_ts)
+    action_text = str(action).upper()
+    status_text = str(status).upper()
+    qty_int = int(qty)
+    order = {
+        "id": uuid.uuid4().hex[:12],
+        "action": action_text,
+        "symbol": str(symbol).upper(),
+        "qty": qty_int,
+        "price": float(limit_price),
+        "slippage_pct": float(slippage_pct or 0.0),
+        "status": status_text,
+        "filled_qty": int(filled_qty if filled_qty is not None else (qty_int if status_text == "FILLED" else 0)),
+        "fill_price": float(fill_price or 0.0),
+        "trigger_price": float(limit_price),
+        "created_at": created_ts,
+        "updated_at": updated_ts,
+        "day": created_ts[:10],
+        "source": str(source),
+        "reason": str(reason or ""),
+    }
+    target_file = TUI_PAPER_ORDERS_FILE if status_text == "OPEN" else TUI_PAPER_ORDER_HISTORY_FILE
+    _append_json_list_entry_locked(target_file, order)
+
+
+def _queue_tui_paper_order(
+    *,
+    action: str,
+    symbol: str,
+    qty: int,
+    limit_price: float,
+    slippage_pct: float = 0.0,
+    source: str = "live_trader",
+    reason: str = "",
+) -> Dict[str, Any]:
+    created_ts = now_nst().strftime("%Y-%m-%d %H:%M:%S")
+    order = {
+        "id": uuid.uuid4().hex[:12],
+        "action": str(action).upper(),
+        "symbol": str(symbol).upper(),
+        "qty": int(qty),
+        "price": float(limit_price),
+        "slippage_pct": float(slippage_pct or 0.0),
+        "status": "OPEN",
+        "filled_qty": 0,
+        "fill_price": 0.0,
+        "trigger_price": float(limit_price),
+        "created_at": created_ts,
+        "updated_at": created_ts,
+        "day": created_ts[:10],
+        "source": str(source),
+        "reason": str(reason or ""),
+    }
+    _append_json_list_entry_locked(TUI_PAPER_ORDERS_FILE, order)
+    return order
+
+
 def resolve_daily_start_nav(nav_log_path: str, *, fallback_nav: float) -> float:
     """Use the latest prior NAV row as today's baseline when available."""
     try:
@@ -576,6 +828,29 @@ def load_trade_log_df(path: str) -> pd.DataFrame:
     return df
 
 
+def has_symbol_trade_on_day(
+    trade_log_path: str,
+    symbol: str,
+    *,
+    action: Optional[str] = None,
+    day: Optional[date] = None,
+) -> bool:
+    """Return True if the symbol has a recorded trade on the given trading day."""
+    trades = load_trade_log_df(trade_log_path)
+    if trades.empty:
+        return False
+    target_day = day or now_nst().date()
+    sym = str(symbol or "").strip().upper()
+    if not sym:
+        return False
+    day_mask = trades["Date"].dt.date == target_day
+    sym_mask = trades["Symbol"].astype(str).str.upper() == sym
+    mask = day_mask & sym_mask
+    if action:
+        mask &= trades["Action"].astype(str).str.upper() == str(action).strip().upper()
+    return bool(mask.any())
+
+
 def calculate_cash_from_trade_log(capital: float, trade_log_path: str) -> Optional[float]:
     """Rebuild cash from historical trade flows so realized P&L survives restarts."""
     df = load_trade_log_df(trade_log_path)
@@ -592,6 +867,74 @@ def calculate_cash_from_trade_log(capital: float, trade_log_path: str) -> Option
         elif action == "SELL":
             cash += gross - fees
     return round(cash, 2)
+
+
+def reconcile_trade_log_cgt(trade_log_path: str) -> Dict[str, float]:
+    """Backfill missing CGT into existing paper sell rows."""
+    path = Path(trade_log_path)
+    df = load_trade_log_df(str(path))
+    if df.empty:
+        return {"updated_rows": 0.0, "added_cgt": 0.0}
+
+    working = df.copy()
+    for col in ("Fees", "PnL", "PnL_Pct"):
+        working[col] = pd.to_numeric(working[col], errors="coerce").fillna(0.0).astype(float)
+    open_lots: Dict[str, Dict[str, float | str]] = {}
+    updated_rows = 0
+    added_cgt = 0.0
+
+    for idx, row in working.iterrows():
+        action = str(row.get("Action") or "").upper()
+        symbol = str(row.get("Symbol") or "").upper()
+        if not symbol:
+            continue
+        if action == "BUY":
+            open_lots[symbol] = {
+                "date": row["Date"].date().isoformat(),
+                "shares": float(row.get("Shares") or 0.0),
+                "price": float(row.get("Price") or 0.0),
+                "buy_fees": float(row.get("Fees") or 0.0),
+            }
+            continue
+        if action != "SELL":
+            continue
+        lot = open_lots.get(symbol)
+        if not lot:
+            continue
+
+        shares = int(float(row.get("Shares") or 0.0))
+        price = float(row.get("Price") or 0.0)
+        base_sell_fees = float(NepseFees.total_fees(shares, price, is_sell=True))
+        gross_pnl = (price - float(lot["price"])) * shares
+        holding_days = _calendar_holding_days(str(lot["date"]), row["Date"].date().isoformat())
+        cgt = float(NepseFees.capital_gains_tax(gross_pnl, holding_days))
+        desired_fees = base_sell_fees + cgt
+        desired_pnl = gross_pnl - float(lot["buy_fees"]) - desired_fees
+        cost_basis = float(lot["price"]) * shares + float(lot["buy_fees"])
+        desired_pnl_pct = desired_pnl / cost_basis if cost_basis > 0 else 0.0
+
+        current_fees = float(row.get("Fees") or 0.0)
+        current_pnl = float(row.get("PnL") or 0.0)
+        current_pnl_pct = float(row.get("PnL_Pct") or 0.0)
+        if (
+            abs(current_fees - desired_fees) > 0.005
+            or abs(current_pnl - desired_pnl) > 0.005
+            or abs(current_pnl_pct - desired_pnl_pct) > 0.00005
+        ):
+            working.at[idx, "Fees"] = round(desired_fees, 6)
+            working.at[idx, "PnL"] = round(desired_pnl, 2)
+            working.at[idx, "PnL_Pct"] = round(desired_pnl_pct, 4)
+            updated_rows += 1
+            prior_cgt = max(0.0, current_fees - base_sell_fees)
+            added_cgt += max(0.0, cgt - prior_cgt)
+
+        open_lots.pop(symbol, None)
+
+    if updated_rows:
+        persisted = working.copy()
+        persisted["Date"] = persisted["Date"].dt.strftime("%Y-%m-%d")
+        persisted.reindex(columns=TRADE_LOG_COLS).to_csv(path, index=False)
+    return {"updated_rows": float(updated_rows), "added_cgt": round(added_cgt, 2)}
 
 
 def compute_deployed_performance(
@@ -1756,41 +2099,34 @@ def generate_signals(
 ) -> Tuple[List[dict], str]:
     """Generate buy signals at current date using historical price data.
 
-    Includes: volume breakout, quality, low_vol, mean_reversion (core) +
-    CGO disposition, lead-lag sector spillover, 52-week high proximity,
-    Amihud illiquidity tilt, NRB macro overlay (extended signals).
-
     Returns (signals_list, regime_str).
     """
     today = pd.Timestamp(now_nst().date())
 
     regime = compute_market_regime(prices_df, today)
-    if use_regime_filter and regime == "bear":
-        logger.info("Bear regime detected — skipping signal generation")
-        return [], regime
+    # C31: bear allows up to 2 positions — do NOT skip signal generation in bear.
+    # The caller (LiveTrader) enforces regime_max_positions={bear: 2}.
+    logger.info("Regime detected: %s", regime)
 
-    # Regime confidence multiplier (matches generate_daily_signals.py logic)
-    regime_mult = {"bull": 1.15, "neutral": 0.90}.get(regime, 1.0)
-
-    # NRB monetary policy rate overlay
     nrb_mult = 1.0
     nrb_sector_adj: dict = {}
-    try:
-        nrb = get_nrb_policy_regime(db_path=str(get_db_path()))
-        nrb_mult = nrb["multiplier"]
-        nrb_sector_adj = nrb.get("sector_adjustments", {})
-        if nrb["cycle"] != "no_data":
-            logger.info(
-                "NRB policy: %s (rate=%.1f%%, %+.0fbps, mult=%.2f)",
-                nrb["cycle"].upper(), nrb["latest_rate_pct"] or 0,
-                nrb["rate_change_bps"], nrb_mult,
-            )
-    except Exception as e:
-        logger.warning("NRB policy regime failed (skipping): %s", e)
+    if "macro_remittance" in signal_types:
+        try:
+            nrb = get_nrb_policy_regime(db_path=str(get_db_path()))
+            nrb_mult = nrb["multiplier"]
+            nrb_sector_adj = nrb.get("sector_adjustments", {})
+            if nrb["cycle"] != "no_data":
+                logger.info(
+                    "NRB policy: %s (rate=%.1f%%, %+.0fbps, mult=%.2f)",
+                    nrb["cycle"].upper(), nrb["latest_rate_pct"] or 0,
+                    nrb["rate_change_bps"], nrb_mult,
+                )
+        except Exception as e:
+            logger.warning("NRB policy regime failed (skipping): %s", e)
 
     all_signals = []
 
-    # Core signals
+    # Core C31 signals
     if "momentum" in signal_types:
         try:
             all_signals.extend(generate_momentum_signals_at_date(prices_df, today))
@@ -1811,58 +2147,134 @@ def generate_signals(
             all_signals.extend(generate_quality_signals_at_date(prices_df, today))
         except Exception as e:
             logger.warning("Quality signals failed: %s", e)
+    if "mean_reversion" in signal_types:
+        try:
+            all_signals.extend(generate_mean_reversion_signals_at_date(prices_df, today))
+        except Exception as e:
+            logger.warning("Mean-reversion signals failed: %s", e)
+    if "xsec_momentum" in signal_types:
+        try:
+            all_signals.extend(generate_xsec_momentum_signals_at_date(prices_df, today))
+        except Exception as e:
+            logger.warning("XSec-momentum signals failed: %s", e)
+    if "quarterly_fundamental" in signal_types:
+        try:
+            import sqlite3
+            with sqlite3.connect(str(get_db_path())) as _conn:
+                qf_model = QuarterlyFundamentalModel.from_connection(_conn)
+                all_signals.extend(
+                    generate_quarterly_fundamental_signals_at_date(prices_df, today, qf_model)
+                )
+        except Exception as e:
+            logger.warning("Quarterly-fundamental signals failed (skipping): %s", e)
 
-    # Extended signals — all fail-open
-    try:
-        cgo = generate_cgo_signals_at_date(prices_df, today)
-        logger.info("CGO signals: %d", len(cgo))
-        all_signals.extend(cgo)
-    except Exception as e:
-        logger.warning("CGO signals failed (skipping): %s", e)
+    if "disposition" in signal_types:
+        try:
+            cgo = generate_cgo_signals_at_date(prices_df, today)
+            logger.info("CGO signals: %d", len(cgo))
+            all_signals.extend(cgo)
+        except Exception as e:
+            logger.warning("CGO signals failed (skipping): %s", e)
 
-    try:
-        ll = generate_sector_leadlag_signals_at_date(prices_df, today)
-        logger.info("Lead-lag signals: %d", len(ll))
-        all_signals.extend(ll)
-    except Exception as e:
-        logger.warning("Lead-lag signals failed (skipping): %s", e)
+        try:
+            logger.info("Lead-lag signals: %d", len(ll))
+            all_signals.extend(ll)
+        except Exception as e:
+            logger.warning("Lead-lag signals failed (skipping): %s", e)
 
-    try:
-        wk52 = generate_52wk_high_signals_at_date(prices_df, today)
-        logger.info("52Wk-high signals: %d", len(wk52))
-        all_signals.extend(wk52)
-    except Exception as e:
-        logger.warning("52Wk-high signals failed (skipping): %s", e)
+        try:
+            logger.info("PEAD signals: %d", len(pead))
+            all_signals.extend(pead)
+        except Exception as e:
+            logger.warning("Earnings-drift signals failed (skipping): %s", e)
 
-    # Amihud illiquidity tilt (overlay — modifies strength in-place)
-    try:
-        all_signals = apply_amihud_tilt(all_signals, prices_df, today)
-    except Exception as e:
-        logger.warning("Amihud tilt failed (skipping): %s", e)
+    if "52wk_high" in signal_types:
+        try:
+            wk52 = generate_52wk_high_signals_at_date(prices_df, today)
+            logger.info("52Wk-high signals: %d", len(wk52))
+            all_signals.extend(wk52)
+        except Exception as e:
+            logger.warning("52Wk-high signals failed (skipping): %s", e)
 
-    # Apply regime + NRB confidence multipliers
-    combined_mult = regime_mult * nrb_mult
-    for sig in all_signals:
-        sig.confidence = min(sig.confidence * combined_mult, 0.95)
-        sector = get_symbol_sector(sig.symbol)
-        sector_mult = nrb_sector_adj.get(sector, 1.0)
-        if abs(sector_mult - 1.0) > 1e-6:
-            sig.confidence = min(sig.confidence * sector_mult, 0.95)
+        try:
+            import sqlite3 as _sqlite3
+            with _sqlite3.connect(str(get_db_path())) as _itconn:
+                _bsumm = pd.read_sql_query(
+                    _itconn, parse_dates=["as_of_date"],
+                )
+            it_sigs = _gen_it(_bsumm, today)
+            logger.info("Informed-trading signals: %d", len(it_sigs))
+            all_signals.extend(it_sigs)
+        except Exception as e:
+            logger.warning("Informed-trading signals failed (skipping): %s", e)
+
+    if "smart_money" in signal_types:
+        try:
+            import sqlite3 as _sqlite3
+            with _sqlite3.connect(str(get_db_path())) as _smconn:
+                _bv2 = pd.read_sql_query(
+                    "SELECT symbol, as_of_date, hhi_buy, hhi_sell, circular_score, "
+                    "top_pair_pct, smart_money_score, pump_score FROM broker_signals_v2",
+                    _smconn, parse_dates=["as_of_date"],
+                )
+            sm_sigs = _gen_sm(_bv2, prices_df, today)
+            logger.info("Smart-money signals: %d", len(sm_sigs))
+            all_signals.extend(sm_sigs)
+        except Exception as e:
+            logger.warning("Smart-money signals failed (skipping): %s", e)
+
+    if "amihud_tilt" in signal_types and all_signals:
+        try:
+            all_signals = apply_amihud_tilt(all_signals, prices_df, today)
+        except Exception as e:
+            logger.warning("Amihud tilt failed (skipping): %s", e)
+
+    # C31 regime-adaptive signal weighting (matches simple_backtest._REGIME_WEIGHTS).
+    # Applied when regime != neutral (neutral = baseline weights, no adjustment).
+    _REGIME_WEIGHTS = {
+        SignalType.XSEC_MOMENTUM:         {"bull": 1.1, "neutral": 0.8, "bear": 0.3},
+        SignalType.MEAN_REVERSION:        {"bull": 0.5, "neutral": 1.0, "bear": 1.5},
+        SignalType.QUARTERLY_FUNDAMENTAL: {"bull": 0.9, "neutral": 1.2, "bear": 1.0},
+        SignalType.FUNDAMENTAL:           {"bull": 0.9, "neutral": 1.2, "bear": 1.0},
+        SignalType.MOMENTUM:              {"bull": 1.1, "neutral": 0.7, "bear": 0.3},
+        SignalType.LIQUIDITY:             {"bull": 1.0, "neutral": 1.0, "bear": 0.5},
+        SignalType.ANCHORING_52WK:        {"bull": 1.2, "neutral": 1.0, "bear": 0.5},
+        SignalType.LEAD_LAG:              {"bull": 1.1, "neutral": 0.9, "bear": 0.4},
+    }
+    if use_regime_filter and regime != "neutral":
+        for sig in all_signals:
+            wt = _REGIME_WEIGHTS.get(sig.signal_type, {}).get(regime, 1.0)
+            sig.strength *= wt
+
+    if "macro_remittance" in signal_types:
+        for sig in all_signals:
+            sector = get_symbol_sector(sig.symbol)
+            sector_mult = nrb_sector_adj.get(sector, 1.0) * nrb_mult
+            if abs(sector_mult - 1.0) > 1e-6:
+                sig.confidence = min(sig.confidence * sector_mult, 0.95)
+
+    # Keep live C31 stock-only: no benchmark or sector proxy entries in downstream state.
+    all_signals = [sig for sig in all_signals if is_tradeable_signal_symbol(sig.symbol)]
 
     # Rank by strength * confidence
     all_signals.sort(key=lambda s: s.strength * s.confidence, reverse=True)
 
-    results = []
+    results_by_symbol: Dict[str, Dict[str, Any]] = {}
     for sig in all_signals:
-        results.append({
-            "symbol": sig.symbol,
+        symbol = canonicalize_signal_symbol(sig.symbol)
+        row = {
+            "symbol": symbol,
             "signal_type": sig.signal_type.value,
             "strength": sig.strength,
             "confidence": sig.confidence,
             "reasoning": sig.reasoning,
             "score": sig.strength * sig.confidence,
-        })
+        }
+        current = results_by_symbol.get(symbol)
+        if current is None or float(row["score"]) > float(current.get("score") or 0.0):
+            results_by_symbol[symbol] = row
 
+    results = sorted(results_by_symbol.values(), key=lambda item: float(item["score"]), reverse=True)
     return results, regime
 
 
@@ -1893,6 +2305,8 @@ def fetch_prices_for_symbols(symbols: List[str]) -> Dict[str, Optional[float]]:
 def check_exits(
     positions: Dict[str, Position],
     holding_days: int,
+    stop_loss_pct: float,
+    trailing_stop_pct: float,
 ) -> List[Tuple[str, str]]:
     """Check all positions for risk-based exits.
 
@@ -1907,18 +2321,16 @@ def check_exits(
         reason = None
 
         # Hard stop loss
-        if price < pos.entry_price * (1 - HARD_STOP_LOSS_PCT):
+        if price < pos.entry_price * (1 - stop_loss_pct):
             reason = "stop_loss"
 
         # Trailing stop (only if we've moved above entry)
         if reason is None and pos.high_watermark > pos.entry_price:
-            trailing_stop_price = pos.high_watermark * (1 - TRAILING_STOP_PCT)
+            trailing_stop_price = pos.high_watermark * (1 - trailing_stop_pct)
             if price < trailing_stop_price:
                 reason = "trailing_stop"
 
-        # Take profit
-        if reason is None and price >= pos.entry_price * (1 + TAKE_PROFIT_PCT):
-            reason = "take_profit"
+        # C31: profit_target_pct=None — no take-profit exit, let positions run to 40d hold
 
         # Holding period expiry
         if reason is None:
@@ -1941,24 +2353,39 @@ class LiveTrader:
     """Core trading engine that ties everything together."""
 
     def __init__(self, args: argparse.Namespace):
-        self.capital = args.capital
-        self.signal_types = args.signals.split(",")
+        self.strategy_id = str(getattr(args, "strategy_id", "") or "").strip()
+        self.strategy_payload = strategy_registry.load_strategy(self.strategy_id) if self.strategy_id else None
+        self.strategy_config = copy.deepcopy((self.strategy_payload or {}).get("config") or {})
+        self.capital = float(self.strategy_config.get("initial_capital") or args.capital)
+        self.signal_types = list(self.strategy_config.get("signal_types") or args.signals.split(","))
         self.refresh_secs = args.refresh_secs
         self.no_telegram = args.no_telegram
         self.dry_run = args.dry_run
         self.continuous = args.continuous
         self.headless = args.headless
-        self.max_positions = MAX_POSITIONS
-        self.holding_days = RECOMMENDED_HOLDING_DAYS
-        self.execution_mode = str(getattr(args, "mode", "paper") or "paper").strip().lower()
-        self.live_settings = load_tms_settings()
+        self.use_regime_filter = bool(self.strategy_config.get("use_regime_filter", True))
+        self.stop_loss_pct = float(self.strategy_config.get("stop_loss_pct", HARD_STOP_LOSS_PCT))
+        self.trailing_stop_pct = float(self.strategy_config.get("trailing_stop_pct", TRAILING_STOP_PCT))
+        self.holding_days = int(self.strategy_config.get("holding_days", RECOMMENDED_HOLDING_DAYS))
+        self.regime_max_positions: Dict[str, int] = dict(
+            self.strategy_config.get("regime_max_positions") or {"bull": 5, "neutral": 4, "bear": 2}
+        )
+        self.max_positions = int(self.strategy_config.get("max_positions") or self.regime_max_positions.get("neutral", MAX_POSITIONS))
+        self.regime_sector_limits: Dict[str, float] = dict(
+            self.strategy_config.get("regime_sector_limits") or {"bull": 0.50, "neutral": 0.35, "bear": 0.25}
+        )
+        self.sector_limit = float(self.strategy_config.get("sector_limit") or self.regime_sector_limits.get("neutral", 0.35))
+        requested_execution_mode = str(getattr(args, "mode", "paper") or "paper").strip().lower()
+        self.execution_mode = "paper"
+        self.live_settings = PaperOnlyLiveSettings()
         self.live_settings.mode = self.execution_mode
-        self.live_settings.enabled = self.execution_mode in {"live", "dual", "shadow_live"} or self.live_settings.enabled
-        self.live_execution_enabled = bool(self.live_settings.enabled and self.execution_mode in {"live", "dual"})
-        self.dual_execution_mode = self.execution_mode == "dual"
-        self.shadow_live_mode = self.execution_mode == "shadow_live"
-        self.live_execution_service: Optional[LocalTMSExecutionService] = None
-        self.tms_monitor_enabled = _env_flag("NEPSE_TMS_MONITOR_ENABLED", True)
+        self.live_settings.enabled = False
+        self.live_execution_enabled = False
+        self.live_execution_service = None
+        self.dual_execution_mode = False
+        self.shadow_live_mode = False
+        self.requested_execution_mode = requested_execution_mode
+        self.tms_monitor_enabled = False
         self.tms_monitor_interval_secs = max(60, _env_int("NEPSE_TMS_MONITOR_INTERVAL_SECS", 300))
         self.tms_monitor_market_hours_only = _env_flag("NEPSE_TMS_MONITOR_MARKET_HOURS_ONLY", True)
         self.tms_browser: Optional[TMSBrowserExecutor] = None
@@ -1982,12 +2409,33 @@ class LiveTrader:
         self.state_file = str(state_path)
         self.signal_marker_dir = ensure_dir(portfolio_path.parent / "signal_markers")
 
+        if self.strategy_payload:
+            logger.info(
+                "Loaded strategy %s (%s) | signals=%s | hold=%sd | stop=%.2f%% | trail=%.2f%%",
+                self.strategy_id,
+                str(self.strategy_payload.get("name") or self.strategy_id),
+                ",".join(self.signal_types),
+                self.holding_days,
+                self.stop_loss_pct * 100.0,
+                self.trailing_stop_pct * 100.0,
+            )
+
         # Thread safety
         self._state_lock = threading.RLock()
 
         # State
         self.positions: Dict[str, Position] = load_portfolio(self.portfolio_file)
         self.runtime_state = load_runtime_state(self.state_file)
+        cgt_repair = reconcile_trade_log_cgt(self.trade_log_file)
+        if cgt_repair.get("updated_rows", 0):
+            rebuilt_cash = calculate_cash_from_trade_log(self.capital, self.trade_log_file)
+            if rebuilt_cash is not None:
+                self.runtime_state["cash"] = rebuilt_cash
+            logger.info(
+                "Reconciled CGT in %s sell rows; added NPR %.2f to recorded sell costs",
+                int(cgt_repair["updated_rows"]),
+                float(cgt_repair["added_cgt"]),
+            )
         self._hydrate_position_ltps()
         self.cash = self._calculate_initial_cash()
         self.signals_today: List[dict] = []
@@ -2098,8 +2546,6 @@ class LiveTrader:
             "tms_account",
             "tms_funds",
             "tms_holdings",
-            "tms_orders_daily",
-            "tms_orders_historic",
             "tms_trades_daily",
             "tms_trades_historic",
         )
@@ -2261,19 +2707,8 @@ class LiveTrader:
         return build_live_trader_control_plane(self)
 
     def _start_live_execution_service(self) -> None:
-        if not self.live_execution_enabled:
-            return
-        if self.live_execution_service is not None:
-            return
-        self.live_execution_service = LocalTMSExecutionService(
-            self.live_settings,
-            snapshot_provider=self._execution_snapshot,
-            result_callback=self._handle_live_execution_result,
-        )
-        if self.live_halt_level != "none":
-            self.live_execution_service.set_halt(self.live_halt_level, reason=self.live_freeze_reason)
-        self.live_execution_service.start()
-        self._log_activity(f"Live execution service ready ({self.execution_mode})")
+        """Live execution service not available in public release."""
+        return
 
     def _best_effort_limit_price(self, symbol: str, side: ExecutionAction, ltp: float) -> float:
         return estimate_execution_price(
@@ -2315,8 +2750,6 @@ class LiveTrader:
             "watchlist": "tms_watchlist",
             "funds": "tms_funds",
             "holdings": "tms_holdings",
-            "orders_daily": "tms_orders_daily",
-            "orders_historic": "tms_orders_historic",
             "trades_daily": "tms_trades_daily",
             "trades_historic": "tms_trades_historic",
         }
@@ -2500,77 +2933,19 @@ class LiveTrader:
         return format_live_order_summary_html(intent, result=result)
 
     def create_live_owner_buy_intent(self, symbol: str, shares: int, limit_price: float) -> Tuple[bool, str, Optional[ExecutionIntent]]:
-        result = self.get_control_plane().create_live_intent(
-            action=str(ExecutionAction.BUY),
-            symbol=str(symbol).upper(),
-            quantity=int(shares),
-            limit_price=float(limit_price),
-            mode=self.execution_mode,
-            source=str(ExecutionSource.OWNER_MANUAL),
-            reason="owner_manual_buy",
-            metadata={"interactive": True},
-            operator_surface="owner_manual",
-        )
-        intent = load_execution_intent(result.intent_id) if result.intent_id else None
-        return result.ok, result.message, intent
+        return False, "Only paper trading is supported in this build", None
 
     def create_live_owner_sell_intent(self, symbol: str, shares: int, limit_price: float) -> Tuple[bool, str, Optional[ExecutionIntent]]:
-        result = self.get_control_plane().create_live_intent(
-            action=str(ExecutionAction.SELL),
-            symbol=str(symbol).upper(),
-            quantity=int(shares),
-            limit_price=float(limit_price),
-            mode=self.execution_mode,
-            source=str(ExecutionSource.OWNER_MANUAL),
-            reason="owner_manual_sell",
-            metadata={"interactive": True},
-            operator_surface="owner_manual",
-        )
-        intent = load_execution_intent(result.intent_id) if result.intent_id else None
-        return result.ok, result.message, intent
+        return False, "Only paper trading is supported in this build", None
 
     def create_live_owner_cancel_intent(self, order_ref: str) -> Tuple[bool, str, Optional[ExecutionIntent]]:
-        result = self.get_control_plane().create_live_intent(
-            action=str(ExecutionAction.CANCEL),
-            symbol="ORDER",
-            quantity=0,
-            limit_price=None,
-            target_order_ref=str(order_ref),
-            mode=self.execution_mode,
-            source=str(ExecutionSource.OWNER_MANUAL),
-            reason="owner_manual_cancel",
-            metadata={"interactive": True},
-            operator_surface="owner_manual",
-        )
-        intent = load_execution_intent(result.intent_id) if result.intent_id else None
-        return result.ok, result.message, intent
+        return False, "Only paper trading is supported in this build", None
 
     def create_live_owner_modify_intent(self, order_ref: str, limit_price: float, quantity: Optional[int] = None) -> Tuple[bool, str, Optional[ExecutionIntent]]:
-        result = self.get_control_plane().create_live_intent(
-            action=str(ExecutionAction.MODIFY),
-            symbol="ORDER",
-            quantity=int(quantity or 0),
-            limit_price=float(limit_price),
-            target_order_ref=str(order_ref),
-            mode=self.execution_mode,
-            source=str(ExecutionSource.OWNER_MANUAL),
-            reason="owner_manual_modify",
-            metadata={"interactive": True},
-            operator_surface="owner_manual",
-        )
-        intent = load_execution_intent(result.intent_id) if result.intent_id else None
-        return result.ok, result.message, intent
+        return False, "Only paper trading is supported in this build", None
 
     def confirm_live_intent(self, intent_id: str, *, timeout: float = 90.0) -> Tuple[Optional[ExecutionIntent], Optional[ExecutionResult]]:
-        if self.execution_mode == "shadow_live":
-            result = self.get_control_plane().confirm_live_intent(intent_id, mode="shadow_live")
-            return load_execution_intent(intent_id), None if not result.ok else None
-        if self.live_execution_service is None:
-            return None, None
-        result = self.get_control_plane().confirm_live_intent(intent_id, mode=self.execution_mode)
-        payload = dict(result.payload or {})
-        live_result = payload.get("result")
-        return load_execution_intent(intent_id), ExecutionResult(**live_result) if isinstance(live_result, dict) else None
+        return None, None
 
     def list_live_orders(self, limit: int = 10) -> List[Dict[str, Any]]:
         return load_latest_live_orders(limit=limit)
@@ -2579,10 +2954,250 @@ class LiveTrader:
         return load_latest_live_positions(limit=limit)
 
     def reconcile_live_orders(self) -> Dict[str, Any]:
-        if self.live_execution_service is None:
-            return {"enabled": False, "detail": "Live execution disabled"}
-        result = self.get_control_plane().reconcile_live_state()
-        return dict(result.payload or {})
+        return {"enabled": False, "detail": "Only paper trading is supported in this build"}
+
+    def _open_owned_paper_orders(self, *, action: Optional[str] = None) -> List[Dict[str, Any]]:
+        action_filter = str(action or "").strip().upper()
+        orders = _load_json_list_file(TUI_PAPER_ORDERS_FILE)
+        result: List[Dict[str, Any]] = []
+        for order in orders:
+            row = dict(order or {})
+            if str(row.get("status") or "").upper() != "OPEN":
+                continue
+            if not _source_owned_by_live_trader(row.get("source")):
+                continue
+            if action_filter and str(row.get("action") or "").upper() != action_filter:
+                continue
+            result.append(row)
+        return result
+
+    def _has_open_owned_paper_order(self, *, symbol: str, action: str) -> bool:
+        sym = str(symbol).upper()
+        act = str(action).upper()
+        return any(
+            str(order.get("symbol") or "").upper() == sym and str(order.get("action") or "").upper() == act
+            for order in self._open_owned_paper_orders(action=act)
+        )
+
+    def _reserved_cash_for_open_paper_buys(self) -> float:
+        reserved = 0.0
+        for order in self._open_owned_paper_orders(action="BUY"):
+            price = float(order.get("price") or 0.0)
+            qty = int(order.get("qty") or 0)
+            if price <= 0 or qty <= 0:
+                continue
+            reserved += price * qty + NepseFees.total_fees(qty, price)
+        return reserved
+
+    def _has_trade_today(self, symbol: str, *, action: Optional[str] = None) -> bool:
+        return has_symbol_trade_on_day(
+            self.trade_log_file,
+            symbol,
+            action=action,
+            day=now_nst().date(),
+        )
+
+    def _same_day_buy_block_reason(self, symbol: str) -> Optional[str]:
+        sym = str(symbol or "").strip().upper()
+        if not sym:
+            return None
+        if LiveTrader._has_trade_today(self, sym, action="SELL"):
+            return f"NEPSE same-day rule: cannot buy {sym} after selling it today."
+        return None
+
+    def _same_day_sell_block_reason(self, symbol: str) -> Optional[str]:
+        sym = str(symbol or "").strip().upper()
+        if not sym:
+            return None
+        pos = self.positions.get(sym)
+        today_str = now_nst().strftime("%Y-%m-%d")
+        if pos is not None and str(pos.entry_date or "")[:10] == today_str:
+            return f"NEPSE same-day rule: cannot sell {sym} on the same day it was bought."
+        if LiveTrader._has_trade_today(self, sym, action="BUY"):
+            return f"NEPSE same-day rule: cannot sell {sym} after buying it today."
+        return None
+
+    def _match_owned_paper_orders(self) -> int:
+        snapshot = self._open_owned_paper_orders()
+        if not snapshot:
+            return 0
+
+        symbols = sorted({str(order.get("symbol") or "").upper() for order in snapshot if str(order.get("symbol") or "").strip()})
+        if not symbols:
+            return 0
+
+        ltps = fetch_prices_for_symbols(symbols)
+        processed = 0
+
+        def _mutate(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            nonlocal processed
+            ts = now_nst().strftime("%Y-%m-%d %H:%M:%S")
+            today_str = ts[:10]
+            history_rows: List[Dict[str, Any]] = []
+            keep_rows: List[Dict[str, Any]] = []
+
+            for raw in rows:
+                order = dict(raw or {})
+                if str(order.get("status") or "").upper() != "OPEN" or not _source_owned_by_live_trader(order.get("source")):
+                    keep_rows.append(order)
+                    continue
+
+                sym = str(order.get("symbol") or "").upper()
+                action = str(order.get("action") or "").upper()
+                qty = int(order.get("qty") or 0)
+                limit_price = float(order.get("price") or 0.0)
+                ltp = float(ltps.get(sym) or 0.0)
+                slip_pct = float(order.get("slippage_pct") or 0.0) / 100.0
+
+                if qty <= 0 or limit_price <= 0 or ltp <= 0:
+                    keep_rows.append(order)
+                    continue
+
+                matched = False
+                if action == "BUY" and ltp <= limit_price * (1 + slip_pct):
+                    matched = True
+                elif action == "SELL" and ltp >= limit_price * (1 - slip_pct):
+                    matched = True
+                if not matched:
+                    keep_rows.append(order)
+                    continue
+
+                fill_price = estimate_execution_price(
+                    float(ltp),
+                    is_buy=(action == "BUY"),
+                    max_price_deviation_pct=_price_deviation_pct(self),
+                )
+                history = dict(order)
+                history["updated_at"] = ts
+
+                if fill_price <= 0:
+                    history["status"] = "CANCELLED"
+                    history["fill_price"] = 0.0
+                    history["filled_qty"] = 0
+                    history["reason"] = "invalid_fill_price"
+                    history_rows.append(history)
+                    processed += 1
+                    continue
+
+                if action == "BUY":
+                    if sym in self.positions:
+                        history["status"] = "CANCELLED"
+                        history["fill_price"] = 0.0
+                        history["filled_qty"] = 0
+                        history["reason"] = "already_holding"
+                        history_rows.append(history)
+                        processed += 1
+                        continue
+                    if len(self.positions) >= self.max_positions:
+                        history["status"] = "CANCELLED"
+                        history["fill_price"] = 0.0
+                        history["filled_qty"] = 0
+                        history["reason"] = "max_positions"
+                        history_rows.append(history)
+                        processed += 1
+                        continue
+                    buy_fees = NepseFees.total_fees(qty, fill_price)
+                    total_cost = qty * fill_price + buy_fees
+                    if total_cost > self.cash:
+                        history["status"] = "CANCELLED"
+                        history["fill_price"] = 0.0
+                        history["filled_qty"] = 0
+                        history["reason"] = "insufficient_cash"
+                        history_rows.append(history)
+                        processed += 1
+                        continue
+
+                    self.cash -= total_cost
+                    ltp_context = get_latest_ltps_context()
+                    ltp_source_map = ltp_context.get("source_map") if isinstance(ltp_context, dict) else {}
+                    signal_type = str(order.get("reason") or order.get("source") or "paper_order")
+                    self.positions[sym] = Position(
+                        symbol=sym,
+                        shares=qty,
+                        entry_price=fill_price,
+                        entry_date=today_str,
+                        buy_fees=buy_fees,
+                        signal_type=signal_type,
+                        high_watermark=ltp,
+                        last_ltp=ltp,
+                        last_ltp_source=str(ltp_source_map.get(sym) or "paper_order_book"),
+                        last_ltp_time_utc=str((ltp_context.get("timestamp_map") or {}).get(sym) or self.last_price_snapshot_time_utc or ""),
+                    )
+                    append_trade_log(
+                        TradeRecord(
+                            date=today_str,
+                            action="BUY",
+                            symbol=sym,
+                            shares=qty,
+                            price=fill_price,
+                            fees=buy_fees,
+                            reason=signal_type,
+                        ),
+                        self.trade_log_file,
+                    )
+                    save_portfolio(self.positions, self.portfolio_file)
+                    self._persist_runtime_state()
+                    self._log_activity(
+                        f"PAPER BUY filled {sym} {qty} @ {fill_price:,.1f} (ticket {str(order.get('id') or '')[:8]}) [{signal_type}]"
+                    )
+                    history["status"] = "FILLED"
+                    history["fill_price"] = fill_price
+                    history["filled_qty"] = qty
+                    history_rows.append(history)
+                    processed += 1
+                    continue
+
+                if sym not in self.positions:
+                    history["status"] = "CANCELLED"
+                    history["fill_price"] = 0.0
+                    history["filled_qty"] = 0
+                    history["reason"] = "missing_position"
+                    history_rows.append(history)
+                    processed += 1
+                    continue
+
+                pos = self.positions[sym]
+                sell = _realized_sell_breakdown(pos, fill_price, exit_date_str=today_str)
+                total_sell_cost = sell["total_sell_cost"]
+                proceeds = sell["proceeds"]
+                net_pnl = sell["net_pnl"]
+                pnl_pct = sell["pnl_pct"]
+                self.consecutive_losses = self.consecutive_losses + 1 if net_pnl < 0 else 0
+                self.cash += proceeds
+                append_trade_log(
+                    TradeRecord(
+                        date=today_str,
+                        action="SELL",
+                        symbol=sym,
+                        shares=pos.shares,
+                        price=fill_price,
+                        fees=total_sell_cost,
+                        reason=str(order.get("reason") or "paper_exit"),
+                        pnl=round(net_pnl, 2),
+                        pnl_pct=round(pnl_pct, 4),
+                    ),
+                    self.trade_log_file,
+                )
+                del self.positions[sym]
+                save_portfolio(self.positions, self.portfolio_file)
+                self._persist_runtime_state()
+                self._log_activity(
+                    f"PAPER SELL filled {sym} {pos.shares} @ {fill_price:,.1f} (ticket {str(order.get('id') or '')[:8]}) "
+                    f"[{str(order.get('reason') or 'paper_exit')}] P&L: {net_pnl:+,.0f} ({pnl_pct:+.1%})"
+                )
+                history["status"] = "FILLED"
+                history["fill_price"] = fill_price
+                history["filled_qty"] = pos.shares
+                history_rows.append(history)
+                processed += 1
+
+            rows[:] = keep_rows
+            return history_rows
+
+        history_rows = _mutate_json_list_locked(TUI_PAPER_ORDERS_FILE, _mutate) or []
+        for row in history_rows:
+            _append_json_list_entry_locked(TUI_PAPER_ORDER_HISTORY_FILE, row)
+        return processed
 
     def _apply_paper_buy_fill(self, symbol: str, shares: int, ltp: float, *, signal_type: str) -> Tuple[bool, str]:
         if symbol in self.positions:
@@ -2592,7 +3207,8 @@ class LiveTrader:
         if total_cost > self.cash:
             return False, "Insufficient cash for mirrored paper fill."
         self.cash -= total_cost
-        today_str = now_nst().strftime("%Y-%m-%d")
+        placed_at = now_nst().strftime("%Y-%m-%d %H:%M:%S")
+        today_str = placed_at[:10]
         self.positions[symbol] = Position(
             symbol=symbol,
             shares=shares,
@@ -2619,19 +3235,32 @@ class LiveTrader:
         )
         save_portfolio(self.positions, self.portfolio_file)
         self._persist_runtime_state()
+        _record_tui_paper_order(
+            action="BUY",
+            symbol=symbol,
+            qty=shares,
+            limit_price=ltp,
+            status="FILLED",
+            fill_price=ltp,
+            created_at=placed_at,
+            updated_at=placed_at,
+            source="live_fill_paper_mirror",
+            reason=str(signal_type),
+        )
         return True, "paper mirrored"
 
     def _apply_paper_sell_fill(self, symbol: str, price: float, *, reason: str) -> Tuple[bool, str]:
         if symbol not in self.positions:
             return False, f"No paper position in {symbol}."
         pos = self.positions[symbol]
-        sell_fees = NepseFees.total_fees(pos.shares, price, is_sell=True)
-        proceeds = pos.shares * price - sell_fees
-        gross_pnl = (price - pos.entry_price) * pos.shares
-        net_pnl = gross_pnl - pos.buy_fees - sell_fees
-        pnl_pct = net_pnl / pos.cost_basis if pos.cost_basis > 0 else 0.0
+        placed_at = now_nst().strftime("%Y-%m-%d %H:%M:%S")
+        today_str = placed_at[:10]
+        sell = _realized_sell_breakdown(pos, price, exit_date_str=today_str)
+        total_sell_cost = sell["total_sell_cost"]
+        proceeds = sell["proceeds"]
+        net_pnl = sell["net_pnl"]
+        pnl_pct = sell["pnl_pct"]
         self.cash += proceeds
-        today_str = now_nst().strftime("%Y-%m-%d")
         append_trade_log(
             TradeRecord(
                 date=today_str,
@@ -2639,7 +3268,7 @@ class LiveTrader:
                 symbol=symbol,
                 shares=pos.shares,
                 price=price,
-                fees=sell_fees,
+                fees=total_sell_cost,
                 reason=reason,
                 pnl=round(net_pnl, 2),
                 pnl_pct=round(pnl_pct, 4),
@@ -2649,6 +3278,18 @@ class LiveTrader:
         del self.positions[symbol]
         save_portfolio(self.positions, self.portfolio_file)
         self._persist_runtime_state()
+        _record_tui_paper_order(
+            action="SELL",
+            symbol=symbol,
+            qty=pos.shares,
+            limit_price=price,
+            status="FILLED",
+            fill_price=price,
+            created_at=placed_at,
+            updated_at=placed_at,
+            source="live_fill_paper_mirror",
+            reason=str(reason),
+        )
         return True, "paper mirrored"
 
     def _handle_live_execution_result(self, intent: ExecutionIntent, result: ExecutionResult, origin: str) -> None:
@@ -2790,12 +3431,15 @@ class LiveTrader:
 
         self._log_activity("Generating signals...")
         signals, regime = generate_signals(
-            self.prices_df, self.signal_types, use_regime_filter=True
+            self.prices_df, self.signal_types, use_regime_filter=self.use_regime_filter
         )
         ranked_signals = self._rank_entry_signals(signals, as_of_date=now_nst().date())
 
         with self._state_lock:
             self.regime = regime
+            # C31: apply regime-dependent position cap and sector limit
+            self.max_positions = self.regime_max_positions.get(regime, self.regime_max_positions["neutral"])
+            self.sector_limit = self.regime_sector_limits.get(regime, self.regime_sector_limits["neutral"])
             self.signals_today = ranked_signals
             self.num_signals_today = len(ranked_signals)
             self.signals_generated_today = True
@@ -2843,19 +3487,28 @@ class LiveTrader:
             return
 
         ltp_map = fetch_prices_for_symbols([sig["symbol"] for sig in candidates])
-        ltp_context = get_latest_ltps_context()
-        ltp_source_map = ltp_context.get("source_map") if isinstance(ltp_context, dict) else {}
         live_specs: List[Dict[str, Any]] = []
 
         with self._state_lock:
-            slots = self.max_positions - len(self.positions)
+            open_owned_orders = getattr(self, "_open_owned_paper_orders", None)
+            has_open_owned_order = getattr(self, "_has_open_owned_paper_order", None)
+            reserved_cash_fn = getattr(self, "_reserved_cash_for_open_paper_buys", None)
+            outstanding_entry_orders = len(open_owned_orders(action="BUY")) if callable(open_owned_orders) else 0
+            slots = self.max_positions - len(self.positions) - outstanding_entry_orders
             executed = 0
+            reserved_cash = float(reserved_cash_fn()) if callable(reserved_cash_fn) else 0.0
 
             for sig in candidates:
                 if executed >= slots:
                     break
                 sym = sig["symbol"]
                 if sym in self.positions:
+                    continue
+                same_day_block = LiveTrader._same_day_buy_block_reason(self, sym)
+                if same_day_block:
+                    self._log_activity(f"Skip {sym}: {same_day_block}")
+                    continue
+                if callable(has_open_owned_order) and has_open_owned_order(symbol=sym, action="BUY"):
                     continue
 
                 ltp = ltp_map.get(sym)
@@ -2864,7 +3517,8 @@ class LiveTrader:
                     continue
 
                 per_position = self.capital / self.max_positions
-                available = min(per_position, self.cash * 0.95)
+                available_cash = max(0.0, self.cash - reserved_cash)
+                available = min(per_position, available_cash * 0.95)
                 if available < 10000:
                     continue
 
@@ -2903,7 +3557,8 @@ class LiveTrader:
                         p.market_value for s, p in self.positions.items()
                         if get_symbol_sector(s) == sym_sector
                     )
-                    if nav > 0 and (sector_value + shares * ltp) / nav > 0.35:
+                    sector_limit = float(getattr(self, "sector_limit", 0.35) or 0.35)
+                    if nav > 0 and (sector_value + shares * ltp) / nav > sector_limit:
                         self._log_activity(f"Skip {sym}: sector limit reached")
                         continue
 
@@ -2927,35 +3582,24 @@ class LiveTrader:
                     )
                     continue
 
-                self.cash -= total_cost
-                today_str = now_nst().strftime("%Y-%m-%d")
-                self.positions[sym] = Position(
-                    symbol=sym,
-                    shares=shares,
-                    entry_price=fill_price,
-                    entry_date=today_str,
-                    buy_fees=buy_fees,
-                    signal_type=sig["signal_type"],
-                    high_watermark=ltp,
-                    last_ltp=ltp,
-                    last_ltp_source=str(ltp_source_map.get(sym) or "unknown"),
-                    last_ltp_time_utc=str((ltp_context.get("timestamp_map") or {}).get(sym) or self.last_price_snapshot_time_utc or ""),
-                )
-                record = TradeRecord(
-                    date=today_str, action="BUY", symbol=sym,
-                    shares=shares, price=fill_price, fees=buy_fees,
-                    reason=sig["signal_type"],
-                )
                 try:
-                    append_trade_log(record, self.trade_log_file)
-                    save_portfolio(self.positions, self.portfolio_file)
-                    self._persist_runtime_state()
+                    order = _queue_tui_paper_order(
+                        action="BUY",
+                        symbol=sym,
+                        qty=shares,
+                        limit_price=fill_price,
+                        slippage_pct=_price_deviation_pct(self),
+                        source="strategy_paper",
+                        reason=str(sig["signal_type"]),
+                    )
+                    reserved_cash += total_cost
                 except Exception as e:
-                    logger.error(f"Failed to persist BUY {sym}: {e}")
+                    logger.error(f"Failed to queue BUY ticket for {sym}: {e}")
+                    continue
 
                 self._log_activity(
-                    f"BUY {sym} {shares} shares @ {fill_price:,.1f} "
-                    f"(LTP {ltp:,.1f}) [{sig['signal_type']}]"
+                    f"PAPER BUY queued {sym} {shares} shares @ {fill_price:,.1f} "
+                    f"(LTP {ltp:,.1f}) [{sig['signal_type']}] ticket={str(order.get('id') or '')[:8]}"
                 )
                 self._send_telegram(
                     "send_buy_signal",
@@ -3045,10 +3689,27 @@ class LiveTrader:
         """Check risk exits and execute sells."""
         live_exits: List[Dict[str, Any]] = []
         with self._state_lock:
-            exits = check_exits(self.positions, self.holding_days)
+            stop_loss_pct = float(getattr(self, "stop_loss_pct", HARD_STOP_LOSS_PCT) or HARD_STOP_LOSS_PCT)
+            trailing_stop_pct = float(getattr(self, "trailing_stop_pct", TRAILING_STOP_PCT) or TRAILING_STOP_PCT)
+            try:
+                exits = check_exits(
+                    self.positions,
+                    self.holding_days,
+                    stop_loss_pct,
+                    trailing_stop_pct,
+                )
+            except TypeError:
+                exits = check_exits(self.positions, self.holding_days)
+            has_open_owned_order = getattr(self, "_has_open_owned_paper_order", None)
 
             for sym, reason in exits:
                 pos = self.positions[sym]
+                same_day_block = LiveTrader._same_day_sell_block_reason(self, sym)
+                if same_day_block:
+                    self._log_activity(f"Skip exit {sym}: {same_day_block}")
+                    continue
+                if callable(has_open_owned_order) and has_open_owned_order(symbol=sym, action="SELL"):
+                    continue
                 ltp = pos.last_ltp
                 if ltp is None:
                     continue
@@ -3071,11 +3732,9 @@ class LiveTrader:
                     )
                     continue
 
-                sell_fees = NepseFees.total_fees(pos.shares, price, is_sell=True)
-                proceeds = pos.shares * price - sell_fees
-                gross_pnl = (price - pos.entry_price) * pos.shares
-                net_pnl = gross_pnl - pos.buy_fees - sell_fees
-                pnl_pct = net_pnl / pos.cost_basis if pos.cost_basis > 0 else 0.0
+                sell = _realized_sell_breakdown(pos, price)
+                net_pnl = sell["net_pnl"]
+                pnl_pct = sell["pnl_pct"]
 
                 # Track consecutive losses for kill switch
                 if net_pnl < 0:
@@ -3090,28 +3749,23 @@ class LiveTrader:
                     )
                     continue
 
-                self.cash += proceeds
-
-                today_str = now_nst().strftime("%Y-%m-%d")
-                record = TradeRecord(
-                    date=today_str, action="SELL", symbol=sym,
-                    shares=pos.shares, price=price, fees=sell_fees,
-                    reason=reason, pnl=round(net_pnl, 2),
-                    pnl_pct=round(pnl_pct, 4),
-                )
-                del self.positions[sym]
-                # Persist both files together
                 try:
-                    append_trade_log(record, self.trade_log_file)
-                    save_portfolio(self.positions, self.portfolio_file)
-                    self._persist_runtime_state()
+                    order = _queue_tui_paper_order(
+                        action="SELL",
+                        symbol=sym,
+                        qty=pos.shares,
+                        limit_price=price,
+                        slippage_pct=_price_deviation_pct(self),
+                        source="strategy_exit_paper",
+                        reason=str(reason),
+                    )
                 except Exception as e:
-                    logger.error(f"Failed to persist SELL {sym}: {e}")
+                    logger.error(f"Failed to queue SELL ticket for {sym}: {e}")
+                    continue
 
                 self._log_activity(
-                    f"SELL {sym} {pos.shares} shares @ {price:,.1f} "
-                    f"(LTP {ltp:,.1f}) "
-                    f"[{reason}] P&L: {net_pnl:+,.0f} ({pnl_pct:+.1%})"
+                    f"PAPER SELL queued {sym} {pos.shares} shares @ {price:,.1f} "
+                    f"(LTP {ltp:,.1f}) [{reason}] ticket={str(order.get('id') or '')[:8]}"
                 )
                 self._send_telegram(
                     "send_sell_signal",
@@ -3255,6 +3909,9 @@ class LiveTrader:
         """
         if symbol in self.positions:
             return False, f"Already holding {symbol}."
+        same_day_block = LiveTrader._same_day_buy_block_reason(self, symbol)
+        if same_day_block:
+            return False, same_day_block
 
         if len(self.positions) >= self.max_positions:
             return False, f"Max positions ({self.max_positions}) reached."
@@ -3277,7 +3934,8 @@ class LiveTrader:
             return False, "[DRY RUN] Buy not executed."
 
         self.cash -= total_cost
-        today_str = now_nst().strftime("%Y-%m-%d")
+        placed_at = now_nst().strftime("%Y-%m-%d %H:%M:%S")
+        today_str = placed_at[:10]
         ltp_context = get_latest_ltps_context()
         ltp_source_map = ltp_context.get("source_map") if isinstance(ltp_context, dict) else {}
 
@@ -3302,6 +3960,19 @@ class LiveTrader:
         append_trade_log(record, self.trade_log_file)
         save_portfolio(self.positions, self.portfolio_file)
         self._persist_runtime_state()
+        _record_tui_paper_order(
+            action="BUY",
+            symbol=symbol,
+            qty=shares,
+            limit_price=fill_price,
+            status="FILLED",
+            fill_price=fill_price,
+            created_at=placed_at,
+            updated_at=placed_at,
+            slippage_pct=_price_deviation_pct(self),
+            source="manual_paper",
+            reason="manual",
+        )
 
         self._log_activity(
             f"MANUAL BUY {symbol} {shares} shares @ {fill_price:,.1f} (LTP {ltp:,.1f})"
@@ -3328,6 +3999,9 @@ class LiveTrader:
         """
         if symbol not in self.positions:
             return False, f"No position in {symbol}."
+        same_day_block = LiveTrader._same_day_sell_block_reason(self, symbol)
+        if same_day_block:
+            return False, same_day_block
 
         pos = self.positions[symbol]
         ltp = pos.last_ltp
@@ -3347,19 +4021,21 @@ class LiveTrader:
         if self.dry_run:
             return False, "[DRY RUN] Sell not executed."
 
-        sell_fees = NepseFees.total_fees(pos.shares, price, is_sell=True)
-        proceeds = pos.shares * price - sell_fees
-        gross_pnl = (price - pos.entry_price) * pos.shares
-        net_pnl = gross_pnl - pos.buy_fees - sell_fees
-        pnl_pct = net_pnl / pos.cost_basis if pos.cost_basis > 0 else 0.0
+        sell = _realized_sell_breakdown(pos, price)
+        total_sell_cost = sell["total_sell_cost"]
+        proceeds = sell["proceeds"]
+        net_pnl = sell["net_pnl"]
+        pnl_pct = sell["pnl_pct"]
+        cgt = sell["cgt"]
         days = count_trading_days_since(pos.entry_date)
 
         self.cash += proceeds
 
-        today_str = now_nst().strftime("%Y-%m-%d")
+        placed_at = now_nst().strftime("%Y-%m-%d %H:%M:%S")
+        today_str = placed_at[:10]
         record = TradeRecord(
             date=today_str, action="SELL", symbol=symbol,
-            shares=pos.shares, price=price, fees=sell_fees,
+            shares=pos.shares, price=price, fees=total_sell_cost,
             reason="manual", pnl=round(net_pnl, 2),
             pnl_pct=round(pnl_pct, 4),
         )
@@ -3367,6 +4043,19 @@ class LiveTrader:
         del self.positions[symbol]
         save_portfolio(self.positions, self.portfolio_file)
         self._persist_runtime_state()
+        _record_tui_paper_order(
+            action="SELL",
+            symbol=symbol,
+            qty=pos.shares,
+            limit_price=price,
+            status="FILLED",
+            fill_price=price,
+            created_at=placed_at,
+            updated_at=placed_at,
+            slippage_pct=_price_deviation_pct(self),
+            source="manual_paper",
+            reason="manual",
+        )
 
         self._log_activity(
             f"MANUAL SELL {symbol} {pos.shares} shares @ {price:,.1f} "
@@ -3381,6 +4070,7 @@ class LiveTrader:
             f"  Symbol   : {symbol}\n"
             f"  Shares   : {pos.shares}\n"
             f"  Price    : NPR {price:,.1f}\n"
+            f"  CGT      : NPR {cgt:,.0f}\n"
             f"  Proceeds : NPR {proceeds:,.0f}\n"
             f"  P&L      : {emoji} NPR {net_pnl:+,.0f} ({pnl_pct:+.1%})\n"
             f"  Held     : {days} trading days\n"
@@ -3684,6 +4374,9 @@ class LiveTrader:
             if is_market_open() and (now_ts - last_refresh_ts) >= self.refresh_secs:
                 with self._state_lock:
                     self.refresh_prices()
+                    matched_orders = self._match_owned_paper_orders()
+                    if matched_orders:
+                        self._log_activity(f"Matched {matched_orders} queued paper order(s)")
                 self.check_and_execute_exits()
                 if self.live_execution_enabled and self.live_execution_service is not None:
                     try:
@@ -3785,8 +4478,9 @@ def parse_args() -> argparse.Namespace:
         help=f"Starting capital in NPR (default: {DEFAULT_CAPITAL:,.0f})",
     )
     parser.add_argument(
-        "--signals", type=str, default="volume,quality,low_vol",
-        help="Comma-separated signal types (default: volume,quality,low_vol)",
+        "--signals", type=str,
+        default="volume,quality,low_vol,mean_reversion,quarterly_fundamental,xsec_momentum",
+        help="Comma-separated signal types (default: C31 full 6-signal set)",
     )
     parser.add_argument(
         "--refresh-secs", type=int, default=300,
@@ -3809,8 +4503,12 @@ def parse_args() -> argparse.Namespace:
         help="Path to portfolio CSV file",
     )
     parser.add_argument(
-        "--mode", type=str, default="paper", choices=("paper", "live", "dual"),
-        help="Execution mode: paper, live, or dual (default: paper)",
+        "--strategy-id", type=str, default="",
+        help="Saved strategy id from the strategy registry to apply to this trader",
+    )
+    parser.add_argument(
+        "--mode", type=str, default="paper", choices=("paper",),
+        help="Execution mode: paper only",
     )
     return parser.parse_args()
 

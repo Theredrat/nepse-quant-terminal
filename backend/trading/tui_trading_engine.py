@@ -11,6 +11,7 @@ import logging
 import shutil
 import sqlite3
 import time
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
@@ -44,7 +45,9 @@ from backend.quant_pro.config import (
 )
 from backend.quant_pro.database import get_db_path
 from backend.quant_pro.nepse_calendar import is_trading_day
+from backend.quant_pro.signal_ranking import blocked_signal_symbol_reason, canonicalize_signal_symbol
 from backend.backtesting.simple_backtest import get_symbol_sector, load_all_prices
+from backend.trading.paper_execution import PaperExecutionService
 from validation.transaction_costs import TransactionCostModel as NepseFees
 
 logger = logging.getLogger(__name__)
@@ -55,14 +58,22 @@ logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = get_project_root(__file__)
 TRADING_RUNTIME_DIR = ensure_dir(get_trading_runtime_dir(__file__))
-PORTFOLIO_FILE = migrate_legacy_path(TRADING_RUNTIME_DIR / "tui_paper_portfolio.csv", [PROJECT_ROOT / "tui_paper_portfolio.csv"])
-TRADE_LOG_FILE = migrate_legacy_path(TRADING_RUNTIME_DIR / "tui_paper_trade_log.csv", [PROJECT_ROOT / "tui_paper_trade_log.csv"])
-NAV_LOG_FILE = migrate_legacy_path(TRADING_RUNTIME_DIR / "tui_paper_nav_log.csv", [PROJECT_ROOT / "tui_paper_nav_log.csv"])
-STATE_FILE = migrate_legacy_path(TRADING_RUNTIME_DIR / "tui_paper_state.json", [PROJECT_ROOT / "tui_paper_state.json"])
+PORTFOLIO_FILE = migrate_legacy_path(TRADING_RUNTIME_DIR / "paper_portfolio.csv", [PROJECT_ROOT / "paper_portfolio.csv"])
+TRADE_LOG_FILE = migrate_legacy_path(TRADING_RUNTIME_DIR / "paper_trade_log.csv", [PROJECT_ROOT / "paper_trade_log.csv"])
+NAV_LOG_FILE = migrate_legacy_path(TRADING_RUNTIME_DIR / "paper_nav_log.csv", [PROJECT_ROOT / "paper_nav_log.csv"])
+STATE_FILE = migrate_legacy_path(TRADING_RUNTIME_DIR / "paper_state.json", [PROJECT_ROOT / "paper_state.json"])
 LIVE_PORTFOLIO_FILE = migrate_legacy_path(TRADING_RUNTIME_DIR / "paper_portfolio.csv", [PROJECT_ROOT / "paper_portfolio.csv"])
 LIVE_TRADE_LOG_FILE = migrate_legacy_path(TRADING_RUNTIME_DIR / "paper_trade_log.csv", [PROJECT_ROOT / "paper_trade_log.csv"])
 LIVE_NAV_LOG_FILE = migrate_legacy_path(TRADING_RUNTIME_DIR / "paper_nav_log.csv", [PROJECT_ROOT / "paper_nav_log.csv"])
 LIVE_STATE_FILE = migrate_legacy_path(TRADING_RUNTIME_DIR / "paper_state.json", [PROJECT_ROOT / "paper_state.json"])
+
+
+def _positive_float(value) -> Optional[float]:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
 
 
 class TUITradingEngine:
@@ -81,18 +92,50 @@ class TUITradingEngine:
         max_positions: int = LONG_TERM_CONFIG["max_positions"],
         holding_days: int = LONG_TERM_CONFIG["holding_days"],
         sector_limit: float = LONG_TERM_CONFIG["sector_limit"],
-        refresh_secs: int = 300,
+        stop_loss_pct: float = LONG_TERM_CONFIG["stop_loss_pct"],
+        trailing_stop_pct: float = LONG_TERM_CONFIG["trailing_stop_pct"],
+        refresh_secs: int = 30,   # 30s polling — nepalstock cache refreshes every 15s
+        hedge_enabled: bool = True,
+        portfolio_file: Optional[Path] = None,
+        trade_log_file: Optional[Path] = None,
+        nav_log_file: Optional[Path] = None,
+        state_file: Optional[Path] = None,
+        account_id: str = "account_1",
+        strategy_id: str = "",
+        strategy_config: Optional[dict] = None,
         on_status: Optional[Callable[[str], None]] = None,
         on_activity: Optional[Callable[[str], None]] = None,
         on_portfolio_changed: Optional[Callable[[], None]] = None,
         on_agent_updated: Optional[Callable[[], None]] = None,
     ):
-        self.capital = capital
+        self.configured_capital = float(capital)
         self.signal_types = signal_types or list(LONG_TERM_CONFIG["signal_types"])
         self.max_positions = max_positions
         self.holding_days = holding_days
         self.sector_limit = sector_limit
+        self.stop_loss_pct = stop_loss_pct
+        self.trailing_stop_pct = trailing_stop_pct
         self.refresh_secs = refresh_secs
+        self._hedge_enabled = hedge_enabled
+
+        # Per-instance file paths (defaults to module globals for single-account usage)
+        self._portfolio_file = portfolio_file or PORTFOLIO_FILE
+        self._trade_log_file = trade_log_file or TRADE_LOG_FILE
+        self._nav_log_file = nav_log_file or NAV_LOG_FILE
+        self._state_file = state_file or STATE_FILE
+        self.account_id = str(account_id or "account_1")
+        self.strategy_id = str(strategy_id or "")
+        self.strategy_config = dict(strategy_config or {})
+        self.capital = self._resolve_account_capital(self.configured_capital)
+        self._active_run_id = ""
+        self._paper_execution = PaperExecutionService(
+            self.account_id,
+            account_dir=self._portfolio_file.parent,
+            initial_capital=self.capital,
+            strategy_id=self.strategy_id,
+            max_positions=self.max_positions,
+            sector_limit=self.sector_limit,
+        )
 
         # Callbacks (called from engine thread — caller wraps with call_from_thread)
         self._on_status = on_status or (lambda msg: None)
@@ -113,12 +156,18 @@ class TUITradingEngine:
         self._stop_flag: bool = False
         self._prices_df: Optional[pd.DataFrame] = None
         self._consecutive_losses: int = 0
-        self._daily_start_nav: float = capital
+        self._daily_start_nav: float = self.capital
+        self._peak_nav: float = self.capital
         self._halted: bool = False
         self._halt_reason: str = ""
 
         # Load persisted state
         self._load_state()
+        self._peak_nav = max(
+            float(self._peak_nav or 0.0),
+            float(self._daily_start_nav or 0.0),
+            self._calc_nav(),
+        )
 
     # ─── Status helpers ─────────────────────────────────────────────────────
 
@@ -154,25 +203,60 @@ class TUITradingEngine:
 
     # ─── Persistence ────────────────────────────────────────────────────────
 
+    def _resolve_account_capital(self, fallback: float) -> float:
+        """Use the account's seeded NAV when it differs from strategy defaults."""
+        if self._state_file.exists():
+            try:
+                state = json.loads(self._state_file.read_text())
+            except Exception:
+                state = {}
+            if isinstance(state, dict):
+                for key in ("initial_capital", "daily_start_nav"):
+                    value = _positive_float(state.get(key))
+                    if value is not None:
+                        return value
+
+                cash = _positive_float(state.get("cash"))
+                if cash is not None:
+                    try:
+                        has_positions = bool(load_portfolio(str(self._portfolio_file)))
+                        trade_log = pd.read_csv(self._trade_log_file) if self._trade_log_file.exists() else pd.DataFrame()
+                        has_trades = not trade_log.empty
+                    except Exception:
+                        has_positions = has_trades = False
+                    if not has_positions and not has_trades:
+                        return cash
+
+        if self._nav_log_file.exists():
+            try:
+                nav_log = pd.read_csv(self._nav_log_file)
+                if not nav_log.empty and "NAV" in nav_log.columns:
+                    value = _positive_float(nav_log.iloc[0].get("NAV"))
+                    if value is not None:
+                        return value
+            except Exception:
+                pass
+
+        return float(fallback)
+
     def _load_state(self) -> None:
         """Resume from saved state, or bootstrap from existing paper portfolio."""
-        # Check if TUI state files exist
-        if not PORTFOLIO_FILE.exists() and LIVE_PORTFOLIO_FILE.exists():
-            # First run: copy existing paper portfolio files over
+        # Bootstrap from live paper trader on first run (only for default/single-account path)
+        if (self._portfolio_file == PORTFOLIO_FILE
+                and not self._portfolio_file.exists()
+                and LIVE_PORTFOLIO_FILE.exists()):
             for src, dst in [
-                (LIVE_PORTFOLIO_FILE, PORTFOLIO_FILE),
-                (LIVE_TRADE_LOG_FILE, TRADE_LOG_FILE),
-                (LIVE_NAV_LOG_FILE, NAV_LOG_FILE),
+                (LIVE_PORTFOLIO_FILE, self._portfolio_file),
+                (LIVE_TRADE_LOG_FILE, self._trade_log_file),
+                (LIVE_NAV_LOG_FILE, self._nav_log_file),
             ]:
                 if Path(src).exists():
                     shutil.copy2(src, dst)
-
-            # Copy state JSON with adapted cash
             if LIVE_STATE_FILE.exists():
                 try:
                     s = json.loads(LIVE_STATE_FILE.read_text())
                     self.cash = s.get("cash", self.capital)
-                    STATE_FILE.write_text(json.dumps({
+                    self._state_file.write_text(json.dumps({
                         "cash": self.cash,
                         "last_signal_date": "",
                         "consecutive_losses": 0,
@@ -183,18 +267,34 @@ class TUITradingEngine:
                 except Exception:
                     pass
 
-        # Positions
-        self.positions = load_portfolio(str(PORTFOLIO_FILE))
+        # Positions from tui_paper_portfolio.csv
+        self.positions = load_portfolio(str(self._portfolio_file))
+
+        # Bootstrap from paper_portfolio.csv if tui portfolio is empty
+        _bootstrapped_from_paper = False
+        if not self.positions:
+            _paper_port = self._portfolio_file.parent / "paper_portfolio.csv"
+            if _paper_port.exists() and str(_paper_port) != str(self._portfolio_file):
+                _legacy = load_portfolio(str(_paper_port))
+                if _legacy:
+                    self.positions = _legacy
+                    _bootstrapped_from_paper = True
+                    self._log(f"Bootstrapped {len(self.positions)} positions from paper_portfolio.csv")
 
         # State JSON
-        p = STATE_FILE
-        if p.exists():
+        if self._state_file.exists():
             try:
-                s = json.loads(p.read_text())
+                s = json.loads(self._state_file.read_text())
                 self.cash = s.get("cash", self.capital)
                 self._last_signal_date = s.get("last_signal_date", "")
                 self._consecutive_losses = s.get("consecutive_losses", 0)
                 self._daily_start_nav = s.get("daily_start_nav", self.capital)
+                self._peak_nav = s.get("peak_nav", self._daily_start_nav or self.capital)
+                if (
+                    float(self._peak_nav or 0.0) == self.configured_capital
+                    and self.configured_capital > self.capital
+                ):
+                    self._peak_nav = max(float(self._daily_start_nav or 0.0), self._calc_nav(), self.capital)
                 self._eod_logged_date = s.get("eod_logged_date", "")
             except Exception:
                 pass
@@ -202,18 +302,43 @@ class TUITradingEngine:
             # Fresh start
             self.cash = self.capital
 
+        # If bootstrapped from paper_portfolio.csv, use paper_state.json for accurate cash
+        if _bootstrapped_from_paper:
+            _paper_state = self._state_file.parent / "paper_state.json"
+            if _paper_state.exists():
+                try:
+                    _ps = json.loads(_paper_state.read_text())
+                    _cash_val = float(_ps.get("cash", 0))
+                    if _cash_val > 0:
+                        self.cash = _cash_val
+                        _pos_value = sum(
+                            p.shares * (p.last_ltp or p.entry_price)
+                            for p in self.positions.values()
+                        )
+                        self._daily_start_nav = self.cash + _pos_value
+                except Exception:
+                    pass
+
     def _persist_state(self) -> None:
         """Save portfolio + state to disk."""
-        save_portfolio(self.positions, str(PORTFOLIO_FILE))
+        save_portfolio(self.positions, str(self._portfolio_file))
         state = {
             "cash": round(self.cash, 2),
+            "initial_capital": round(self.capital, 2),
             "last_signal_date": self._last_signal_date,
             "consecutive_losses": self._consecutive_losses,
             "daily_start_nav": round(self._daily_start_nav, 2),
+            "peak_nav": round(max(float(self._peak_nav or 0.0), self._calc_nav()), 2),
             "eod_logged_date": self._eod_logged_date,
             "timestamp": time.time(),
         }
-        STATE_FILE.write_text(json.dumps(state, indent=2))
+        self._state_file.write_text(json.dumps(state, indent=2))
+
+    def _sync_from_execution_service(self) -> None:
+        """Reload canonical account book after shared paper execution mutations."""
+        state = self._paper_execution.get_account_execution_state(self.account_id)
+        self.positions = dict(state.get("positions") or {})
+        self.cash = float(state.get("cash") or self.cash)
 
     # ─── Main loop ──────────────────────────────────────────────────────────
 
@@ -240,11 +365,11 @@ class TUITradingEngine:
                 self._log(f"Tick error: {e}")
                 logger.exception("TUI engine tick error")
 
-            # Sleep in small increments so stop() is responsive
-            for _ in range(10):
+            # Sleep in short increments so dashboard quit does not wait on a long polling sleep.
+            for _ in range(50):
                 if self._stop_flag:
                     break
-                time.sleep(1)
+                time.sleep(0.2)
 
         self._persist_state()
         self._log("Engine stopped")
@@ -321,8 +446,32 @@ class TUITradingEngine:
                 use_regime_filter=True,
             )
             self.regime = regime
+            blocked = [
+                sig for sig in signals
+                if blocked_signal_symbol_reason(sig.get("symbol"))
+            ]
+            for sig in blocked:
+                symbol = canonicalize_signal_symbol(sig.get("symbol"))
+                self._log(f"BLOCK {symbol}: {blocked_signal_symbol_reason(symbol)}")
+            signals = [
+                {**sig, "symbol": canonicalize_signal_symbol(sig.get("symbol"))}
+                for sig in signals
+                if not blocked_signal_symbol_reason(sig.get("symbol"))
+            ]
             self.signals_today = signals
-            self._log(f"{len(signals)} raw signals, regime={regime}")
+            self._active_run_id = f"{now_nst().strftime('%Y%m%d')}-{self.account_id}-{uuid.uuid4().hex[:8]}"
+            self._paper_execution.start_strategy_manifest(
+                run_id=self._active_run_id,
+                strategy_config={
+                    **self.strategy_config,
+                    "signal_types": self.signal_types,
+                    "max_positions": self.max_positions,
+                    "holding_days": self.holding_days,
+                    "sector_limit": self.sector_limit,
+                },
+                signals=signals,
+            )
+            self._log(f"{len(signals)} tradeable signals, regime={regime}")
         except Exception as e:
             self._log(f"Signal generation failed: {e}")
             self.signals_today = []
@@ -331,51 +480,16 @@ class TUITradingEngine:
     # ─── Agent filter ───────────────────────────────────────────────────────
 
     def _run_agent_filter(self, signals: List[dict]) -> List[dict]:
-        """Send signals to Claude Sonnet agent, return only APPROVED ones."""
+        """Pass all signals through — trades are driven purely by the quant algorithm.
+
+        Agent filtering via Claude API is intentionally disabled so the engine
+        works for everyone without requiring an ANTHROPIC_API_KEY.
+        """
         if not signals:
             self._log("No signals to review")
             return []
-
-        self._log(f"Sending {len(signals)} signals to agent for review...")
-
-        # Call agent analysis (this triggers a Sonnet subprocess call)
-        try:
-            from backend.agents.agent_analyst import analyze, check_trade_approval
-            analyze(force=True)
-            self._on_agent_updated()
-        except Exception as e:
-            self._log(f"Agent analysis failed: {e} — allowing all signals")
-            return signals
-
-        # Filter signals through agent verdicts
-        approved = []
-        rejected = []
-        held = []
-
-        try:
-            from backend.agents.agent_analyst import check_trade_approval
-            for sig in signals:
-                sym = sig["symbol"]
-                ok, reason = check_trade_approval(sym, "BUY")
-                if ok:
-                    sig["agent_reason"] = reason
-                    approved.append(sig)
-                    if "APPROVED" in reason.upper():
-                        held.append(None)  # just for counting
-                else:
-                    rejected.append(sig)
-        except Exception as e:
-            self._log(f"Agent filter error: {e} — allowing all")
-            return signals
-
-        n_approve = len(approved)
-        n_reject = len(rejected)
-        n_hold = len([s for s in approved if "HOLD" in s.get("agent_reason", "").upper()])
-
-        self._log(
-            f"Agent: {n_approve} APPROVE, {n_reject} REJECT, {n_hold} HOLD"
-        )
-        return approved
+        self._log(f"Quant signals approved: {len(signals)} (pure algo, no agent filter)")
+        return signals
 
     # ─── Buy execution ──────────────────────────────────────────────────────
 
@@ -386,17 +500,26 @@ class TUITradingEngine:
             self._log("No position slots available")
             return
 
+        tradeable_signals: List[dict] = []
+        for sig in signals:
+            sym = canonicalize_signal_symbol(sig.get("symbol"))
+            block_reason = blocked_signal_symbol_reason(sym)
+            if block_reason:
+                self._log(f"BLOCK {sym}: {block_reason}")
+                continue
+            tradeable_signals.append({**sig, "symbol": sym})
+
         # Fetch LTPs for all candidate symbols
-        candidate_syms = [s["symbol"] for s in signals if s["symbol"] not in self.positions]
+        candidate_syms = [s["symbol"] for s in tradeable_signals if s["symbol"] not in self.positions]
         if not candidate_syms:
             return
 
         ltps = fetch_prices_for_symbols(candidate_syms)
         today_str = now_nst().strftime("%Y-%m-%d")
-        per_position = self.capital / self.max_positions
+        per_position = self._compute_deployable_capital() / self.max_positions
         bought = 0
 
-        for sig in signals:
+        for sig in tradeable_signals:
             if bought >= available_slots:
                 break
 
@@ -442,32 +565,30 @@ class TUITradingEngine:
                 fees = NepseFees.total_fees(shares, ltp)
                 total_cost = shares * ltp + fees
 
-            # Execute buy
-            self.cash -= total_cost
-            self.positions[sym] = Position(
-                symbol=sym,
-                shares=shares,
-                entry_price=ltp,
-                entry_date=today_str,
-                buy_fees=fees,
-                signal_type=sig.get("signal_type", "unknown"),
-                high_watermark=ltp,
-                last_ltp=ltp,
+            submit = self._paper_execution.submit_order(
+                self.account_id,
+                "BUY",
+                sym,
+                shares,
+                float(ltp),
+                "strategy_paper",
+                str(sig.get("signal_type", "")),
+                strategy_id=self.strategy_id,
+                slippage_pct=2.0,
+                run_id=self._active_run_id,
             )
+            if not submit.ok:
+                self._log(f"REJECT {sym}: {submit.message}")
+                continue
 
-            # Log trade
-            append_trade_log(
-                TradeRecord(
-                    date=today_str,
-                    action="BUY",
-                    symbol=sym,
-                    shares=shares,
-                    price=ltp,
-                    fees=fees,
-                    reason=sig.get("signal_type", ""),
-                ),
-                TRADE_LOG_FILE,
+            match = self._paper_execution.match_open_orders(
+                self.account_id,
+                {sym: {"ltp": float(ltp), "source": "tui_strategy_autopilot", "age_seconds": 0}},
             )
+            self._sync_from_execution_service()
+            if not match.filled_orders:
+                self._log(f"ORDER OPEN {sym} {shares} @ {ltp:.1f} [{sig.get('signal_type', '')}]")
+                continue
 
             agent_note = sig.get("agent_reason", "")[:40]
             self._log(
@@ -500,7 +621,12 @@ class TUITradingEngine:
                     pos.high_watermark = ltp
 
         # Check exits
-        exits = check_exits(self.positions, self.holding_days)
+        exits = check_exits(
+            self.positions,
+            self.holding_days,
+            self.stop_loss_pct,
+            self.trailing_stop_pct,
+        )
         if not exits:
             self._persist_state()
             return
@@ -512,28 +638,40 @@ class TUITradingEngine:
                 continue
 
             sell_price = pos.last_ltp or pos.entry_price
-            sell_fees = NepseFees.total_fees(pos.shares, sell_price)
-            gross_proceeds = pos.shares * sell_price - sell_fees
-            pnl = gross_proceeds - pos.cost_basis
-            pnl_pct = pnl / pos.cost_basis * 100 if pos.cost_basis > 0 else 0
-
-            self.cash += gross_proceeds
-
-            # Log trade
-            append_trade_log(
-                TradeRecord(
-                    date=today_str,
-                    action="SELL",
-                    symbol=sym,
-                    shares=pos.shares,
-                    price=sell_price,
-                    fees=sell_fees,
-                    reason=reason,
-                    pnl=round(pnl, 2),
-                    pnl_pct=round(pnl_pct, 2),
-                ),
-                TRADE_LOG_FILE,
+            submit = self._paper_execution.submit_order(
+                self.account_id,
+                "SELL",
+                sym,
+                int(pos.shares),
+                float(sell_price),
+                "strategy_exit_paper",
+                str(reason),
+                strategy_id=self.strategy_id,
+                slippage_pct=2.0,
+                run_id=self._active_run_id,
             )
+            if not submit.ok:
+                self._log(f"REJECT EXIT {sym}: {submit.message}")
+                continue
+            match = self._paper_execution.match_open_orders(
+                self.account_id,
+                {sym: {"ltp": float(sell_price), "source": "tui_strategy_exit", "age_seconds": 0}},
+            )
+            self._sync_from_execution_service()
+            if not match.filled_orders:
+                self._log(f"EXIT ORDER OPEN {sym} {pos.shares} @ {sell_price:.1f} [{reason}]")
+                continue
+            filled = match.filled_orders[0]
+            pnl = 0.0
+            pnl_pct = 0.0
+            try:
+                trades = pd.read_csv(self._trade_log_file)
+                row = trades[(trades["Action"].astype(str).str.upper() == "SELL") & (trades["Symbol"].astype(str).str.upper() == sym)].tail(1)
+                if not row.empty:
+                    pnl = float(row.iloc[0].get("PnL", 0.0) or 0.0)
+                    pnl_pct = float(row.iloc[0].get("PnL_Pct", 0.0) or 0.0)
+            except Exception:
+                pass
 
             # Track consecutive losses
             if pnl < 0:
@@ -541,9 +679,9 @@ class TUITradingEngine:
             else:
                 self._consecutive_losses = 0
 
-            pnl_str = f"{pnl:+,.0f} ({pnl_pct:+.1f}%)"
-            self._log(f"SELL {sym} {pos.shares} @ {sell_price:.1f} [{reason}] P&L: {pnl_str}")
-            del self.positions[sym]
+            display_pnl_pct = pnl_pct * 100.0 if abs(pnl_pct) <= 1.0 else pnl_pct
+            pnl_str = f"{pnl:+,.0f} ({display_pnl_pct:+.1f}%)"
+            self._log(f"SELL {sym} {filled.filled_qty} @ {sell_price:.1f} [{reason}] P&L: {pnl_str}")
 
         self._persist_state()
         self._on_portfolio_changed()
@@ -553,6 +691,7 @@ class TUITradingEngine:
     def _check_kill_switch(self) -> None:
         """Halt trading if risk limits breached."""
         nav = self._calc_nav()
+        self._peak_nav = max(float(self._peak_nav or 0.0), nav, float(self._daily_start_nav or 0.0), self.capital)
 
         # Daily loss check (3%)
         if self._daily_start_nav > 0:
@@ -561,8 +700,8 @@ class TUITradingEngine:
                 self._halt("daily loss > 3%")
                 return
 
-        # Drawdown from capital (15%)
-        dd = (nav - self.capital) / self.capital
+        # Drawdown from the account peak NAV (15%).
+        dd = (nav - self._peak_nav) / self._peak_nav if self._peak_nav > 0 else 0.0
         if dd < -0.15:
             self._halt("drawdown > 15%")
             return
@@ -586,13 +725,41 @@ class TUITradingEngine:
         self._consecutive_losses = 0
         self._log("Trading resumed")
 
+    # ─── Hedge ──────────────────────────────────────────────────────────────
+
+    def set_hedge_enabled(self, enabled: bool) -> None:
+        """Toggle hedge capital reduction (thread-safe boolean write)."""
+        self._hedge_enabled = bool(enabled)
+
+    def _compute_deployable_capital(self) -> float:
+        """Return capital adjusted downward when gold regime signals risk-off.
+
+        risk_off  → deploy 90% (withhold 10% as gold buffer)
+        neutral   → deploy 97%
+        risk_on   → full capital
+        """
+        if not self._hedge_enabled:
+            return self.capital
+        try:
+            from backend.quant_pro.gold_hedge import get_gold_regime
+            regime = get_gold_regime(str(get_db_path()))
+            rname = regime.get("regime", "risk_on")
+            if rname == "risk_off":
+                self._log("Hedge: risk-off — deploying 90% of capital")
+                return self.capital * 0.90
+            elif rname == "neutral":
+                return self.capital * 0.97
+        except Exception:
+            pass
+        return self.capital
+
     # ─── EOD ────────────────────────────────────────────────────────────────
 
     def _log_eod(self, today_str: str) -> None:
         """Log end-of-day NAV snapshot."""
         nav = self._calc_nav()
         pos_value = self._calc_positions_value()
-        append_nav_log(today_str, self.cash, pos_value, nav, len(self.positions), NAV_LOG_FILE)
+        append_nav_log(today_str, self.cash, pos_value, nav, len(self.positions), self._nav_log_file)
         self._eod_logged_date = today_str
         self._persist_state()
 
@@ -647,17 +814,17 @@ class TUITradingEngine:
 
         # Load trade log for stats
         tl = pd.DataFrame()
-        if Path(TRADE_LOG_FILE).exists():
+        if self._trade_log_file.exists():
             try:
-                tl = pd.read_csv(TRADE_LOG_FILE)
+                tl = pd.read_csv(self._trade_log_file)
             except Exception:
                 pass
 
         # Load NAV log
         nl = pd.DataFrame()
-        if Path(NAV_LOG_FILE).exists():
+        if self._nav_log_file.exists():
             try:
-                nl = pd.read_csv(NAV_LOG_FILE)
+                nl = pd.read_csv(self._nav_log_file)
             except Exception:
                 pass
 
@@ -698,9 +865,9 @@ class TUITradingEngine:
 
     def get_trade_log(self) -> pd.DataFrame:
         """Return the trade log DataFrame."""
-        if Path(TRADE_LOG_FILE).exists():
+        if self._trade_log_file.exists():
             try:
-                return pd.read_csv(TRADE_LOG_FILE)
+                return pd.read_csv(self._trade_log_file)
             except Exception:
                 pass
         return pd.DataFrame()

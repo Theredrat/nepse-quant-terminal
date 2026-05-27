@@ -390,6 +390,89 @@ def init_db():
         '''
     )
 
+    cursor.execute(
+        '''
+        CREATE TABLE IF NOT EXISTS floorsheet_trades (
+            transact_no TEXT PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            as_of_date DATE NOT NULL,
+            buyer_broker INTEGER NOT NULL,
+            seller_broker INTEGER NOT NULL,
+            quantity INTEGER NOT NULL,
+            rate REAL NOT NULL,
+            amount REAL NOT NULL,
+            source_url TEXT,
+            scraped_at_utc TEXT NOT NULL
+        )
+        '''
+    )
+    cursor.execute(
+        '''
+        CREATE INDEX IF NOT EXISTS idx_floorsheet_symbol_date
+        ON floorsheet_trades(symbol, as_of_date)
+        '''
+    )
+    cursor.execute(
+        '''
+        CREATE INDEX IF NOT EXISTS idx_floorsheet_buyer
+        ON floorsheet_trades(symbol, as_of_date, buyer_broker)
+        '''
+    )
+    cursor.execute(
+        '''
+        CREATE INDEX IF NOT EXISTS idx_floorsheet_seller
+        ON floorsheet_trades(symbol, as_of_date, seller_broker)
+        '''
+    )
+
+    cursor.execute(
+        '''
+        CREATE TABLE IF NOT EXISTS broker_summary (
+            symbol TEXT NOT NULL,
+            as_of_date DATE NOT NULL,
+            broker_code INTEGER NOT NULL,
+            buy_qty INTEGER NOT NULL,
+            sell_qty INTEGER NOT NULL,
+            net_qty INTEGER NOT NULL,
+            buy_amount REAL NOT NULL,
+            sell_amount REAL NOT NULL,
+            net_amount REAL NOT NULL,
+            buy_trades INTEGER NOT NULL,
+            sell_trades INTEGER NOT NULL,
+            total_trades INTEGER NOT NULL,
+            PRIMARY KEY (symbol, as_of_date, broker_code)
+        )
+        '''
+    )
+
+    cursor.execute(
+        '''
+        CREATE TABLE IF NOT EXISTS broker_signal_scores (
+            symbol TEXT NOT NULL,
+            as_of_date DATE NOT NULL,
+            total_trades INTEGER NOT NULL,
+            total_qty INTEGER NOT NULL,
+            total_amount REAL NOT NULL,
+            top1_net_share REAL,
+            top5_net_share REAL,
+            hhi_net REAL,
+            accumulation_score REAL,
+            flags TEXT,
+            PRIMARY KEY (symbol, as_of_date)
+        )
+        '''
+    )
+    cursor.execute(
+        '''
+        CREATE TABLE IF NOT EXISTS floorsheet_scrape_log (
+            as_of_date     TEXT PRIMARY KEY,
+            total_rows     INTEGER NOT NULL,
+            total_pages    INTEGER NOT NULL,
+            scraped_at_utc TEXT NOT NULL
+        )
+        '''
+    )
+
     conn.commit()
     conn.close()
 

@@ -17,17 +17,31 @@ ACTIVE_AGENT_FILE = migrate_legacy_path(
 
 DEFAULT_GEMMA4_MODEL = "mlx-community/gemma-4-e4b-it-4bit"
 EXPERIMENTAL_GEMMA4_MODEL = "unsloth/gemma-4-E4B-it-UD-MLX-4bit"
+DEFAULT_AGENT_PRESET = "ollama"
+DEFAULT_OLLAMA_MODEL = "llama3"
+DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 
 AGENT_BACKEND_PRESETS: dict[str, dict[str, Any]] = {
+    "ollama": {
+        "backend": "ollama",
+        "label": "Ollama (local)",
+        "provider_label": "ollama",
+        "source_label": "local_ollama",
+        "model": DEFAULT_OLLAMA_MODEL,
+        "ollama_host": DEFAULT_OLLAMA_HOST,
+        "fallback_backend": "",
+        "trust_remote_code": False,
+        "description": "Default local agent backend served by Ollama.",
+    },
     "gemma4_mlx": {
         "backend": "gemma4_mlx",
         "label": "Gemma 4 MLX",
         "provider_label": "gemma4_mlx",
         "source_label": "local_gemma4_mlx",
         "model": DEFAULT_GEMMA4_MODEL,
-        "fallback_backend": "claude",
+        "fallback_backend": "",
         "trust_remote_code": False,
-        "description": "Local Gemma 4 on MLX. Primary built-in analyst for the TUI and MCP-triggered local runs.",
+        "description": "Optional local Gemma 4 on MLX for Apple Silicon.",
     },
     "gemma4_experimental": {
         "backend": "gemma4_mlx",
@@ -35,7 +49,7 @@ AGENT_BACKEND_PRESETS: dict[str, dict[str, Any]] = {
         "provider_label": "gemma4_mlx",
         "source_label": "local_gemma4_mlx",
         "model": EXPERIMENTAL_GEMMA4_MODEL,
-        "fallback_backend": "claude",
+        "fallback_backend": "",
         "trust_remote_code": False,
         "description": "Local Gemma 4 experimental MLX checkpoint.",
     },
@@ -71,18 +85,24 @@ def list_agent_backends() -> list[dict[str, Any]]:
 
 
 def _default_active_agent_config() -> dict[str, Any]:
-    payload = dict(AGENT_BACKEND_PRESETS["gemma4_mlx"])
-    payload["selected_preset"] = "gemma4_mlx"
+    payload = dict(AGENT_BACKEND_PRESETS[DEFAULT_AGENT_PRESET])
+    payload["selected_preset"] = DEFAULT_AGENT_PRESET
     payload["updated_at"] = time.time()
+    return payload
+
+
+def _write_active_agent_config(payload: dict[str, Any]) -> dict[str, Any]:
+    ensure_dir(ACTIVE_AGENT_FILE.parent)
+    ACTIVE_AGENT_FILE.write_text(json.dumps(payload, indent=2, default=str))
     return payload
 
 
 def _normalize_active_agent_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     payload = dict(raw or {})
-    selected_preset = str(payload.get("selected_preset") or payload.get("backend") or "gemma4_mlx").strip().lower()
+    selected_preset = str(payload.get("selected_preset") or payload.get("backend") or DEFAULT_AGENT_PRESET).strip().lower()
     base = dict(AGENT_BACKEND_PRESETS.get(selected_preset) or _default_active_agent_config())
 
-    backend = str(payload.get("backend") or base.get("backend") or "gemma4_mlx").strip().lower()
+    backend = str(payload.get("backend") or base.get("backend") or DEFAULT_AGENT_PRESET).strip().lower()
     normalized = {
         "selected_preset": selected_preset if selected_preset in AGENT_BACKEND_PRESETS else backend,
         "backend": backend,
@@ -100,19 +120,18 @@ def _normalize_active_agent_config(raw: dict[str, Any] | None) -> dict[str, Any]
 
 def load_active_agent_config() -> dict[str, Any]:
     if not ACTIVE_AGENT_FILE.exists():
-        return _default_active_agent_config()
+        return save_active_agent_config(_default_active_agent_config())
     try:
         payload = json.loads(ACTIVE_AGENT_FILE.read_text())
     except Exception:
-        return _default_active_agent_config()
+        return save_active_agent_config(_default_active_agent_config())
     return _normalize_active_agent_config(payload if isinstance(payload, dict) else {})
 
 
 def save_active_agent_config(config: dict[str, Any] | None) -> dict[str, Any]:
     normalized = _normalize_active_agent_config(config)
     normalized["updated_at"] = time.time()
-    ACTIVE_AGENT_FILE.write_text(json.dumps(normalized, indent=2, default=str))
-    return normalized
+    return _write_active_agent_config(normalized)
 
 
 def set_active_agent(

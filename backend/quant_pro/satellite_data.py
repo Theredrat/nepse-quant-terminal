@@ -31,14 +31,18 @@ from backend.quant_pro.database import get_db_path
 logger = logging.getLogger(__name__)
 
 # Hydropower basin -> ticker mapping (confirmed from NEPSE company prospectuses)
+# Basin geography:
+#   Koshi: eastern Nepal (Arun, Sun Koshi tributaries) — AKJCL (Arun Khola) added
+#   Gandaki: central Nepal (Kali Gandaki, Gandaki tributaries) — RIDI (Ridi Khola) added
+#   Karnali: western Nepal (Karnali, Bheri rivers)
 HYDRO_BASINS = {
     "koshi": {
-        "tickers": ["UPPER", "NHPC", "AKPL", "AHPC"],
-        "desc": "Koshi basin (eastern Nepal)",
+        "tickers": ["UPPER", "NHPC", "AKPL", "AHPC", "AKJCL"],
+        "desc": "Koshi basin (eastern Nepal) — includes Arun Khola (AKJCL)",
     },
     "gandaki": {
-        "tickers": ["KGAL", "BARUN", "CHL", "API"],
-        "desc": "Gandaki basin (central Nepal)",
+        "tickers": ["KGAL", "BARUN", "CHL", "API", "RIDI"],
+        "desc": "Gandaki basin (central Nepal) — includes Ridi Khola (RIDI)",
     },
     "karnali": {
         "tickers": ["SHPC", "UPCL"],

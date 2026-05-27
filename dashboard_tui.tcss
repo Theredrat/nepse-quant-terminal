@@ -126,7 +126,7 @@ Screen {
     background: #060b11;
 }
 
-#account-main {
+#strategies-main {
     height: 100%;
     width: 100%;
     overflow-y: auto;
@@ -137,25 +137,25 @@ Screen {
 #profile-pane {
     height: auto;
     background: #060b11;
-    padding: 0 0 1 0;
+    padding: 0;
 }
 
 #profile-summary {
     height: auto;
     color: #c4c8cd;
-    padding: 1 1 1 1;
+    padding: 0 1;
 }
 
 #dt-account-list {
-    height: 6;
-    margin: 0 1 1 1;
+    height: 10;
+    margin: 0 1 0 1;
     background: #060b11;
-    border: solid #3c434a;
+    border: none;
 }
 
 #profile-shortcuts {
     height: 1;
-    margin: 0 1 1 1;
+    margin: 0 1 0 1;
     background: #111315;
     color: #adb2b7;
     padding: 0 1;
@@ -164,18 +164,17 @@ Screen {
 #profile-primary-row,
 #profile-seed-row,
 #profile-actions {
-    height: auto;
-    min-height: 3;
-    margin: 0 1 1 1;
+    height: 3;
+    margin: 0 1 0 1;
     align: left middle;
-    background: #101214;
-    border: solid #4a4f54;
+    background: #0a0d11;
+    border: none;
     padding: 0 1;
 }
 
 #profile-primary-actions {
-    width: 28;
-    height: auto;
+    width: 26;
+    height: 1;
     align: right middle;
     background: transparent;
 }
@@ -187,8 +186,8 @@ Screen {
 }
 
 .profile-inline-input {
-    height: 3;
-    background: #171a1d;
+    height: 1;
+    background: #131619;
     color: #f1f3f4;
     border: none;
     margin-right: 1;
@@ -205,20 +204,33 @@ Screen {
 
 #profile-seed-row Input {
     width: 1fr;
-    height: 3;
-    background: #171a1d;
+    height: 1;
+    background: #131619;
     color: #f1f3f4;
     border: none;
     padding: 0 1;
 }
 
+.profile-btn-browse {
+    width: 11;
+    min-width: 11;
+    height: 1;
+    background: #1a2030;
+    color: #7eb8d4;
+    border: none;
+    text-style: bold;
+    content-align: center middle;
+    padding: 0 1;
+    margin-left: 1;
+}
+
 .profile-btn {
     width: 13;
     min-width: 13;
-    height: 3;
-    background: #5f656b;
-    color: #f7f8f8;
-    border: solid #979ca1;
+    height: 1;
+    background: #1a1c20;
+    color: #d8e4f2;
+    border: none;
     text-style: bold;
     content-align: center middle;
     padding: 0 1;
@@ -229,39 +241,201 @@ Screen {
 }
 
 .profile-btn-primary {
-    background: #747a80;
-    color: #ffffff;
-    border: solid #c0c4c8;
+    background: #282a2f;
+    color: #f2b94b;
+    border: none;
 }
 
 #profile-actions Button {
-    width: 16;
-    min-width: 16;
+    width: auto;
+    min-width: 14;
+    height: 1;
     margin-right: 1;
 }
 
 .profile-action-button {
-    background: #575d63;
-    color: #f2f4f5;
-    border: solid #92979c;
+    background: #1a1c20;
+    color: #d8e4f2;
+    border: none;
     text-style: bold;
     content-align: center middle;
     padding: 0 1;
 }
 
+.profile-btn-delete-account {
+    color: #c04040;
+}
+
+.strategy-btn-chart {
+    background: #1a1c20;
+    color: #d8e4f2;
+    border: none;
+    text-style: bold;
+    content-align: center middle;
+    padding: 0 1;
+    margin-left: 2;
+}
+
+.strategy-btn-delete {
+    background: #1a1c20;
+    color: #c04040;
+    border: none;
+    text-style: bold;
+    content-align: center middle;
+    padding: 0 1;
+}
+
+.strategy-btn-delete:hover {
+    background: #2a1010;
+    color: #e05050;
+}
+
 #account-help {
     height: auto;
-    margin: 0 1 1 1;
+    margin: 0 1 0 1;
     background: #111315;
     color: #a7adb4;
-    border: solid #4a4f54;
+    border: none;
     padding: 0 1;
 }
 
 #profile-note {
     height: auto;
     color: #a0a5aa;
-    padding: 0 1 1 1;
+    padding: 0 1;
+}
+
+#strategy-summary,
+#strategy-accounts-note,
+#strategy-backtest-summary {
+    height: auto;
+    color: #c4c8cd;
+    padding: 0 1;
+    margin: 0;
+}
+
+#strategies-split {
+    height: 1fr;
+    width: 100%;
+    overflow: hidden;
+}
+
+#strategies-left {
+    width: 2fr;
+    height: 100%;
+    overflow: hidden;
+    border-right: solid #4b5560;
+}
+
+#strategies-right {
+    width: 3fr;
+    height: 100%;
+    overflow-y: auto;
+    overflow-x: hidden;
+    background: #060b11;
+}
+
+#dt-strategy-list {
+    height: 8;
+    margin: 0 1 0 1;
+    background: #060b11;
+    border: none;
+}
+
+.strategy-row {
+    height: 3;
+    margin: 0 1 0 1;
+    align: left middle;
+    background: #0a0d11;
+    border: none;
+    padding: 0 1;
+}
+
+#strategy-description-row Input,
+#strategy-signals-row Input {
+    width: 1fr;
+}
+
+#strategy-inp-name {
+    width: 26;
+}
+
+#strategy-inp-description {
+    width: 1fr;
+}
+
+.strategy-small-input {
+    width: 10;
+}
+
+.strategy-date-input {
+    width: 16;
+}
+
+.strategy-capital-input {
+    width: 14;
+}
+
+/* ── Signal picker ────────────────────────────────────────────────────────── */
+#signal-picker-label {
+    margin-top: 1;
+    color: #a7adb4;
+}
+
+#signal-picker-area {
+    height: auto;
+    background: #0c0f11;
+    padding: 1 1 1 1;
+    width: 100%;
+}
+
+.signal-picker-row {
+    height: auto;
+    width: 100%;
+    margin: 0 0 1 0;
+    align: left middle;
+}
+
+.signal-btn {
+    height: 1;
+    width: 12;
+    background: #1a1c20;
+    color: #7a8898;
+    border: none;
+    text-style: bold;
+    content-align: center middle;
+    padding: 0 0;
+    margin-right: 1;
+}
+
+.signal-btn.signal-active {
+    background: #0e2018;
+    color: #2ebd6e;
+    border: none;
+    text-style: bold;
+}
+
+.signal-active-display {
+    height: 1;
+    width: 100%;
+    color: #3a7a52;
+    background: #0c0f11;
+}
+
+/* ── Strategy section separators ──────────────────────────────────────────── */
+#strategy-params-label {
+    margin-top: 1;
+    color: #a7adb4;
+}
+
+#strategy-backtest-label {
+    margin-top: 1;
+    color: #a7adb4;
+}
+
+/* ── Strategy action row button spacing ───────────────────────────────────── */
+#strategy-actions-row Button {
+    margin-right: 1;
 }
 
 #dt-account-list:focus,
@@ -269,38 +443,131 @@ Screen {
 #profile-seed-row:focus-within,
 #profile-actions:focus-within,
 #account-help:focus-within {
-    border: solid #7a7f84;
+    border: none;
 }
 
-#profile-pane Input:focus {
+#profile-pane Input:focus,
+#strategies-right Input:focus {
     background: #202428;
     color: #ffffff;
 }
 
 #profile-pane Button:focus {
-    background: #858b91;
-    color: #ffffff;
-    border: solid #d1d5d8;
+    background: #282a2f;
+    color: #fff6de;
+    border: none;
 }
 
 #port-bottom {
-    height: 2fr;
+    height: 4;
     width: 100%;
     overflow: hidden;
-    border-top: solid #4b5560;
+    border-top: solid #2a3038;
 }
 
-#port-trades {
-    width: 3fr;
+/* ── Hedge panel ────────────────────────────────────────────────────────── */
+#port-hedge {
+    width: 100%;
+    height: 4;
+    background: #05080c;
+}
+
+#hedge-header {
+    height: 1;
+    width: 100%;
+    align: left middle;
+    background: #05080c;
+}
+
+#hedge-title {
+    width: 1fr;
+}
+
+#hedge-toggle-btn {
+    height: 1;
+    width: 12;
+    min-width: 12;
+    border: none;
+    padding: 0 1;
+    text-style: bold;
+    content-align: center middle;
+}
+
+.hedge-btn-on {
+    background: #0e2018;
+    color: #2ebd6e;
+    border: none;
+}
+
+.hedge-btn-off {
+    background: #1a1c20;
+    color: #505a66;
+    border: none;
+}
+
+#hedge-info-bar {
+    height: 1;
+    width: 100%;
+    background: #070c12;
+    padding: 0;
+    color: #c4c8cd;
+}
+
+#hedge-rec-bar {
+    height: 1;
+    width: 100%;
+    background: #05080c;
+    padding: 0;
+    color: #7a8898;
+}
+
+#hedge-trade-bar {
+    height: 1;
+    width: 100%;
+    background: #040608;
+    padding: 0;
+    color: #505a66;
+}
+
+/* ── Account tab — trade history + engine log (moved from portfolio) ──── */
+#account-split {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+}
+
+#account-left {
+    width: 2fr;
     height: 100%;
     overflow: hidden;
     border-right: solid #4b5560;
+}
+
+#account-main {
+    height: 100%;
+    width: 100%;
+    overflow-y: auto;
+    overflow-x: hidden;
+    background: #060b11;
+}
+
+#account-right {
+    width: 3fr;
+    height: 100%;
+    overflow: hidden;
+}
+
+#port-trades {
+    width: 100%;
+    height: 4fr;
+    overflow: hidden;
+    border-bottom: solid #4b5560;
     background: #060b11;
 }
 
 #port-activity {
-    width: 2fr;
-    height: 100%;
+    width: 100%;
+    height: 1fr;
     overflow: hidden;
     background: #060b11;
 }
@@ -323,6 +590,52 @@ Screen {
     height: 3fr;
     width: 100%;
     overflow: hidden;
+}
+
+#signals-broker {
+    height: 2fr;
+    width: 100%;
+    overflow: hidden;
+    border-top: solid #4b5560;
+    background: #060b11;
+}
+
+#broker-floor-left {
+    width: 3fr;
+    height: 100%;
+    border-right: solid #2a3540;
+}
+
+#broker-floor-right {
+    width: 2fr;
+    height: 100%;
+}
+
+#broker-floor-header {
+    height: 1;
+    width: 100%;
+    align: left middle;
+}
+
+.bf-filter-btn {
+    height: 1;
+    min-width: 10;
+    border: none;
+    background: #1a2333;
+    color: #5a6e82;
+    padding: 0 1;
+    margin-left: 1;
+}
+
+.bf-filter-btn.bf-active {
+    background: #1d3550;
+    color: #7ab3d4;
+    text-style: bold;
+}
+
+.bf-filter-btn:hover {
+    background: #253545;
+    color: #a0c4dc;
 }
 
 #signals-bottom {
@@ -1029,22 +1342,22 @@ ModalDialog {
 }
 
 #order-form-bar {
-    height: 3;
+    height: 2;
     width: 100%;
     background: #090d12;
     layout: horizontal;
     border-bottom: solid #3f474f;
     padding: 0 1;
-    content-align: left middle;
+    align: left middle;
 }
 
 #order-form-bar .order-chip {
     height: 1;
     width: auto;
     padding: 0 1;
-    margin: 1 1 0 0;
-    background: #131920;
-    border: solid #313942;
+    margin: 0 1 0 0;
+    background: transparent;
+    border: none;
     color: #8f9cab;
     text-style: bold;
     content-align: center middle;
@@ -1061,7 +1374,7 @@ ModalDialog {
     color: #798695;
     text-style: bold;
     content-align: center middle;
-    margin: 1 0 0 0;
+    margin: 0;
 }
 
 #order-form-bar Button {
@@ -1072,7 +1385,7 @@ ModalDialog {
     border: none;
     text-style: bold;
     background: transparent;
-    margin: 1 1 0 0;
+    margin: 0 1 0 0;
 }
 
 #order-inp-symbol {
@@ -1095,7 +1408,7 @@ ModalDialog {
     border: none;
     padding: 0 1;
     content-align: left middle;
-    margin: 1 1 0 0;
+    margin: 0 1 0 0;
 }
 
 .order-sep {
@@ -1103,7 +1416,7 @@ ModalDialog {
     width: auto;
     color: #46515d;
     padding: 0 1;
-    margin: 1 0 0 0;
+    margin: 0;
     content-align: center middle;
 }
 
@@ -1329,4 +1642,30 @@ ModalDialog {
 
 #kalimati-macro-pane {
     margin-bottom: 1;
+}
+
+/* ── Signals header row (title + threshold input) ──────────────────── */
+#signals-header-row {
+    height: 1;
+    width: 100%;
+}
+
+#signals-header-row #signals-table-title {
+    width: 1fr;
+    height: 1;
+}
+
+.signal-threshold-input {
+    width: 18;
+    height: 1;
+    background: #101114;
+    color: #d8e4f2;
+    border: none;
+    padding: 0 1;
+}
+
+.signal-threshold-input:focus {
+    background: #15171a;
+    color: #fff6de;
+    border: none;
 }
