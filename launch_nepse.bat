@@ -60,6 +60,7 @@ rem   31. Unlock Dates          (upcoming lock-in expiry)
 echo.
 echo   --- SIGNAL TRACKER ---
 echo   32. Signal Performance  (accuracy by signal type)
+echo   33. Bloomberg TUI  (full terminal dashboard)
 echo.
 echo   --- REPORTS ---
 echo   19. Full Scan + Save Report
@@ -103,6 +104,7 @@ if "%choice%"=="29s" goto CUSTOM_VALUE
 if "%choice%"=="30" goto CUSTOM_FLOAT
 if "%choice%"=="31" python nepse_scanner.py --unlock upcoming & goto AGAIN
 if "%choice%"=="32" python signal_tracker.py --report & goto AGAIN
+if "%choice%"=="33" python dashboard_tui.py & goto AGAIN
 if "%choice%"=="0"  exit
 echo  Invalid choice, try again.
 pause
