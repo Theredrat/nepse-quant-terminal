@@ -60,6 +60,8 @@ def log_signals_raw(signals: list):
     if not signals:
         return
     log = load_log()
+    if isinstance(log, list):
+        log = {}
     today = datetime.now().strftime("%Y-%m-%d")
     new_count = 0
     for s in signals:
@@ -133,7 +135,7 @@ def update_results():
     log = load_log()
     today = datetime.now()
     updated = 0
-    for entry in log:
+    for entry in log.values():
         entry_date = datetime.strptime(entry["date"], "%Y-%m-%d")
         days_passed = (today - entry_date).days
         sym = entry["symbol"]
@@ -177,14 +179,14 @@ def show_report():
     # Group by signal type
     from collections import defaultdict
     stats = defaultdict(lambda: {"3d": [], "5d": [], "10d": []})
-    for e in log:
+    for e in log.values():
         sig = e["signal"]
-        if e["result_3d"] is not None:
-            stats[sig]["3d"].append(e["result_3d"])
-        if e["result_5d"] is not None:
-            stats[sig]["5d"].append(e["result_5d"])
-        if e["result_10d"] is not None:
-            stats[sig]["10d"].append(e["result_10d"])
+        if e.get("result_3d") is not None:
+            stats[sig]["3d"].append(e.get("result_3d"))
+        if e.get("result_5d") is not None:
+            stats[sig]["5d"].append(e.get("result_5d"))
+        if e.get("result_10d") is not None:
+            stats[sig]["10d"].append(e.get("result_10d"))
 
     table = Table(show_header=True, header_style="bold white")
     table.add_column("Signal Type", style="cyan", width=22)
@@ -230,13 +232,13 @@ def show_report():
         color = "green" if r >= WIN_TARGET else "red" if r < 0 else "yellow"
         return f"[{color}]{r:+.1f}%[/{color}]"
 
-    for e in reversed(log[-10:]):
+    for e in list(log.values())[-10:][::-1]:
         recent.add_row(
             e["date"], e["symbol"], e["signal"],
             f"Rs {e['entry_price']:.2f}",
-            fmt_result(e["result_3d"]),
-            fmt_result(e["result_5d"]),
-            fmt_result(e["result_10d"]),
+            fmt_result(e.get("result_3d")),
+            fmt_result(e.get("result_5d")),
+            fmt_result(e.get("result_10d")),
         )
     console.print(recent)
     console.print()
