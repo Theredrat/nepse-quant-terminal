@@ -5330,6 +5330,18 @@ class NepseDashboard(App):
             self._signals_last_strategy_name = strategy_name
             self._signals_last_count = len(sigs)
             self._signals_last_loaded_at = datetime.now().strftime("%H:%M:%S")
+            # Auto-log TUI signals for performance tracking
+            try:
+                from signal_tracker import log_signals_raw
+                log_signals_raw([{
+                    "symbol": str(s.get("symbol") or ""),
+                    "signal": str(s.get("signal_type") or "unknown"),
+                    "ltp": float(s.get("ltp") or s.get("ltp_anchor") or 0),
+                    "score": float(s.get("score") or 0),
+                    "reason": str(s.get("signal_type") or ""),
+                } for s in sigs if s.get("symbol")])
+            except Exception:
+                pass
             publish_agent_signal_snapshot(
                 {
                     "account_id": str(getattr(self, "_current_account_id", "account_1") or "account_1"),
