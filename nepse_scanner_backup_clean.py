@@ -1731,7 +1731,7 @@ def _get_returns(symbols, days=60):
     if df.empty:
         return {}
     pivot = df.pivot(index='date', columns='symbol', values='close')
-    returns = pivot.pct_change().dropna(how='all')
+    returns = pivot.pct_change(fill_method=None).dropna(how='all')
     result = {}
     for col in returns.columns:
         s = returns[col].dropna()
@@ -1917,7 +1917,7 @@ def analyze_corr():
         return
 
     pivot = df.pivot(index='date', columns='symbol', values='close')
-    returns = pivot.pct_change().dropna(how='all')
+    returns = pivot.pct_change(fill_method=None).dropna(how='all')
 
     # Build sector returns as mean of member stocks
     sectors = sorted(set(sector_map.values()))
@@ -1938,13 +1938,51 @@ def analyze_corr():
     sec_list = list(corr.columns)
 
     t = Table(box=box.SIMPLE_HEAD, show_lines=False)
-    t.add_column("Sector", style="bold white", min_width=22)
+    # Abbreviate sector names for column headers
+    abbrev = {
+        'Commercial Bank': 'ComBnk',
+        'Development Bank': 'DevBnk',
+        'Finance': 'Fin',
+        'Hotel & Tourism': 'Hotel',
+        'Hotels And Tourism': 'Hotel',
+        'Hydropower': 'Hydro',
+        'Hydro Power': 'Hydro',
+        'Investment': 'Invest',
+        'Life Insurance': 'LifeIns',
+        'Manufacturing and Processing': 'Manuf',
+        'Manufacturing And Processing': 'Manuf',
+        'Microfinance': 'MicroFin',
+        'Non-Life Insurance': 'NonLife',
+        'Non Life Insurance': 'NonLife',
+        'Others': 'Others',
+        'Trading': 'Trade',
+    }
+    t.add_column("Sector", style="bold white", min_width=20, no_wrap=True)
     for s in sec_list:
-        short = s[:10]
-        t.add_column(short, justify="right", min_width=6)
+        short = abbrev.get(s, s[:7])
+        t.add_column(short, justify="right", min_width=6, no_wrap=True)
 
+    # Short row labels
+    row_abbrev = {
+        'Commercial Bank': 'Commercial Bank',
+        'Development Bank': 'Development Bank',
+        'Finance': 'Finance',
+        'Hotel & Tourism': 'Hotel & Tourism',
+        'Hotels And Tourism': 'Hotel & Tourism',
+        'Hydropower': 'Hydropower',
+        'Hydro Power': 'Hydropower',
+        'Investment': 'Investment',
+        'Life Insurance': 'Life Insurance',
+        'Manufacturing and Processing': 'Manufacturing & Processing',
+        'Manufacturing And Processing': 'Manufacturing & Processing',
+        'Microfinance': 'Microfinance',
+        'Non-Life Insurance': 'Non-Life Insurance',
+        'Non Life Insurance': 'Non-Life Insurance',
+        'Others': 'Others',
+        'Trading': 'Trading',
+    }
     for a in sec_list:
-        row = [a]
+        row = [row_abbrev.get(a, a)]
         for b in sec_list:
             v = corr.loc[a, b]
             if v != v:  # NaN
