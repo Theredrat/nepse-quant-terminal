@@ -31,6 +31,43 @@ def get_current_price(symbol):
     except:
         return None
 
+def log_signals_raw(signals: list):
+    """Log signals from TUI (list of dicts with symbol, signal, ltp, score)"""
+    if not signals:
+        return
+    log = load_log()
+    today = datetime.now().strftime("%Y-%m-%d")
+    new_count = 0
+    for s in signals:
+        sym = s.get("symbol", "")
+        sig = s.get("signal", "unknown")
+        ltp = float(s.get("ltp", 0))
+        if not sym or not ltp:
+            continue
+        already = any(
+            e["symbol"] == sym and e["signal"] == sig and e["date"] == today
+            for e in log
+        )
+        if not already:
+            log.append({
+                "symbol": sym,
+                "signal": sig,
+                "date": today,
+                "entry_price": ltp,
+                "score": float(s.get("score", 0)),
+                "reason": s.get("reason", ""),
+                "result_3d": None,
+                "result_5d": None,
+                "result_10d": None,
+                "checked_3d": False,
+                "checked_5d": False,
+                "checked_10d": False,
+            })
+            new_count += 1
+    save_log(log)
+    if new_count:
+        console.print(f"  [dim]📝 TUI logged {new_count} new signals[/dim]")
+
 def log_signals(candidates):
     """Call this after run_signals() to record signals"""
     if candidates is None or candidates.empty:
