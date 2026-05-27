@@ -51,12 +51,12 @@ echo   25. Portfolio - Custom Stocks
 echo   26. Position Sizer  (volatility-based)
 echo.
 echo   --- FUNDAMENTAL ANALYSIS ---
-echo   27. Fundamental Snapshot  (any stock)
-echo   28. Earnings History      (any stock)
+rem   27. Fundamental Snapshot  (any stock)
+rem   28. Earnings History      (any stock)
 echo   29. Value Screen          (undervalued by sector - ALL)
 echo   29s. Value Screen         (specific sector)
-echo   30. Float / Ownership     (any stock)
-echo   31. Unlock Dates          (upcoming lock-in expiry)
+rem   30. Float / Ownership     (any stock)
+rem   31. Unlock Dates          (upcoming lock-in expiry)
 echo.
 echo   --- REPORTS ---
 echo   19. Full Scan + Save Report
