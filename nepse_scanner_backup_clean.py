@@ -2003,6 +2003,11 @@ def analyze_corr():
         "[red]Red > 0.85 (highly correlated)[/red]"
     )
     console.print()
+    console.print("  [bold white]Portfolio Diversification Guide:[/bold white]")
+    console.print("  [red]🔴 Red  > 0.85[/red]  — Move together always    → Avoid holding both, no diversification")
+    console.print("  [yellow]🟡 Yellow 0.60-0.85[/yellow] — Move together usually  → Partial diversification, acceptable")
+    console.print("  [green]🟢 Green < 0.60[/green]  — Move independently    → Best diversification, hold both")
+    console.print()
 def analyze_size(symbol, capital):
     """--size SYM AMOUNT — volatility-adjusted position sizing."""
     import sqlite3, math
