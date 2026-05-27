@@ -5347,8 +5347,8 @@ class NepseDashboard(App):
             try:
                 from signal_tracker import log_signals_raw
                 live_prices = {r.get("symbol",""):float(r.get("ltp",0)) for r in (self.md.live or [])}
-                from signal_tracker import get_entry_price
-                log_signals_raw([{
+                from signal_tracker import get_entry_price, log_signals
+                log_signals([{
                     "symbol": str(s.get("symbol") or ""),
                     "signal": str(s.get("signal_type") or "unknown"),
                     "ltp": get_entry_price(str(s.get("symbol") or ""), live_prices),
