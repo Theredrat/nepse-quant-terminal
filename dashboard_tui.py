@@ -1,12 +1,13 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
-NEPSE Bloomberg-Style Terminal Dashboard ΓÇö Textual TUI
+NEPSE Bloomberg-Style Terminal Dashboard — Textual TUI
 
 Run:  python3 dashboard_tui.py
-Keys: 1-9 tabs Γöé B buy Γöé S sell Γöé L lookup Γöé R refresh Γöé Q quit
+Keys: 1-9 tabs │ / search │ L lookup │ R refresh │ Q quit
 """
 from __future__ import annotations
 
+import copy
 import json as _json
 import logging
 import os
@@ -22,8 +23,16 @@ import uuid
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import urlparse, unquote
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+    import msvcrt
+else:
+    msvcrt = None
 
 import pandas as pd
 import requests as _requests
@@ -41,7 +50,7 @@ from textual.widgets.option_list import Option
 
 
 def _silence_tui_noisy_loggers() -> None:
-    """Keep transport-level request logs out of the TUI surface."""
+    """Keep background logger output from painting over the TUI."""
     noisy_loggers = [
         "httpx",
         "httpcore",
@@ -50,10 +59,26 @@ def _silence_tui_noisy_loggers() -> None:
         "httpcore.http2",
         "urllib3",
         "urllib3.connectionpool",
+        "backend",
+        "backend.backtesting.simple_backtest",
+        "backend.trading.live_trader",
+        "streamlit",
+        "streamlit.runtime",
+        "streamlit.runtime.caching",
+        "streamlit.runtime.caching.cache_data_api",
     ]
     for name in noisy_loggers:
         logger = logging.getLogger(name)
         logger.setLevel(logging.WARNING)
+        logger.propagate = False
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.WARNING)
+    for handler in list(root_logger.handlers):
+        try:
+            handler.setLevel(logging.WARNING)
+        except Exception:
+            pass
 
 
 _silence_tui_noisy_loggers()
@@ -62,7 +87,7 @@ _silence_tui_noisy_loggers()
 
 
 
-# ΓöÇΓöÇ Import data layer from existing dashboard.py ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+# ── Import data layer from existing dashboard.py ─────────────────────────────
 from apps.classic.dashboard import (
     MD, _db, _vol, _pct, _npr, load_port, save_port, exec_buy, exec_sell,
     AMBER, WHITE, DIM, LABEL, GAIN_HI, GAIN, LOSS_HI, LOSS, CYAN, YELLOW, PURPLE, BLUE,
@@ -80,16 +105,26 @@ from backend.agents.agent_analyst import (
     analyze as agent_analyze,
     append_external_agent_chat_message,
     build_algo_shortlist_snapshot,
+    publish_agent_signal_snapshot,
     check_trade_approval,
     load_agent_analysis,
     load_agent_archive_history,
     load_agent_history,
 )
-from backend.quant_pro.control_plane.command_service import build_tui_control_plane
+from backend.agents.runtime_config import (
+    ACTIVE_AGENT_FILE,
+    list_agent_backends,
+    load_active_agent_config,
+    set_active_agent,
+)
 from backend.quant_pro.stock_report import build_stock_report
-from backend.quant_pro.tms_audit import load_latest_tms_snapshot, save_tms_snapshot
 from backend.trading.tui_trading_engine import TUITradingEngine
+from backend.trading.paper_execution import PaperExecutionService
 from backend.market.kalimati_market import init_kalimati_db, refresh_kalimati, get_kalimati_display_rows
+from backend.quant_pro.data_scrapers.gold_silver_ingestion import (
+    store_nepal_metals_prices,
+    get_latest_nepal_metals,
+)
 from backend.trading.live_trader import (
     NAV_LOG_COLS,
     PORTFOLIO_COLS,
@@ -98,11 +133,41 @@ from backend.trading.live_trader import (
     load_runtime_state,
     save_runtime_state,
 )
+from backend.trading import strategy_registry
 
 INITIAL_CAPITAL = 1_000_000.0
+MAX_ACCOUNTS = 5
 PROJECT_ROOT = get_project_root(__file__)
+
+# ── Signal picker definitions (label, signal_type) ────────────────────────────
+_SIGNAL_DEFS: list[tuple[str, str]] = [
+    # Row 1 — factor / fundamental
+    ("QUALITY",    "quality"),
+    ("LOW VOL",    "low_vol"),
+    ("XSEC MOM",  "xsec_momentum"),
+    ("QF",         "quarterly_fundamental"),
+    ("MEAN REV",  "mean_reversion"),
+    # Row 2 — price / technical
+    ("VOLUME",     "volume"),
+    ("MOMENTUM",  "momentum"),
+    ("ACCUM",     "accumulation"),
+    ("52W HIGH",  "52wk_high"),
+    ("VAL BNCE",  "value_bounce"),
+    # Row 3 — alternative / microstructure / event
+    ("CORP ACT",  "corp_action"),
+    ("SMART $",   "smart_money"),
+    ("SATELLITE", "satellite_hydro"),
+]
+_SIG_ID_PREFIX = "sig-btn-"
+
+def _sig_btn_id(sig_type: str) -> str:
+    return _SIG_ID_PREFIX + sig_type.replace("_", "-")
+
+def _sig_type_from_id(btn_id: str) -> str:
+    return btn_id[len(_SIG_ID_PREFIX):].replace("-", "_")
 RUNTIME_DIR = ensure_dir(get_runtime_dir(__file__))
 TRADING_RUNTIME_DIR = ensure_dir(get_trading_runtime_dir(__file__))
+HEDGE_TRADE_LOG_FILE = TRADING_RUNTIME_DIR / "hedge_trade_log.json"
 WATCHLIST_FILE = migrate_legacy_path(RUNTIME_DIR / "watchlist.json", [PROJECT_ROOT / "watchlist.json"])
 PAPER_NAV_LOG_FILE = migrate_legacy_path(TRADING_RUNTIME_DIR / "paper_nav_log.csv", [PROJECT_ROOT / "paper_nav_log.csv"])
 PAPER_TRADE_LOG_FILE = migrate_legacy_path(TRADING_RUNTIME_DIR / "paper_trade_log.csv", [PROJECT_ROOT / "paper_trade_log.csv"])
@@ -128,6 +193,10 @@ PAPER_PROFILE_FILE = TRADING_RUNTIME_DIR / "paper_profile.json"
 PAPER_IMPORT_BACKUP_DIR = RUNTIME_DIR / "imports"
 PAPER_ACCOUNTS_DIR = RUNTIME_DIR / "accounts"
 PAPER_ACCOUNTS_REGISTRY_FILE = PAPER_ACCOUNTS_DIR / "registry.json"
+MACRO_INDICATOR_HISTORY_FILE = migrate_legacy_path(
+    RUNTIME_DIR / "macro_indicator_history.json",
+    [PROJECT_ROOT / "macro_indicator_history.json"],
+)
 TUI_PAPER_ORDERS_FILE = migrate_legacy_path(TRADING_RUNTIME_DIR / "tui_paper_orders.json", [PROJECT_ROOT / "tui_paper_orders.json"])
 TUI_PAPER_ORDER_HISTORY_FILE = migrate_legacy_path(
     TRADING_RUNTIME_DIR / "tui_paper_order_history.json",
@@ -163,11 +232,23 @@ def _split_agent_messages_by_cutoff(items: list[dict] | None, cutoff_ts: float) 
             hidden.append(item)
     return visible, hidden
 
-# ΓöÇΓöÇ Default watchlist (NEPSE blue chips) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+# ── Default watchlist (NEPSE blue chips) ────────────────────────────────────
 DEFAULT_WATCHLIST = [
     "NABIL", "NLIC", "UPPER", "CHDC", "SBL", "SHIVM", "NRIC",
     "NTC", "NICA", "GBIME", "KBL", "MEGA", "PRVU", "SBI",
 ]
+
+STRATEGY_DISPLAY_NAMES = {
+    "default_c5": "C5 Baseline",
+    "temp_forward_winner": "TFW",
+    "strat_3_p2r25": "P2R25",
+    "strat_4_p3r32": "P3R32",
+    "strat_6_r83": "R83",
+    "strat_7_h53": "H53",
+    
+    
+    
+}
 
 _TMS_AUDIT_SNAPSHOT_MAP = {
     "health": "tms_health",
@@ -218,6 +299,21 @@ def _watchlist_entry_key(item: dict) -> str:
     return str((item or {}).get("key") or "")
 
 
+def _dedupe_watchlist_entries(entries: list[dict]) -> list[dict]:
+    deduped: list[dict] = []
+    seen: set[str] = set()
+    for item in entries or []:
+        normalized = _normalize_watchlist_entry(item)
+        if not normalized:
+            continue
+        key = _watchlist_entry_key(normalized)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(normalized)
+    return deduped
+
+
 def _build_sell_holdings_map(positions: list[dict] | None) -> dict[str, int]:
     holdings: dict[str, int] = {}
     for pos in positions or []:
@@ -253,7 +349,7 @@ def _resolve_sell_qty(symbol: str, raw_shares: str, holdings: dict[str, int]) ->
     except ValueError as exc:
         raise ValueError("Shares must be a number or 'all'") from exc
     if qty <= 0 or qty > total:
-        raise ValueError(f"Invalid qty ΓÇö holding {total}")
+        raise ValueError(f"Invalid qty — holding {total}")
     return qty
 
 
@@ -262,15 +358,31 @@ def _load_watchlist() -> list[dict]:
         try:
             data = _json.loads(WATCHLIST_FILE.read_text())
             if isinstance(data, list) and data:
-                rows = [_normalize_watchlist_entry(item) for item in data]
-                return [row for row in rows if row]
+                rows = _dedupe_watchlist_entries(data)
+                if len(rows) != len(data):
+                    _save_watchlist(rows)
+                return rows
         except Exception:
             pass
-    return [_stock_watchlist_entry(sym) for sym in DEFAULT_WATCHLIST]
+    return _dedupe_watchlist_entries([_stock_watchlist_entry(sym) for sym in DEFAULT_WATCHLIST])
 
 def _save_watchlist(entries: list[dict]) -> None:
     ensure_dir(WATCHLIST_FILE.parent)
-    WATCHLIST_FILE.write_text(_json.dumps(entries, indent=2))
+    WATCHLIST_FILE.write_text(_json.dumps(_dedupe_watchlist_entries(entries), indent=2))
+
+
+def _dedupe_symbol_rows(rows: list | tuple) -> list:
+    """Return one row per symbol, keeping the last row seen for duplicate symbols."""
+    deduped: dict[str, Any] = {}
+    for row in rows or []:
+        try:
+            symbol = str(row[0] or "").strip().upper()
+        except Exception:
+            continue
+        if not symbol:
+            continue
+        deduped[symbol] = row
+    return list(deduped.values())
 
 
 def _ensure_csv_file(path: Path, columns: list[str]) -> None:
@@ -298,6 +410,97 @@ def _ensure_paper_runtime_files() -> None:
             str(TUI_PAPER_STATE_FILE),
             {"cash": float(INITIAL_CAPITAL), "daily_start_nav": float(INITIAL_CAPITAL)},
         )
+
+
+def _paper_filled_orders_for_day(order_history: list[dict] | None, day: str) -> list[dict]:
+    filled: list[dict] = []
+    for order in list(order_history or []):
+        row = dict(order or {})
+        if str(row.get("status") or "").upper() != "FILLED":
+            continue
+        stamp = str(row.get("updated_at") or row.get("created_at") or "")
+        if stamp[:10] != str(day):
+            continue
+        filled.append(row)
+    filled.sort(key=lambda row: str(row.get("updated_at") or row.get("created_at") or ""))
+    return filled
+
+
+def _lock_file_exclusive(handle) -> None:
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        return
+    if msvcrt is not None:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        return
+    raise RuntimeError("No file-lock implementation available on this platform")
+
+
+def _unlock_file(handle) -> None:
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return
+    if msvcrt is not None:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+    raise RuntimeError("No file-lock implementation available on this platform")
+
+
+def _write_json_locked(path: Path, payload: Any) -> None:
+    ensure_dir(path.parent)
+    with path.open("a+", encoding="utf-8") as handle:
+        _lock_file_exclusive(handle)
+        try:
+            handle.seek(0)
+            handle.truncate()
+            _json.dump(payload, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        finally:
+            _unlock_file(handle)
+
+
+def _load_macro_indicator_history() -> dict[str, dict]:
+    path = Path(MACRO_INDICATOR_HISTORY_FILE)
+    if not path.exists():
+        return {}
+    try:
+        payload = _json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _save_macro_indicator_history(payload: dict[str, dict]) -> None:
+    _write_json_locked(Path(MACRO_INDICATOR_HISTORY_FILE), payload)
+
+
+def _apply_indicator_history_change(
+    history: dict[str, dict],
+    *,
+    key: str,
+    value: float,
+    timestamp: Optional[str] = None,
+) -> tuple[Optional[float], Optional[float]]:
+    prev = history.get(str(key)) or {}
+    prev_value = float(prev.get("value") or 0.0)
+    change = None
+    change_pct = None
+    if prev_value > 0:
+        change = float(value) - prev_value
+        change_pct = (change / prev_value) * 100.0
+    history[str(key)] = {
+        "value": float(value),
+        "timestamp": str(timestamp or datetime.utcnow().isoformat()),
+    }
+    return change, change_pct
+
+
+def _display_live_override_enabled() -> bool:
+    return False
 
 
 def _load_accounts_registry() -> dict:
@@ -381,7 +584,11 @@ def _build_account_seed_state(portfolio_df: pd.DataFrame, target_nav: float) -> 
     if cash < 0:
         raise ValueError(f"Target NAV is below current marked portfolio value {_npr_k(positions_value)}")
     today = datetime.now().strftime("%Y-%m-%d")
-    state = {"cash": cash, "daily_start_nav": round(float(target_nav), 2)}
+    state = {
+        "cash": cash,
+        "daily_start_nav": round(float(target_nav), 2),
+        "initial_capital": round(float(target_nav), 2),
+    }
     nav_log = pd.DataFrame(
         [
             {
@@ -414,8 +621,9 @@ def _save_profile_config(payload: dict) -> None:
 
 def _bootstrap_paper_accounts() -> tuple[list[dict], str]:
     ensure_dir(PAPER_ACCOUNTS_DIR)
+    strategy_registry.ensure_builtin_strategies()
     registry = _load_accounts_registry()
-    accounts = list(registry.get("accounts") or [])
+    accounts = strategy_registry.ensure_account_strategy_ids(list(registry.get("accounts") or []))
     profile = _load_profile_config()
     current_account_id = str(profile.get("current_account_id") or "").strip()
     if not accounts:
@@ -423,6 +631,7 @@ def _bootstrap_paper_accounts() -> tuple[list[dict], str]:
         account = {
             "id": current_account_id,
             "name": "Account 1",
+            "strategy_id": strategy_registry.default_strategy_for_account(current_account_id),
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "updated_at": datetime.now().isoformat(timespec="seconds"),
         }
@@ -480,9 +689,92 @@ def _pick_column(df: pd.DataFrame, *aliases: str) -> Optional[str]:
     return None
 
 
+def _is_meroshare_csv(df: pd.DataFrame) -> bool:
+    """Detect MeroShare 'My Shares Values' export format."""
+    cols_lower = {str(c).strip().lower() for c in df.columns}
+    return "scrip" in cols_lower and "current balance" in cols_lower
+
+
+def _normalize_meroshare_portfolio(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert MeroShare 'My Shares Values' CSV to internal portfolio format.
+
+    MeroShare columns:
+      S.N | Scrip | Current Balance | Last Closing Price | Value as of Last Closing Price
+        | Last Transaction Price (LTP) | Value as of LTP
+    The last row is a 'Total :' summary — skip it.
+    Since MeroShare doesn't export actual buy prices, we use LTP as the
+    entry price (mark-to-market seed) and flag entries as 'meroshare_import'.
+    """
+    # Identify columns by loose matching
+    scrip_col = _pick_column(df, "Scrip")
+    qty_col = _pick_column(df, "Current Balance", "Balance")
+    ltp_col = _pick_column(df, "Last Transaction Price (LTP)", "LTP", "Last Closing Price")
+    close_col = _pick_column(df, "Last Closing Price")
+
+    if not scrip_col or not qty_col:
+        raise ValueError("Not a valid MeroShare CSV — expected 'Scrip' and 'Current Balance' columns")
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    rows: list[dict] = []
+
+    for _, row in df.iterrows():
+        symbol = str(row.get(scrip_col) or "").strip().upper()
+        # Skip blank rows and the 'Total :' footer row
+        if not symbol or symbol in ("TOTAL :", "TOTAL:", " ", ""):
+            continue
+        # Skip non-scrip rows (S.N cell is not numeric)
+        sn = str(row.get(_pick_column(df, "S.N", "SN", "S N") or "", "")).strip()
+        if sn and not sn.replace(".", "").isdigit():
+            continue
+
+        raw_qty = row.get(qty_col)
+        qty = 0
+        try:
+            qty = int(round(float(str(raw_qty).replace(",", "") or 0)))
+        except (ValueError, TypeError):
+            pass
+        if qty <= 0:
+            continue
+
+        # Price: prefer LTP, fall back to last close
+        price = 0.0
+        for col in [ltp_col, close_col]:
+            if col:
+                try:
+                    price = float(str(row.get(col) or "0").replace(",", ""))
+                    if price > 0:
+                        break
+                except (ValueError, TypeError):
+                    pass
+        if price <= 0:
+            continue
+
+        amount = round(qty * price, 2)
+        rows.append({
+            "Entry_Date": today,
+            "Symbol": symbol,
+            "Quantity": qty,
+            "Buy_Price": price,
+            "Buy_Amount": amount,
+            "Buy_Fees": 0.0,
+            "Total_Cost_Basis": amount,
+            "Signal_Type": "meroshare_import",
+            "High_Watermark": price,
+            "Last_LTP": price,
+            "Last_LTP_Source": "meroshare",
+            "Last_LTP_Time_UTC": None,
+        })
+
+    result = pd.DataFrame(rows, columns=PORTFOLIO_COLS) if rows else pd.DataFrame(columns=PORTFOLIO_COLS)
+    return result.reset_index(drop=True)
+
+
 def _normalize_import_portfolio(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=PORTFOLIO_COLS)
+    # Auto-detect MeroShare 'My Shares Values' CSV
+    if _is_meroshare_csv(df):
+        return _normalize_meroshare_portfolio(df)
     if set(PORTFOLIO_COLS).issubset(df.columns):
         normalized = df.copy()
     else:
@@ -683,6 +975,50 @@ def _load_manual_paper_cash(total_cost: float, nav_log: Optional[pd.DataFrame] =
     return max(0.0, float(INITIAL_CAPITAL) - float(total_cost))
 
 
+def _positive_float(value) -> Optional[float]:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _account_initial_capital_from_files(account_dir: Path, fallback: float = INITIAL_CAPITAL) -> float:
+    state_path = account_dir / "paper_state.json"
+    nav_path = account_dir / "paper_nav_log.csv"
+    portfolio_path = account_dir / "paper_portfolio.csv"
+    trade_log_path = account_dir / "paper_trade_log.csv"
+
+    state = load_runtime_state(str(state_path))
+    if isinstance(state, dict):
+        for key in ("initial_capital", "daily_start_nav"):
+            value = _positive_float(state.get(key))
+            if value is not None:
+                return value
+
+    if nav_path.exists():
+        try:
+            nav_log = pd.read_csv(nav_path)
+            if not nav_log.empty and "NAV" in nav_log.columns:
+                value = _positive_float(nav_log.iloc[0].get("NAV"))
+                if value is not None:
+                    return value
+        except Exception:
+            pass
+
+    cash = _positive_float(state.get("cash") if isinstance(state, dict) else None)
+    if cash is not None:
+        try:
+            portfolio = pd.read_csv(portfolio_path) if portfolio_path.exists() else pd.DataFrame()
+            trades = pd.read_csv(trade_log_path) if trade_log_path.exists() else pd.DataFrame()
+        except Exception:
+            portfolio = trades = pd.DataFrame()
+        if portfolio.empty and trades.empty:
+            return cash
+
+    return float(fallback)
+
+
 def _tms_health_flag(health: dict, key: str) -> bool:
     """Support both legacy nested status payloads and the current flat payload."""
     if not isinstance(health, dict):
@@ -694,15 +1030,8 @@ def _tms_health_flag(health: dict, key: str) -> bool:
 
 
 def _load_cached_tms_bundle() -> dict:
-    bundle: dict[str, dict] = {}
-    for kind, snapshot_name in _TMS_AUDIT_SNAPSHOT_MAP.items():
-        try:
-            payload = load_latest_tms_snapshot(snapshot_name)
-        except Exception:
-            payload = None
-        if isinstance(payload, dict) and payload:
-            bundle[kind] = payload
-    return bundle
+    # TMS live brokerage not included in public release — always returns empty.
+    return {}
 
 
 def _merge_tms_bundle_with_cache(bundle: Optional[dict]) -> dict:
@@ -713,10 +1042,10 @@ def _merge_tms_bundle_with_cache(bundle: Optional[dict]) -> dict:
                 merged[key] = payload
     return merged
 
-# ΓöÇΓöÇ Ticker scroll speed ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+# ── Ticker scroll speed ─────────────────────────────────────────────────────
 TICKER_SPEED = 0.15  # seconds between scroll steps
 
-# ΓöÇΓöÇ OSINT API ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+# ── OSINT API ────────────────────────────────────────────────────────────────
 OSINT_BASE = "http://3.148.250.92/api/v1"
 OSINT_TIMEOUT = 8
 
@@ -729,7 +1058,7 @@ TYPE_STYLE = {
     "disaster": LOSS_HI, "social": BLUE, "": LABEL,
 }
 
-# ΓöÇΓöÇ Nepali ΓåÆ English translation cache ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+# ── Nepali → English translation cache ──────────────────────────────────────
 _translation_cache: dict[str, str] = {}
 
 
@@ -737,13 +1066,13 @@ def _contains_non_ascii(text: str) -> bool:
     return bool(text and any(ord(c) > 127 for c in text[:20]))
 
 
-# ΓöÇΓöÇ Unicode display-width helpers (Devanagari-aware) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+# ── Unicode display-width helpers (Devanagari-aware) ─────────────────────────
 
 def _disp_width(text: str) -> int:
     """Visual column width matching the patched Rich cell_len.
 
     Mn (non-spacing marks like virama) = 0 cells.
-    Mc (spacing combining marks like αñ╛ αñ┐ αÑï) = 1 cell (macOS terminals).
+    Mc (spacing combining marks like ा ि ो) = 1 cell (macOS terminals).
     """
     return sum(
         0 if unicodedata.category(c) in ('Mn', 'Me', 'Cf') else 1
@@ -751,7 +1080,7 @@ def _disp_width(text: str) -> int:
     )
 
 
-def _truncate_display(text: str, max_cols: int, suffix: str = "ΓÇª") -> str:
+def _truncate_display(text: str, max_cols: int, suffix: str = "…") -> str:
     """Truncate to max_cols display columns without splitting combining sequences."""
     text = unicodedata.normalize('NFC', text)
     w = 0
@@ -833,7 +1162,7 @@ def _translate_batch(texts: list[str]) -> list[str]:
 
 
 def _news_display_headline(story: dict) -> str:
-    """Return the best headline ΓÇö prefer English, fall back to Nepali."""
+    """Return the best headline — prefer English, fall back to Nepali."""
     translated = str(story.get("_translated") or "").strip()
     if translated:
         return translated
@@ -853,7 +1182,7 @@ def _news_display_headline(story: dict) -> str:
 
 
 def _news_display_summary(story: dict) -> str:
-    """Return the best summary ΓÇö prefer English, fall back to Nepali."""
+    """Return the best summary — prefer English, fall back to Nepali."""
     summary = str(story.get("summary") or "").strip()
     if summary and not _contains_non_ascii(summary):
         return summary
@@ -877,7 +1206,7 @@ def _truncate_text(text: str, width: int) -> str:
     text = " ".join(str(text or "").split())
     if len(text) <= width:
         return text
-    return text[: max(0, width - 1)].rstrip() + "ΓÇª"
+    return text[: max(0, width - 1)].rstrip() + "…"
 
 
 def _fetch_osint_stories(limit: int = 40) -> list[dict]:
@@ -899,7 +1228,7 @@ def _fetch_osint_brief() -> dict:
     except Exception:
         return {}
 
-# ΓöÇΓöÇ Color helpers for DataTable cells ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+# ── Color helpers for DataTable cells ─────────────────────────────────────────
 
 def _chg_text(v: float) -> Text:
     s = "+" if v >= 0 else ""
@@ -1011,7 +1340,7 @@ def _render_stock_report(report: dict) -> Text:
     visible_snapshot = []
     for label, value in snapshot:
         rendered = str(value or "").strip()
-        if not rendered or rendered == "ΓÇö":
+        if not rendered or rendered == "—":
             continue
         visible_snapshot.append((label, rendered))
     if visible_snapshot:
@@ -1032,7 +1361,7 @@ def _render_stock_report(report: dict) -> Text:
             wrapped = textwrap.fill(
                 str(item),
                 width=42,
-                initial_indent="  ΓÇó ",
+                initial_indent="  • ",
                 subsequent_indent="    ",
             )
             text.append(f"{wrapped}\n", style=WHITE)
@@ -1078,7 +1407,7 @@ def _render_lookup_intelligence(report: dict, symbol: str) -> Text:
             text.append(f"  {clean_label}\n", style=LABEL)
             _append_wrapped(text, clean_value, indent="    ", continuation="    ", width=36)
         for item in bullets:
-            _append_wrapped(text, str(item), indent="  ΓÇó ", continuation="    ", width=38)
+            _append_wrapped(text, str(item), indent="  • ", continuation="    ", width=38)
 
     if not headline and not sections:
         text.append("\n  Pipeline Ready\n", style=f"bold {AMBER}")
@@ -1093,7 +1422,7 @@ def _render_lookup_intelligence(report: dict, symbol: str) -> Text:
 
     return text
 
-# ΓöÇΓöÇ Data helpers ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+# ── Data helpers ──────────────────────────────────────────────────────────────
 
 def _headline_fallback_from_url(url: str) -> str:
     """Return a readable headline candidate from a URL, or empty string."""
@@ -1340,13 +1669,13 @@ def _fetch_gold_silver_prices() -> Optional[dict]:
             elif "silver" in line_lower:
                 current_section = "silver"
 
-            price_matches = re.findall(r"αñ░αÑü\s*([\d,]+)", line) or re.findall(r"([\d,]{5,})", line)
+            price_matches = re.findall(r"रु\s*([\d,]+)", line) or re.findall(r"([\d,]{5,})", line)
             for price_str in price_matches:
                 price = _extract_decimal_price(price_str)
                 if not price or price <= 1000:
                     continue
                 context = " ".join(lines[max(0, i - 2): i + 3]).lower()
-                if "tola" in context or "αññαÑïαñ▓αñ╛" in context:
+                if "tola" in context or "तोला" in context:
                     if current_section == "gold" and not gold_tola:
                         gold_tola = price
                     elif current_section == "silver" and not silver_tola:
@@ -1357,12 +1686,12 @@ def _fetch_gold_silver_prices() -> Optional[dict]:
                 for row in table.find_all("tr"):
                     cells = row.find_all(["td", "th"])
                     row_text = " ".join(cell.get_text(" ", strip=True) for cell in cells).lower()
-                    if "gold" in row_text or "αñ╕αÑüαñ¿" in row_text:
+                    if "gold" in row_text or "सुन" in row_text:
                         for cell in cells:
                             price = _extract_decimal_price(cell.get_text(" ", strip=True))
                             if price and price > 100000 and not gold_tola:
                                 gold_tola = price
-                    if "silver" in row_text or "αñÜαñ╛αñüαñªαÑÇ" in row_text:
+                    if "silver" in row_text or "चाँदी" in row_text:
                         for cell in cells:
                             price = _extract_decimal_price(cell.get_text(" ", strip=True))
                             if price and price > 1000 and not silver_tola:
@@ -1371,9 +1700,45 @@ def _fetch_gold_silver_prices() -> Optional[dict]:
         if not gold_tola and not silver_tola:
             return None
 
+        gold_val = float(gold_tola or 0)
+        silver_val = float(silver_tola or 0)
+
+        # ── Persist to macro_indicators so CHG% can be computed ──────────────
+        today_str = datetime.utcnow().strftime("%Y-%m-%d")
+        try:
+            from backend.quant_pro.database import get_db_path as _get_db_path
+            store_nepal_metals_prices(
+                gold_npr_per_tola=gold_val,
+                silver_npr_per_tola=silver_val,
+                date_str=today_str,
+                db_path=str(_get_db_path()),
+            )
+        except Exception:
+            pass  # persistence failure must not break display
+
+        # ── Load CHG% from stored history ─────────────────────────────────────
+        gold_chg_pct = None
+        silver_chg_pct = None
+        gold_chg_abs = None
+        silver_chg_abs = None
+        try:
+            from backend.quant_pro.database import get_db_path as _get_db_path2
+            hist = get_latest_nepal_metals(db_path=str(_get_db_path2()))
+            if hist.get("date") == today_str:
+                gold_chg_pct = hist.get("gold_chg_pct")
+                silver_chg_pct = hist.get("silver_chg_pct")
+                gold_chg_abs = hist.get("gold_chg_abs")
+                silver_chg_abs = hist.get("silver_chg_abs")
+        except Exception:
+            pass
+
         return {
-            "gold_per_tola": float(gold_tola or 0),
-            "silver_per_tola": float(silver_tola or 0),
+            "gold_per_tola": gold_val,
+            "silver_per_tola": silver_val,
+            "gold_chg_pct": gold_chg_pct,
+            "silver_chg_pct": silver_chg_pct,
+            "gold_chg_abs": gold_chg_abs,
+            "silver_chg_abs": silver_chg_abs,
             "date": datetime.utcnow(),
             "date_bs": date_bs,
             "source": "FENEGOSIDA",
@@ -1454,7 +1819,7 @@ def _fetch_noc_fuel_prices() -> Optional[dict]:
             if len(cells) < 5:
                 continue
             first_cell = cells[0].get_text(" ", strip=True)
-            if "αñ¬αÑìαñ░αÑçαñ╕" in first_cell.lower():
+            if "प्रेस" in first_cell.lower():
                 continue
             match = re.search(r"(\d{4})\.(\d{1,2})\.(\d{1,2})", first_cell)
             if not match:
@@ -1680,9 +2045,9 @@ def _render_candlestick_chart(df: pd.DataFrame, width: int = 120, height: int = 
             volume=float(r.get("volume", 0)),
         ))
 
-    # Tighten library layout ΓÇö reduce wasted vertical space
-    constants.MARGIN_TOP = 1    # default 3 ΓåÆ 1 (less empty rows above candles)
-    constants.Y_AXIS_SPACING = 3  # default 4 ΓåÆ 3 (denser price labels)
+    # Tighten library layout — reduce wasted vertical space
+    constants.MARGIN_TOP = 1    # default 3 → 1 (less empty rows above candles)
+    constants.Y_AXIS_SPACING = 3  # default 4 → 3 (denser price labels)
 
     # Chart title with timeframe + change
     tf_labels = {"D": "Daily", "W": "Weekly", "M": "Monthly", "Y": "Yearly", "I": "Intraday"}
@@ -1698,7 +2063,7 @@ def _render_candlestick_chart(df: pd.DataFrame, width: int = 120, height: int = 
     chart.set_vol_bull_color(38, 166, 154)
     chart.set_vol_bear_color(239, 83, 80)
 
-    # Disable volume pane ΓÇö saves vertical space, volume shown in header already
+    # Disable volume pane — saves vertical space, volume shown in header already
     chart.set_volume_pane_enabled(False)
 
     # Clean up info labels
@@ -1729,8 +2094,8 @@ def _render_candlestick_chart(df: pd.DataFrame, width: int = 120, height: int = 
             cut_idx = i
             continue
         # Detect library date axis (mostly dashes, digits, month abbreviations)
-        # and scrollbar lines (box drawing chars like ΓöÇ Γö¼ Γöö Γöÿ Γûê Γûæ)
-        if all(c in ' ΓöÇΓö¼ΓööΓöÿΓö╝ΓöéΓûæΓûôΓûêΓûÆΓûäΓûÇ0123456789-' for c in stripped):
+        # and scrollbar lines (box drawing chars like ─ ┬ └ ┘ █ ░)
+        if all(c in ' ─┬└┘┼│░▓█▒▄▀0123456789-' for c in stripped):
             cut_idx = i
             continue
         break  # hit a real candle/axis line, stop
@@ -1764,10 +2129,10 @@ def _render_candlestick_chart(df: pd.DataFrame, width: int = 120, height: int = 
                 idx = min(li * step, n_visible - 1)
                 pos = y_axis_area + idx
                 if pos < len(tick_line):
-                    tick_line[pos] = "Γö¼"
+                    tick_line[pos] = "┬"
                     label_positions.append((idx, pos))
             date_axis.append("".join(tick_line[:y_axis_area]), style=DIM)
-            date_axis.append("".join(tick_line[y_axis_area:y_axis_area + candle_area]).replace(" ", "ΓöÇ"), style=DIM)
+            date_axis.append("".join(tick_line[y_axis_area:y_axis_area + candle_area]).replace(" ", "─"), style=DIM)
             date_axis.append("\n")
 
             last_end = 0
@@ -1818,10 +2183,10 @@ def _render_volume_chart(df: pd.DataFrame, width: int = 120, height: int = 6) ->
 def _render_sparkline(values: list[float], width: int = 30) -> Text:
     """Tiny inline sparkline using Unicode blocks. Green=up, Red=down vs previous bar."""
     if not values or len(values) < 2:
-        return Text("ΓÇö", style=LABEL)
+        return Text("—", style=LABEL)
     mn, mx = min(values), max(values)
     rng = mx - mn if mx != mn else 1
-    blocks = " ΓûüΓûéΓûâΓûäΓûàΓûåΓûçΓûê"
+    blocks = " ▁▂▃▄▅▆▇█"
     result = Text()
     step = max(1, len(values) // width)
     sampled = values[::step][-width:]
@@ -1837,6 +2202,8 @@ def _render_sparkline(values: list[float], width: int = 30) -> Text:
             color = LABEL
         result.append(blocks[idx], style=color)
     return result
+
+
 
 
 def _load_nav_log() -> pd.DataFrame:
@@ -1862,11 +2229,8 @@ _SIGNAL_LABEL_MAP = {
     "sentiment": "Sentiment",
     "nlp_sentiment": "NLP Sentiment",
     "disposition": "Disposition",
-    "lead_lag": "Lead-Lag",
     "anchoring_52wk": "52-Week Anchoring",
-    "informed_trading": "Informed Trading",
     "pairs_trade": "Pairs Trade",
-    "earnings_drift": "Earnings Drift",
     "macro_remittance": "Macro Remittance",
     "satellite_hydro": "Satellite Hydro",
     "settlement_pressure": "Settlement Pressure",
@@ -1895,8 +2259,7 @@ def _signal_code(value: str) -> str:
         "quality": "Q",
         "low_vol": "LV",
         "residual_momentum": "RM",
-        "earnings_drift": "ED",
-        "tms": "TMS",
+            "tms": "TMS",
     }
     if not norm:
         return "?"
@@ -1987,10 +2350,18 @@ def _compute_portfolio_stats(md: MD) -> dict:
             baseline_nav = float(INITIAL_CAPITAL)
     total_return = (nav - baseline_nav) / baseline_nav * 100 if baseline_nav > 0 else 0.0
 
-    # Realized P&L from trade log
+    # Realized P&L and fees paid from trade log
     realized = 0.0
+    fees_paid = 0.0
     if not trade_log.empty and "PnL" in trade_log.columns:
         realized = trade_log["PnL"].sum()
+    if not trade_log.empty and "Fees" in trade_log.columns:
+        fees_paid = float(pd.to_numeric(trade_log["Fees"], errors="coerce").fillna(0.0).sum())
+    elif not port.empty and "Buy_Fees" in port.columns:
+        fees_paid = float(pd.to_numeric(port["Buy_Fees"], errors="coerce").fillna(0.0).sum())
+
+    gross_nav = nav + fees_paid
+    gross_return = (gross_nav - baseline_nav) / baseline_nav * 100 if baseline_nav > 0 else 0.0
 
     # Max drawdown from NAV log
     max_dd = 0.0; peak_nav = baseline_nav; dd_date = ""
@@ -2037,6 +2408,7 @@ def _compute_portfolio_stats(md: MD) -> dict:
         "positions": positions,
         "total_cost": total_cost, "total_value": total_value,
         "cash": cash, "nav": nav, "total_return": total_return,
+        "gross_nav": gross_nav, "gross_return": gross_return, "fees_paid": fees_paid,
         "day_pnl": day_pnl_total, "day_ret": day_ret_total,
         "realized": realized, "unrealized": total_value - total_cost,
         "max_dd": max_dd, "dd_date": dd_date, "peak_nav": peak_nav,
@@ -2050,9 +2422,139 @@ def _compute_portfolio_stats(md: MD) -> dict:
     }
 
 
-# ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
+def _compute_account_portfolio_stats(md: MD, account_dir: Path) -> dict:
+    """Compute portfolio stats from account-specific files (paper_portfolio.csv etc.)."""
+    ltps = md.ltps()
+    quote_map = {}
+    if not md.quotes.empty:
+        quote_map = {
+            str(r.symbol): {
+                "ltp": float(getattr(r, "ltp", 0) or 0),
+                "prev_close": float(getattr(r, "prev_close", 0) or 0),
+                "pc": float(getattr(r, "pc", 0) or 0),
+            }
+            for r in md.quotes.itertuples()
+        }
+
+    _port_path = account_dir / "paper_portfolio.csv"
+    _nav_path = account_dir / "paper_nav_log.csv"
+    _tl_path = account_dir / "paper_trade_log.csv"
+    _state_path = account_dir / "paper_state.json"
+
+    port = pd.read_csv(_port_path) if _port_path.exists() else pd.DataFrame()
+    nav_log = pd.read_csv(_nav_path) if _nav_path.exists() else pd.DataFrame()
+    trade_log = pd.read_csv(_tl_path) if _tl_path.exists() else pd.DataFrame()
+    account_capital = _account_initial_capital_from_files(account_dir)
+
+    positions = []
+    total_cost = total_value = 0.0
+    total_prev_value = 0.0
+    sector_exposure = {}
+
+    if not port.empty:
+        for _, r in port.iterrows():
+            sym = str(r["Symbol"]); qty = int(r["Quantity"])
+            entry = float(r["Buy_Price"])
+            cost = float(r.get("Total_Cost_Basis", entry * qty))
+            quote = quote_map.get(sym, {})
+            cur = ltps.get(sym) or float(r.get("Last_LTP") or entry)
+            prev_close = float(quote.get("prev_close") or 0) or cur
+            val = cur * qty; pnl = val - cost
+            ret = pnl / cost * 100 if cost else 0
+            day_pnl = (cur - prev_close) * qty if prev_close > 0 else 0.0
+            day_ret = ((cur - prev_close) / prev_close * 100) if prev_close > 0 else float(quote.get("pc") or 0)
+            entry_dt = str(r.get("Entry_Date", ""))[:10]
+            days = 0
+            try:
+                days = (datetime.now() - datetime.strptime(entry_dt, "%Y-%m-%d")).days
+            except Exception:
+                pass
+            total_cost += cost; total_value += val
+            total_prev_value += prev_close * qty
+            try:
+                from backend.backtesting.simple_backtest import get_symbol_sector
+                sec = get_symbol_sector(sym) or "Other"
+            except Exception:
+                sec = "Other"
+            sector_exposure[sec] = sector_exposure.get(sec, 0) + val
+            positions.append({
+                "sym": sym, "qty": qty, "entry": entry, "cur": cur,
+                "cost": cost, "val": val, "pnl": pnl, "ret": ret,
+                "prev_close": prev_close, "day_pnl": day_pnl, "day_ret": day_ret,
+                "signal": _signal_label(str(r.get("Signal_Type", ""))),
+                "date": entry_dt, "days": days, "sector": sec,
+            })
+
+    # Cash from paper_state.json
+    cash = float(account_capital)
+    if _state_path.exists():
+        try:
+            _ps = _json.loads(_state_path.read_text())
+            _c = float(_ps.get("cash", 0))
+            if _c >= 0:
+                cash = _c
+        except Exception:
+            pass
+    elif total_cost > 0:
+        cash = max(0.0, float(account_capital) - total_cost)
+
+    nav = cash + total_value
+    baseline_nav = float(account_capital)
+    if not nav_log.empty and "NAV" in nav_log.columns:
+        try:
+            baseline_nav = float(nav_log.iloc[0]["NAV"] or account_capital)
+        except Exception:
+            pass
+    total_return = (nav - baseline_nav) / baseline_nav * 100 if baseline_nav > 0 else 0.0
+
+    realized = 0.0
+    fees_paid = 0.0
+    if not trade_log.empty and "PnL" in trade_log.columns:
+        realized = float(pd.to_numeric(trade_log["PnL"], errors="coerce").fillna(0).sum())
+    if not trade_log.empty and "Fees" in trade_log.columns:
+        fees_paid = float(pd.to_numeric(trade_log["Fees"], errors="coerce").fillna(0).sum())
+
+    max_dd = 0.0; peak_nav = baseline_nav; dd_date = ""
+    if not nav_log.empty and "NAV" in nav_log.columns:
+        for _, nr in nav_log.iterrows():
+            n = float(nr["NAV"])
+            if n > peak_nav:
+                peak_nav = n
+            dd = (n - peak_nav) / peak_nav * 100
+            if dd < max_dd:
+                max_dd = dd
+                dd_date = str(nr.get("Date", ""))[:10]
+
+    prev_nav = cash + total_prev_value
+    day_pnl_total = nav - prev_nav
+    day_ret_total = (day_pnl_total / prev_nav * 100) if prev_nav > 0 else 0.0
+    positions.sort(key=lambda x: x["val"], reverse=True)
+    top3_conc = sum(p["val"] for p in positions[:3]) / total_value * 100 if total_value > 0 else 0
+    winners = [p for p in positions if p["pnl"] > 0]
+    losers = [p for p in positions if p["pnl"] < 0]
+    age_0_5 = sum(1 for p in positions if p["days"] <= 5)
+    age_6_15 = sum(1 for p in positions if 6 <= p["days"] <= 15)
+    age_16 = sum(1 for p in positions if p["days"] > 15)
+
+    return {
+        "positions": positions,
+        "total_cost": total_cost, "total_value": total_value,
+        "cash": cash, "nav": nav, "total_return": total_return,
+        "gross_nav": nav + fees_paid, "gross_return": total_return, "fees_paid": fees_paid,
+        "day_pnl": day_pnl_total, "day_ret": day_ret_total,
+        "realized": realized, "unrealized": total_value - total_cost,
+        "max_dd": max_dd, "dd_date": dd_date, "peak_nav": peak_nav,
+        "nepse_ret": 0, "alpha": total_return,
+        "n_positions": len(positions), "sector_exposure": sector_exposure,
+        "top3_conc": top3_conc, "winners": winners, "losers": losers,
+        "age_0_5": age_0_5, "age_6_15": age_6_15, "age_16": age_16,
+        "trade_log": trade_log, "nav_log": nav_log,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # WIDGETS
-# ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
+# ═══════════════════════════════════════════════════════════════════════════════
 
 class MarketPanel(Widget):
     """Titled panel with a DataTable inside."""
@@ -2078,9 +2580,9 @@ class MarketPanel(Widget):
         self.query_one(".panel-title", Static).update(title)
 
 
-# ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
+# ═══════════════════════════════════════════════════════════════════════════════
 # MODAL DIALOGS
-# ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
+# ═══════════════════════════════════════════════════════════════════════════════
 
 class ModalDialog(ModalScreen[dict | None]):
     """Buy/Sell/Lookup modal dialog."""
@@ -2166,13 +2668,13 @@ class ModalDialog(ModalScreen[dict | None]):
         self.dismiss(None)
 
 
-# ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
-# MODE SELECT SCREEN ΓÇö shown on startup
-# ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
+# ═══════════════════════════════════════════════════════════════════════════════
+# MODE SELECT SCREEN — shown on startup
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
 class ModeSelectScreen(ModalScreen):
-    """Startup screen: arrow-key selection between Paper and Live TMS."""
+    """Startup screen for the paper trading workspace."""
 
     DEFAULT_CSS = """
     ModeSelectScreen {
@@ -2220,10 +2722,9 @@ class ModeSelectScreen(ModalScreen):
     }
     """
 
-    _selected: int = 0  # 0 = paper, 1 = live
+    _selected: int = 0
     _options = [
         ("paper", "PAPER", "Paper trading workspace and local portfolio"),
-        ("live", "LIVE", "Broker-linked TMS19 execution workspace"),
     ]
 
     def compose(self) -> ComposeResult:
@@ -2236,12 +2737,11 @@ class ModeSelectScreen(ModalScreen):
                     classes="mode-brand",
                 )
                 yield Static(
-                    Text.from_markup("[#5d6670]Terminal v2.0  Γùå  Powered by NepalOSINT[/]"),
+                    Text.from_markup("[#5d6670]Terminal v3  ◆  Paper Trading[/]"),
                     classes="mode-version",
                 )
             with Vertical(id="mode-options"):
                 yield Static("", id="mode-opt-0", classes="mode-row")
-                yield Static("", id="mode-opt-1", classes="mode-row")
             with Vertical(id="mode-footer"):
                 yield Static(
                     Text.from_markup(
@@ -2356,7 +2856,6 @@ class TMSLoginScreen(ModalScreen):
             )
 
     def on_mount(self) -> None:
-        from backend.quant_pro.tms_session import load_tms_settings
 
         settings = load_tms_settings()
         user_env = settings.username or ""
@@ -2394,12 +2893,12 @@ class TMSLoginScreen(ModalScreen):
         self.dismiss({"username": user, "password": pwd})
 
 
-# ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
+# ═══════════════════════════════════════════════════════════════════════════════
 # COMMAND PALETTE (Bloomberg GO bar)
-# ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
+# ═══════════════════════════════════════════════════════════════════════════════
 
 class CommandPalette(ModalScreen[dict | None]):
-    """Bloomberg-style GO bar. Type symbol name ΓåÆ lookup, tab name ΓåÆ switch, action ΓåÆ execute."""
+    """Bloomberg-style GO bar. Type symbol name → lookup, tab name → switch, action → execute."""
 
     DEFAULT_CSS = """
     CommandPalette {
@@ -2407,61 +2906,69 @@ class CommandPalette(ModalScreen[dict | None]):
         background: rgba(0, 0, 0, 0.80);
     }
     #cmd-box {
-        width: 72;
+        width: 64;
         height: auto;
-        max-height: 28;
-        background: #0e0e0e;
-        border: tall #333333;
+        max-height: 22;
+        background: #090d12;
+        border: solid #3f474f;
         margin-top: 2;
         padding: 0;
     }
     #cmd-header {
         height: 1;
         width: 100%;
-        background: #141414;
-        color: #ffaf00;
+        background: #090d12;
+        layout: horizontal;
+        padding: 0 1;
+    }
+    #cmd-header-label {
+        width: auto;
+        height: 1;
+        color: #f2b94b;
         text-style: bold;
-        padding: 0 2;
+        padding: 0 1 0 0;
     }
     #cmd-input {
-        width: 100%;
-        background: #111111;
+        width: 1fr;
+        background: #0c1116;
         border: none;
-        border-bottom: solid #222222;
-        color: #ffaf00;
-        padding: 0 2;
+        color: #e8edf3;
+        padding: 0 1;
         height: 1;
     }
     #cmd-input:focus {
-        border-bottom: solid #ffaf00;
-        color: #ffffff;
+        background: #0c1116;
+        color: #fff6de;
+        border: none;
     }
     #cmd-results {
         height: auto;
-        max-height: 20;
+        max-height: 18;
         width: 100%;
-        background: #0e0e0e;
+        background: #090d12;
         padding: 0;
+        border-top: solid #1a1f25;
     }
     .cmd-row {
         height: 1;
         width: 100%;
-        padding: 0 2;
-        color: #888888;
+        padding: 0 1;
+        color: #6b7785;
     }
     .cmd-row-selected {
         height: 1;
         width: 100%;
-        padding: 0 2;
-        background: #1a1800;
-        color: #ffaf00;
+        padding: 0 1;
+        background: #111820;
+        color: #f2b94b;
     }
     #cmd-hint {
         height: 1;
         width: 100%;
-        background: #0c0c0c;
-        color: #444444;
-        padding: 0 2;
+        background: #090d12;
+        color: #3a4450;
+        padding: 0 1;
+        border-top: solid #1a1f25;
     }
     """
 
@@ -2471,10 +2978,11 @@ class CommandPalette(ModalScreen[dict | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="cmd-box"):
-            yield Static("  COMMAND  Γùå  Type symbol, tab, or action  Γùå  <GO>", id="cmd-header")
-            yield Input(id="cmd-input", placeholder="NABIL <GO>")
+            with Horizontal(id="cmd-header"):
+                yield Static("GO", id="cmd-header-label")
+                yield Input(id="cmd-input", placeholder="symbol, tab, or action")
             yield Vertical(id="cmd-results")
-            yield Static("  ΓåæΓåô Navigate   ENTER Execute   ESC Close   /help for commands", id="cmd-hint")
+            yield Static(" ↑↓ Navigate  ENTER Execute  ESC Close", id="cmd-hint")
 
     def on_mount(self) -> None:
         self._build_items()
@@ -2486,7 +2994,7 @@ class CommandPalette(ModalScreen[dict | None]):
         self._items = []
         # Tab navigation
         tabs = [
-            ("1 MARKET", "tab", "market", "Market overview ΓÇö gainers, losers, volume"),
+            ("1 MARKET", "tab", "market", "Market overview — gainers, losers, volume"),
             ("2 PORTFOLIO", "tab", "portfolio", "Portfolio holdings, NAV, risk"),
             ("3 SIGNALS", "tab", "signals", "Trading signals, screener & calendar"),
             ("4 LOOKUP", "tab", "lookup", "Stock lookup & charts"),
@@ -2494,6 +3002,8 @@ class CommandPalette(ModalScreen[dict | None]):
             ("6 ORDERS", "tab", "orders", "Order management"),
             ("7 WATCHLIST", "tab", "watchlist", "Your watched stocks"),
             ("8 RATES & COMMODITIES", "tab", "kalimati", "FX, metals and local commodity prices"),
+            ("9 ACCOUNT", "tab", "account", "Paper account profiles and runtime"),
+            ("0 STRATEGIES", "tab", "strategies", "Saved strategies, bindings and backtests"),
         ]
         for name, kind, target, desc in tabs:
             self._items.append({"name": name, "kind": kind, "target": target, "desc": desc})
@@ -2539,11 +3049,11 @@ class CommandPalette(ModalScreen[dict | None]):
         container = self.query_one("#cmd-results", Vertical)
         container.remove_children()
         for i, item in enumerate(self._filtered):
-            kind_icon = {"tab": "Γùº", "action": "Γû╢", "stock": "Γùå"}.get(item["kind"], "┬╖")
+            kind_icon = {"tab": "◧", "action": "▶", "stock": "◆"}.get(item["kind"], "·")
             kind_color = {"tab": CYAN, "action": GAIN_HI, "stock": AMBER}.get(item["kind"], LABEL)
             t = Text()
             if i == self._selected:
-                t.append(f"  Γû╕ {kind_icon} ", style=f"bold {kind_color}")
+                t.append(f"  ▸ {kind_icon} ", style=f"bold {kind_color}")
                 t.append(f"{item['name']:<16}", style=f"bold {WHITE}")
                 t.append(item["desc"], style=LABEL)
                 cls = "cmd-row-selected"
@@ -2692,7 +3202,7 @@ class WatchlistAddScreen(ModalScreen[dict | str | None]):
                 yield Input(id="wl-add-input", placeholder="NABIL, USD, Gold / Tola, Petrol...")
             yield Static("", id="wl-add-query")
             yield Vertical(id="wl-add-results")
-            yield Static("ΓåæΓåô Navigate   ENTER Add   ESC Cancel   Stocks, forex, macro, commodities", id="wl-add-hint")
+            yield Static("↑↓ Navigate   ENTER Add   ESC Cancel   Stocks, forex, macro, commodities", id="wl-add-hint")
 
     def on_mount(self) -> None:
         self._build_items()
@@ -2815,14 +3325,14 @@ class WatchlistAddScreen(ModalScreen[dict | str | None]):
         if not self._filtered:
             container.mount(Static(Text("  No matches", style=DIM), classes="wl-add-row-item"))
             return
-        kind_icon = {"stock": "Γùå", "forex": "FX", "macro": "ΓùÅ", "commodity": "Γùº"}
+        kind_icon = {"stock": "◆", "forex": "FX", "macro": "●", "commodity": "◧"}
         kind_style = {"stock": AMBER, "forex": CYAN, "macro": GAIN_HI, "commodity": WHITE}
         for idx, item in enumerate(self._filtered):
             t = Text()
-            icon = kind_icon.get(item["kind"], "┬╖")
+            icon = kind_icon.get(item["kind"], "·")
             color = kind_style.get(item["kind"], LABEL)
             if idx == self._selected:
-                t.append(f"  Γû╕ {icon} ", style=f"bold {color}")
+                t.append(f"  ▸ {icon} ", style=f"bold {color}")
                 t.append(f"{item['name']:<20}", style=f"bold {WHITE}")
                 t.append(item["desc"][:42], style=LABEL)
                 cls = "wl-add-row-selected"
@@ -2884,125 +3394,56 @@ class LookupScreen(ModalScreen[dict | None]):
     DEFAULT_CSS = """
     LookupScreen {
         align: center middle;
-        background: rgba(0, 0, 0, 0.88);
+        background: rgba(0, 0, 0, 0.82);
     }
     #lookup-box {
-        width: 42;
-        height: auto;
-        border: solid #59616b;
-        background: #0b0d10;
-        padding: 1 2;
-    }
-    #lookup-title {
-        color: #ffaf00;
-        text-style: bold;
-        height: 1;
-        width: 100%;
-        text-align: center;
-        margin-bottom: 1;
-    }
-    #lookup-kicker {
-        color: #7d8895;
-        height: 1;
-        width: 100%;
-        margin-bottom: 1;
-    }
-    #lookup-row {
-        width: 100%;
+        width: 38;
         height: 3;
-        background: #13171c;
-        border: solid #2f3842;
+        border: solid #3f474f;
+        background: #090d12;
         padding: 0 1;
-        margin-bottom: 1;
         layout: horizontal;
-        content-align: center middle;
+        align: left middle;
     }
     #lookup-label {
-        color: #8a98a8;
+        color: #f2b94b;
         text-style: bold;
-        height: 3;
-        width: 8;
-        content-align: left middle;
+        height: 1;
+        width: auto;
+        padding: 0 1 0 0;
     }
     #lookup-input {
         width: 1fr;
-        height: 3;
-        background: #13171c;
+        height: 1;
+        background: #0c1116;
         border: none;
-        color: #e8e8e8;
-        padding: 0;
-        content-align: left middle;
+        color: #e8edf3;
+        padding: 0 1;
     }
     #lookup-input:focus {
-        background: #13171c;
+        background: #0c1116;
         color: #fff6de;
         border: none;
     }
-    #lookup-actions {
-        height: 1;
-        width: 100%;
-        align: center middle;
-    }
-    #lookup-actions Button {
-        min-width: 9;
-        width: 9;
-        height: 1;
-        margin: 0 1;
-        padding: 0 0;
-        text-style: bold;
-        content-align: center middle;
-        border: none;
-    }
-    #lookup-submit {
-        background: #13181f;
-        color: #79ffb3;
-    }
-    #lookup-submit:hover,
-    #lookup-submit:focus {
-        background: #1b2430;
-        color: #d9ffe8;
-    }
-    #lookup-cancel {
-        background: #13181f;
-        color: #ff8f8f;
-    }
-    #lookup-cancel:hover,
-    #lookup-cancel:focus {
-        background: #1b2430;
-        color: #ffd1d1;
-    }
     #lookup-hint {
-        height: auto;
-        width: 100%;
-        color: #5f6b78;
-        text-align: center;
-        margin-top: 1;
+        height: 1;
+        width: auto;
+        color: #4a5562;
+        padding: 0 0 0 1;
     }
     """
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="lookup-box"):
-            yield Static("LOOKUP", id="lookup-title")
-            yield Static("Type a symbol and confirm.", id="lookup-kicker")
-            with Horizontal(id="lookup-row"):
-                yield Static("SYMBOL", id="lookup-label")
-                yield Input(id="lookup-input", placeholder="RURU")
-            with Horizontal(id="lookup-actions"):
-                yield Button("Submit", id="lookup-submit")
-                yield Button("Cancel", id="lookup-cancel")
-            yield Static("ENTER confirm  Γöé  ESC cancel", id="lookup-hint")
+        with Horizontal(id="lookup-box"):
+            yield Static("LOOKUP", id="lookup-label")
+            yield Input(id="lookup-input", placeholder="NABIL")
+            yield Static("↵ GO  ESC ✕", id="lookup-hint")
 
     def on_mount(self) -> None:
         self.query_one("#lookup-input", Input).focus()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         self._submit()
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "lookup-submit":
-            self._submit()
-        else:
-            self.dismiss(None)
 
     def _submit(self) -> None:
         val = self.query_one("#lookup-input", Input).value.strip().upper()
@@ -3015,14 +3456,14 @@ class LookupScreen(ModalScreen[dict | None]):
         self.dismiss(None)
 
 
-# ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
+# ═══════════════════════════════════════════════════════════════════════════════
 # MAIN APP
-# ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
+# ═══════════════════════════════════════════════════════════════════════════════
 
 TAB_NAMES = {
     "market": "1", "portfolio": "2", "signals": "3",
     "lookup": "4", "agents": "5", "orders": "6",
-    "watchlist": "7", "kalimati": "8", "account": "9",
+    "watchlist": "7", "kalimati": "8", "account": "9", "strategies": "0",
 }
 
 TAB_LABELS = {
@@ -3035,7 +3476,29 @@ TAB_LABELS = {
     "watchlist": "WATCHLIST",
     "kalimati": "RATES & COMMODITIES",
     "account": "ACCOUNT",
+    "strategies": "STRATEGIES",
 }
+
+def _load_hedge_trade_log() -> list:
+    """Load persisted hedge trade log from disk."""
+    try:
+        if HEDGE_TRADE_LOG_FILE.exists():
+            import json as _json
+            data = _json.loads(HEDGE_TRADE_LOG_FILE.read_text(encoding="utf-8"))
+            return list(data) if isinstance(data, list) else []
+    except Exception:
+        pass
+    return []
+
+
+def _save_hedge_trade_log(trades: list) -> None:
+    """Persist hedge trade log to disk."""
+    try:
+        import json as _json
+        HEDGE_TRADE_LOG_FILE.write_text(_json.dumps(trades, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
 
 class NepseDashboard(App):
     CSS_PATH = Path(__file__).with_name("dashboard_tui.tcss")
@@ -3050,11 +3513,12 @@ class NepseDashboard(App):
         Binding("7", "tab('watchlist')", "Watchlist", show=False),
         Binding("8", "tab('kalimati')", "Rates & Commodities", show=False),
         Binding("9", "tab('account')", "Account", show=False),
-        Binding("b", "buy", "Buy", show=False),
-        Binding("s", "sell", "Sell", show=False),
+        Binding("0", "tab('strategies')", "Strategies", show=False),
+        # B/S hotkeys removed — orders placed via order book only
         Binding("l", "lookup", "Lookup", show=False),
         Binding("a", "run_agent", "Agent", show=False),
         Binding("r", "refresh", "Refresh", show=False),
+        Binding("f", "force_signals_reload", "Force Signals", show=False),
         Binding("q", "quit", "Quit", show=False),
         Binding("slash", "command_palette", "GO", show=False),
         Binding("ctrl+p", "command_palette", "GO", show=False),
@@ -3070,13 +3534,13 @@ class NepseDashboard(App):
     active_tab: str = "market"
     lookup_sym: str = ""
     lookup_tf: str = "D"  # D=Daily, W=Weekly, M=Monthly, I=Intraday
-    trade_mode: str = "paper"  # "paper" or "live"
-    tms_executor = None  # TMSBrowserExecutor instance for live mode
-    tms_service = None   # LocalTMSExecutionService instance for live mode
+    trade_mode: str = "paper"
+    tms_service = None
     _tms_bundle = None   # cached fetch_monitor_bundle result
     _last_tms_watchlist_fetch_at: float = 0.0
     _tms_watchlist_refresh_inflight: bool = False
     _trading_engine: Optional[TUITradingEngine] = None
+    _account_engines: dict = {}  # account_id -> TUITradingEngine
     _news_search_query: str = ""  # current news search filter
     _vector_search_results: list = []  # semantic search results from OSINT API
     _order_action: str = "BUY"   # current selected action in order form
@@ -3090,6 +3554,10 @@ class NepseDashboard(App):
     _current_account_id: str = "account_1"
     _selected_account_id: str = "account_1"
     _account_help_visible: bool = False
+    _strategies: list[dict] = []
+    _selected_strategy_id: str = "default_c5"
+    _strategy_backtest_result: dict = {}
+    _strategy_backtest_statuses: dict = {}
     _agent_chat_process: Optional[subprocess.Popen] = None
     _agent_chat_request_id: int = 0
     _agent_chat_stop_requested: bool = False
@@ -3107,7 +3575,7 @@ class NepseDashboard(App):
             yield Static(id="index-bar")
 
         with ContentSwitcher(id="content", initial="market"):
-            # ΓöÇΓöÇ 1 MARKET: 3-panel top + 2-panel bottom ΓöÇΓöÇ
+            # ── 1 MARKET: 3-panel top + 2-panel bottom ──
             with Vertical(id="market", classes="tab-pane"):
                 with Horizontal(id="market-top"):
                     yield MarketPanel(panel_title="1) GAINERS", title_color=GAIN, id="p-gainers")
@@ -3117,7 +3585,7 @@ class NepseDashboard(App):
                     yield MarketPanel(panel_title="4) 52-WEEK EXTREMES", title_color=YELLOW, id="p-52wk")
                     yield MarketPanel(panel_title="5) LIVE QUOTES", title_color=PURPLE, id="p-quotes")
 
-            # ΓöÇΓöÇ 2 PORTFOLIO: NAV + risk bar + holdings/risk split + trades ΓöÇΓöÇ
+            # ── 2 PORTFOLIO: NAV + risk bar + holdings/risk split + trades ──
             with Vertical(id="portfolio", classes="tab-pane"):
                 yield Static("", id="nav-summary", classes="panel-title")
                 yield Static("", id="risk-summary", classes="panel-title")
@@ -3131,32 +3599,47 @@ class NepseDashboard(App):
                         yield Static("WINNERS / LOSERS", classes="panel-title")
                         yield DataTable(id="dt-winloss", zebra_stripes=True, cursor_type="row")
                 with Horizontal(id="port-bottom"):
-                    with Vertical(id="port-trades", classes="full-pane"):
-                        yield Static("TRADE HISTORY", classes="panel-title", id="trades-title")
-                        yield DataTable(id="dt-trades-full", zebra_stripes=True, cursor_type="row")
-                    with Vertical(id="port-activity", classes="full-pane"):
-                        yield Static("ENGINE LOG", classes="panel-title", id="activity-title")
-                        yield VerticalScroll(id="activity-scroll")
+                    with Vertical(id="port-hedge", classes="full-pane"):
+                        with Horizontal(id="hedge-header"):
+                            yield Static("GOLD / SILVER HEDGE", classes="panel-title", id="hedge-title")
+                            yield Button("● HEDGE ON", id="hedge-toggle-btn", classes="hedge-btn-on")
+                        yield Static("", id="hedge-info-bar")
+                        yield Static("", id="hedge-rec-bar")
+                        yield Static("", id="hedge-trade-bar")
 
-            # ΓöÇΓöÇ 3 SIGNALS WORKSPACE ΓöÇΓöÇ
+            # ── 3 SIGNALS WORKSPACE ──
             with Vertical(id="signals", classes="tab-pane"):
                 yield Static("", id="screener-status-bar")
                 with Horizontal(id="signals-main"):
                     with Vertical(id="signals-table-pane", classes="full-pane"):
-                        yield Static("SIGNALS", classes="panel-title")
+                        with Horizontal(id="signals-header-row"):
+                            yield Static("SIGNALS", classes="panel-title", id="signals-table-title")
+                            yield Input(value="0.0", placeholder="min score", id="signal-min-score", classes="signal-threshold-input")
                         yield DataTable(id="dt-signals", zebra_stripes=True, cursor_type="row")
                     with Vertical(id="signals-screener-pane", classes="full-pane"):
                         yield Static("ACTIVE STOCKS", classes="panel-title", id="screener-list-title")
                         yield DataTable(id="dt-screener", zebra_stripes=True, cursor_type="row")
+                with Horizontal(id="signals-broker"):
+                    with Vertical(id="broker-floor-left"):
+                        with Horizontal(id="broker-floor-header"):
+                            yield Static("BROKER FLOOR SIGNALS", classes="panel-title", id="broker-floor-title")
+                            yield Button("ALL",      id="bf-filter-all",   classes="bf-filter-btn bf-active")
+                            yield Button("CIRCULAR", id="bf-filter-circ",  classes="bf-filter-btn")
+                            yield Button("PUMP",     id="bf-filter-pump",  classes="bf-filter-btn")
+                            yield Button("SMART $",  id="bf-filter-smart", classes="bf-filter-btn")
+                        yield DataTable(id="dt-broker-floor", zebra_stripes=True, cursor_type="row")
+                    with Vertical(id="broker-floor-right"):
+                        yield Static("TOP BROKERS", classes="panel-title", id="broker-top-title")
+                        yield DataTable(id="dt-broker-top", zebra_stripes=True, cursor_type="row")
                 with Horizontal(id="signals-bottom"):
                     with Vertical(id="signals-calendar", classes="full-pane"):
-                        yield Static("CORPORATE ACTIONS ΓÇö Next 30 Days", classes="panel-title")
+                        yield Static("CORPORATE ACTIONS — Next 30 Days", classes="panel-title")
                         yield DataTable(id="dt-calendar", zebra_stripes=True, cursor_type="row")
                     with Vertical(id="screener-heatmap-pane", classes="full-pane"):
                         yield Static("SECTOR PERFORMANCE", classes="panel-title")
                         yield Static("", id="heatmap-content")
 
-            # ΓöÇΓöÇ 4 LOOKUP ΓöÇΓöÇ
+            # ── 4 LOOKUP ──
 
             with Vertical(id="lookup", classes="tab-pane"):
                 yield Static("Press L to look up any stock", classes="panel-title", id="lookup-title")
@@ -3177,7 +3660,7 @@ class NepseDashboard(App):
                         yield Static("", id="lookup-intel-title")
                         yield Static("", id="lookup-intel")
 
-            # ΓöÇΓöÇ 5 AGENTS ΓöÇΓöÇ
+            # ── 5 AGENTS ──
             with Vertical(id="agents", classes="tab-pane"):
                 yield Static("", id="agent-status-bar")
                 yield Static("", id="agent-market-view")
@@ -3198,16 +3681,16 @@ class NepseDashboard(App):
                             yield Static("COMPOSER", classes="panel-title", id="agent-compose-title")
                             with Vertical(id="agent-chat-footer"):
                                 yield Static("", id="agent-chat-hint")
-                                yield Input(id="agent-input", placeholder="Ask the agent...  (/history, /recent, /stop)")
+                                yield Input(id="agent-input", placeholder="Ask the agent...  (/agent list, /model gemma4:e2b, /stop)")
 
-            # ΓöÇΓöÇ 6 ORDERS (Order Management) ΓöÇΓöÇ
+            # ── 6 ORDERS (Order Management) ──
             with Vertical(id="orders", classes="tab-pane"):
                 yield Static("", id="order-status-bar")
                 with Horizontal(id="order-form-bar"):
                     yield Static("SIDE", classes="order-chip order-chip-neutral")
                     yield Button("BUY", id="order-btn-buy")
                     yield Button("SELL", id="order-btn-sell")
-                    yield Static("ΓÇó", classes="order-sep")
+                    yield Static("•", classes="order-sep")
                     yield Static("TICKET", classes="order-chip order-chip-neutral")
                     yield Static("SYM", classes="order-field-label")
                     yield Input(id="order-inp-symbol", placeholder="NABIL")
@@ -3217,7 +3700,7 @@ class NepseDashboard(App):
                     yield Input(id="order-inp-price", placeholder="LTP")
                     yield Static("SLIP%", classes="order-field-label")
                     yield Input(id="order-inp-slippage", placeholder="2.0")
-                    yield Static("ΓÇó", classes="order-sep")
+                    yield Static("•", classes="order-sep")
                     yield Static("EXEC", classes="order-chip order-chip-neutral")
                     yield Button("SUBMIT", id="order-btn-submit")
                     yield Button("CANCEL", id="order-btn-cancel-all")
@@ -3232,7 +3715,7 @@ class NepseDashboard(App):
                     yield Static("TODAY'S TRADES (FILLED)", classes="panel-title", id="order-trades-title")
                     yield DataTable(id="dt-orders-trades", zebra_stripes=True, cursor_type="row")
 
-            # ΓöÇΓöÇ 7 WATCHLIST ΓöÇΓöÇ
+            # ── 7 WATCHLIST ──
             with Vertical(id="watchlist", classes="tab-pane"):
                 yield Static("", id="wl-status-bar")
                 with Horizontal(id="wl-split"):
@@ -3247,7 +3730,7 @@ class NepseDashboard(App):
                             yield Static("COMMODITIES", classes="panel-title", id="wl-commodities-title")
                             yield DataTable(id="dt-watchlist-commodities", zebra_stripes=True, cursor_type="row")
 
-            # ΓöÇΓöÇ 8 RATES & COMMODITIES ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+            # ── 8 RATES & COMMODITIES ───────────────────────────────────────
             with Vertical(id="kalimati", classes="tab-pane"):
                 yield Static("", id="kalimati-status-bar")
                 with Horizontal(id="kalimati-search-bar"):
@@ -3273,8 +3756,10 @@ class NepseDashboard(App):
                             yield DataTable(id="dt-forex", zebra_stripes=True, cursor_type="row")
 
             with Vertical(id="account", classes="tab-pane"):
-                with Vertical(id="account-main", classes="full-pane"):
-                    with Vertical(id="profile-pane"):
+                with Horizontal(id="account-split"):
+                  with Vertical(id="account-left", classes="full-pane"):
+                    with Vertical(id="account-main", classes="full-pane"):
+                      with Vertical(id="profile-pane"):
                         yield Static("PAPER ACCOUNT", classes="panel-title")
                         yield Static("", id="profile-summary")
                         yield Static("ACCOUNTS", classes="panel-title")
@@ -3291,21 +3776,92 @@ class NepseDashboard(App):
                                 yield Button("A ACTIVATE", id="profile-btn-activate-account", classes="profile-btn")
                         with Horizontal(id="profile-seed-row"):
                             yield Static("SEED", classes="profile-inline-label")
-                            yield Input(id="profile-inp-portfolio", placeholder="Optional: drag paper_portfolio.csv to seed holdings")
+                            yield Input(id="profile-inp-portfolio", placeholder="paper_portfolio.csv or MeroShare CSV  —  or press B BROWSE")
+                            yield Button("B BROWSE", id="profile-btn-browse-seed", classes="profile-btn profile-btn-browse")
                         with Horizontal(id="profile-actions"):
                             yield Button("W WATCHLIST", id="profile-btn-sync-watchlist", classes="profile-btn profile-action-button")
                             yield Button("V SET NAV", id="profile-btn-set-nav", classes="profile-btn profile-action-button")
                             yield Button("S SNAPSHOT", id="profile-btn-save-account", classes="profile-btn profile-action-button")
+                            yield Button("DEL ACCOUNT", id="profile-btn-delete-account", classes="profile-btn profile-action-button profile-btn-delete-account")
                         yield Static("", id="account-help")
                         yield Static(
-                            "Create a blank account with just target NAV, or optionally add a portfolio CSV to seed holdings. "
+                            "Create a blank account with target NAV, or press B BROWSE to pick a SEED file. "
+                            "Accepts paper_portfolio.csv or MeroShare 'My Shares Values.csv' (auto-detected). "
                             "Selecting and activating an account swaps the full paper runtime.",
                             id="profile-note",
                         )
+                  with Vertical(id="account-right", classes="full-pane"):
+                      with Vertical(id="port-trades", classes="full-pane"):
+                          yield Static("TRADE HISTORY", classes="panel-title", id="trades-title")
+                          yield DataTable(id="dt-trades-full", zebra_stripes=True, cursor_type="row")
+                      with Vertical(id="port-activity", classes="full-pane"):
+                          yield Static("ENGINE LOG", classes="panel-title", id="activity-title")
+                          yield VerticalScroll(id="activity-scroll")
+
+            with Vertical(id="strategies", classes="tab-pane"):
+                with Vertical(id="strategies-main", classes="full-pane"):
+                    yield Static("STRATEGY REGISTRY", classes="panel-title")
+                    yield Static("", id="strategy-summary")
+                    with Horizontal(id="strategies-split"):
+                        with Vertical(id="strategies-left", classes="full-pane"):
+                            yield Static("SAVED STRATEGIES", classes="panel-title")
+                            yield DataTable(id="dt-strategy-list", zebra_stripes=True, cursor_type="row")
+                            yield Static("", id="strategy-accounts-note")
+                        with Vertical(id="strategies-right", classes="full-pane"):
+                            yield Static("STRATEGY BUILDER", classes="panel-title")
+                            with Horizontal(id="strategy-name-row", classes="strategy-row"):
+                                yield Static("NAME", classes="profile-inline-label")
+                                yield Input(id="strategy-inp-name", placeholder="My Strategy", classes="profile-inline-input profile-name-input")
+                                yield Static("DESC", classes="profile-inline-label")
+                                yield Input(id="strategy-inp-description", placeholder="Notes", classes="profile-inline-input")
+                            yield Static("SIGNALS", classes="panel-title", id="signal-picker-label")
+                            with Vertical(id="signal-picker-area"):
+                                with Horizontal(classes="signal-picker-row"):
+                                    for _lbl, _sig in _SIGNAL_DEFS[:5]:
+                                        yield Button(_lbl, id=_sig_btn_id(_sig), classes="signal-btn")
+                                with Horizontal(classes="signal-picker-row"):
+                                    for _lbl, _sig in _SIGNAL_DEFS[5:10]:
+                                        yield Button(_lbl, id=_sig_btn_id(_sig), classes="signal-btn")
+                                with Horizontal(classes="signal-picker-row"):
+                                    for _lbl, _sig in _SIGNAL_DEFS[10:]:
+                                        yield Button(_lbl, id=_sig_btn_id(_sig), classes="signal-btn")
+                                yield Static("", id="signal-picker-active", classes="signal-active-display")
+                            yield Static("PARAMETERS", classes="panel-title", id="strategy-params-label")
+                            with Horizontal(id="strategy-config-row-a", classes="strategy-row"):
+                                yield Static("HOLD", classes="profile-inline-label")
+                                yield Input(id="strategy-inp-holding-days", placeholder="40", classes="profile-inline-input strategy-small-input")
+                                yield Static("REBAL", classes="profile-inline-label")
+                                yield Input(id="strategy-inp-rebalance", placeholder="5", classes="profile-inline-input strategy-small-input")
+                                yield Static("MAX POS", classes="profile-inline-label")
+                                yield Input(id="strategy-inp-max-positions", placeholder="5", classes="profile-inline-input strategy-small-input")
+                            with Horizontal(id="strategy-config-row-b", classes="strategy-row"):
+                                yield Static("STOP", classes="profile-inline-label")
+                                yield Input(id="strategy-inp-stop-loss", placeholder="0.08", classes="profile-inline-input strategy-small-input")
+                                yield Static("TRAIL", classes="profile-inline-label")
+                                yield Input(id="strategy-inp-trailing-stop", placeholder="0.10", classes="profile-inline-input strategy-small-input")
+                                yield Static("SECTOR", classes="profile-inline-label")
+                                yield Input(id="strategy-inp-sector-limit", placeholder="0.35", classes="profile-inline-input strategy-small-input")
+                            with Horizontal(id="strategy-actions-row", classes="strategy-row"):
+                                yield Button("NEW", id="strategy-btn-new", classes="profile-btn")
+                                yield Button("SAVE", id="strategy-btn-save", classes="profile-btn profile-btn-primary")
+                                yield Button("→ ACTIVE ACCT", id="strategy-btn-assign-current", classes="profile-btn")
+                                yield Button("→ SELECTED ACCT", id="strategy-btn-assign-selected", classes="profile-btn")
+                                yield Button("DELETE", id="strategy-btn-delete", classes="profile-btn strategy-btn-delete")
+                            yield Static("BACKTEST", classes="panel-title", id="strategy-backtest-label")
+                            with Horizontal(id="strategy-backtest-row", classes="strategy-row"):
+                                yield Static("START", classes="profile-inline-label")
+                                yield Input(id="strategy-inp-backtest-start", placeholder="2025-01-01", classes="profile-inline-input strategy-date-input")
+                                yield Static("END", classes="profile-inline-label")
+                                yield Input(id="strategy-inp-backtest-end", placeholder="2026-04-11", classes="profile-inline-input strategy-date-input")
+                                yield Static("CAP", classes="profile-inline-label")
+                                yield Input(id="strategy-inp-backtest-capital", placeholder="1000000", classes="profile-inline-input strategy-capital-input")
+                                yield Button("RUN", id="strategy-btn-backtest", classes="profile-btn profile-action-button")
+                                yield Button("CHART", id="strategy-btn-chart", classes="profile-btn strategy-btn-chart")
+                            yield Static("", id="strategy-backtest-summary")
 
         yield Static(id="status-bar")
 
-    # ΓöÇΓöÇ Lifecycle ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+    # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def on_mount(self) -> None:
         self.push_screen(ModeSelectScreen(), callback=self._on_mode_selected)
@@ -3314,15 +3870,12 @@ class NepseDashboard(App):
         if not mode:
             self.exit()
             return
-        self.trade_mode = mode
-        if mode == "live":
-            self.push_screen(TMSLoginScreen(), callback=self._on_tms_credentials)
-        else:
-            self._init_dashboard()
+        self.trade_mode = "paper"
+        self._init_dashboard()
 
     def _on_tms_credentials(self, result: dict | None) -> None:
         if not result:
-            # User pressed ESC ΓÇö fall back to mode select
+            # User pressed ESC — fall back to mode select
             self.push_screen(ModeSelectScreen(), callback=self._on_mode_selected)
             return
         self._tms_credentials = result
@@ -3333,6 +3886,8 @@ class NepseDashboard(App):
         _ensure_paper_runtime_files()
         self._paper_accounts, self._current_account_id = _bootstrap_paper_accounts()
         self._selected_account_id = self._current_account_id
+        self._load_strategies_registry()
+        self._apply_active_strategy_runtime()
         self._sync_agent_account_context_env()
         # Pull live quotes into DB before loading market data
         try:
@@ -3351,12 +3906,21 @@ class NepseDashboard(App):
         self._signals_table_cache_payload: Optional[tuple[list[tuple[str, str]], list[list[Text]], int]] = None
         self._signals_workspace_cache_key: str = ""
         self._signals_workspace_cache_payload: Optional[dict] = None
+        self._signals_last_loaded_at: str = ""
+        self._signals_last_strategy_name: str = ""
+        self._signals_last_count: int = 0
+        self._signal_min_score: float = 0.0
+        self._broker_floor_filter: str = "all"  # all | circ | pump | smart
         self._ticker_text = ""
         self._ticker_offset = 0
         self._rates_search_query: str = ""
         self._kalimati_rows: list[dict] = []
         self._kalimati_status: str = "Loading..."
         self._macro_rates: dict = {}
+        self._hedge_enabled: bool = True    # ON/OFF toggle for gold/silver hedge overlay
+        self._hedge_trade_log: list = _load_hedge_trade_log()
+        self._active_signals: set[str] = set()  # signal picker state
+        self._new_strategy_mode: bool = False   # True after NEW pressed, False after list selection or SAVE
         self._watchlist_stock_rows: list[dict] = []
         self._watchlist_rates_rows: list[dict] = []
         self._watchlist_commodity_rows: list[dict] = []
@@ -3365,9 +3929,11 @@ class NepseDashboard(App):
         self._update_header()
         self._update_index()
         self._load_profile_inputs()
+        self._populate_strategies_tab()
         self._populate_market()
         self._populate_portfolio_and_risk()
         self._populate_trades_full()
+        self._render_hedge_panel()
         self._osint_stories: list[dict] = []
         self._agent_analysis: dict = {}
         self._agent_history: list[dict] = []
@@ -3399,276 +3965,29 @@ class NepseDashboard(App):
         init_kalimati_db()
         self._load_kalimati_async()
         self._load_macro_rates_async(force=True)
-        mode_label = "LIVE TMS" if self.trade_mode == "live" else "PAPER AUTO"
+        mode_label = self._display_mode_label()
         self._set_status(
-            f"Mode: {mode_label}  Γöé  Session: {self.md.latest}  Γöé  "
-            f"Γû▓{self.md.adv} Γû╝{self.md.dec}  Γöé  Auto-refresh 30s"
+            f"Mode: {mode_label}  │  Session: {self.md.latest}  │  "
+            f"▲{self.md.adv} ▼{self.md.dec}  │  Auto-refresh 30s"
         )
         self.set_interval(30, self._auto_refresh)
         self.set_interval(TICKER_SPEED, self._scroll_ticker)
         self.set_interval(0.45, self._animate_agent_typing)
 
-        # Auto-trading engine DISABLED ΓÇö re-enable by uncommenting below
-        # if self.trade_mode == "paper":
-        #     self._trading_engine = TUITradingEngine(
-        #         capital=INITIAL_CAPITAL,
-        #         on_status=lambda msg: self.call_from_thread(self._set_status, msg),
-        #         on_activity=lambda msg: self.call_from_thread(self._append_activity, msg),
-        #         on_portfolio_changed=lambda: self.call_from_thread(self._on_engine_portfolio_changed),
-        #         on_agent_updated=lambda: self.call_from_thread(self._on_engine_agent_updated),
-        #     )
-        #     self._start_trading_loop()
-
-    @staticmethod
-    def _solve_captcha(page) -> str:
-        """OCR the TMS captcha image. Returns solved text or empty string."""
-        try:
-            from PIL import Image, ImageFilter
-            import pytesseract, io
-            captcha_el = page.locator("img.captcha-image-dimension").first
-            captcha_bytes = captcha_el.screenshot(timeout=3000)
-            img = Image.open(io.BytesIO(captcha_bytes)).convert("L")
-            # Scale 3x + threshold + median filter ΓÇö tuned for TMS noise captcha
-            big = img.resize((img.width * 3, img.height * 3), Image.LANCZOS)
-            bw = big.point(lambda p: 255 if p > 125 else 0)
-            clean = bw.filter(ImageFilter.MedianFilter(5))
-            text = pytesseract.image_to_string(
-                clean,
-                config="--psm 7 -c tessedit_char_whitelist=abcdefghijklmnopqrstuvwxyz0123456789"
-            ).strip()
-            return text
-        except Exception:
-            return ""
+        # Start one auto-trading engine per account in background threads
+        if self.trade_mode == "paper":
+            self._start_all_account_engines()
 
     @work(thread=True)
     def _init_tms(self) -> None:
-        """Initialize TMS: check existing session first, login only if needed."""
-        service = None
-        try:
-            import os, time
-            os.environ["NEPSE_LIVE_EXECUTION_ENABLED"] = "true"
-            os.environ["NEPSE_LIVE_EXECUTION_MODE"] = "live"
-            from pathlib import Path
+        """Live brokerage not available in public release."""
+        pass
 
-            creds = getattr(self, '_tms_credentials', None)
-            if not creds:
-                self.app.call_from_thread(
-                    self._set_status, "Mode: LIVE  |  No credentials provided")
-                return
+    def _attach_tms_live_source(self) -> None:
+        """Live brokerage not available in public release."""
+        pass
 
-            profile_dir = Path(".tms_chrome_profile").resolve()
-            profile_dir.mkdir(parents=True, exist_ok=True)
-
-            from backend.quant_pro.tms_session import load_tms_settings
-            from backend.quant_pro.tms_executor import LocalTMSExecutionService
-            settings = load_tms_settings()
-            settings.enabled = True
-            settings.mode = "live"
-            settings.headless = False
-            settings.profile_dir = profile_dir
-
-            try:
-                if self.tms_service is not None:
-                    self.tms_service.stop()
-            except Exception:
-                pass
-            self.tms_service = None
-            service = LocalTMSExecutionService(settings=settings)
-            executor = service.executor
-
-            # ΓöÇΓöÇ Step 1: Try existing session via the same executor we will keep ΓöÇ
-            self.app.call_from_thread(
-                self._set_status,
-                f"Mode: LIVE  |  Checking existing TMS session..."
-            )
-            try:
-                status = executor.session_status()
-            except Exception:
-                status = None
-
-            if status and status.ready and not status.login_required:
-                # Already logged in ΓÇö just use it
-                self.app.call_from_thread(
-                    self._set_status,
-                    f"Mode: LIVE TMS  |  Session active ΓÇö fetching portfolio..."
-                )
-                self.tms_service = service
-                self.tms_service.start()
-                self.app.call_from_thread(self._populate_portfolio_and_risk)
-                self.app.call_from_thread(self._populate_trades_full)
-                self.app.call_from_thread(self._refresh_watchlist_live, True)
-                self.app.call_from_thread(
-                    self._set_status,
-                    f"Mode: LIVE TMS  |  Connected  |  Session: {self.md.latest}  |  "
-                    f"Γû▓{self.md.adv} Γû╝{self.md.dec}"
-                )
-                return
-
-            # ΓöÇΓöÇ Step 2: Not logged in ΓÇö open browser for login ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-            self.app.call_from_thread(
-                self._set_status,
-                f"Mode: LIVE  |  Login required ΓÇö launching browser..."
-            )
-            MAX_ATTEMPTS = 2
-            def _login_callback(page):
-                try:
-                    page.add_init_script('Object.defineProperty(navigator, "webdriver", {get: () => undefined})')
-                except Exception:
-                    pass
-
-                def _dashboard_loaded() -> bool:
-                    try:
-                        if page.locator("input[placeholder*='Client Code']").count() != 0:
-                            return False
-                        body = page.locator("body").inner_text(timeout=3000)[:500].lower()
-                        return any(
-                            kw in body for kw in ["portfolio", "market watch", "collateral", "order entry", "welcome"]
-                        )
-                    except Exception:
-                        return False
-
-                for attempt in range(1, MAX_ATTEMPTS + 1):
-                    self.app.call_from_thread(
-                        self._set_status,
-                        f"Mode: LIVE  |  Login attempt {attempt}/{MAX_ATTEMPTS}..."
-                    )
-
-                    page.goto(
-                        "https://tms19.nepsetms.com.np/tms/client/dashboard",
-                        wait_until="domcontentloaded",
-                        timeout=20000,
-                    )
-                    time.sleep(3)
-
-                    if _dashboard_loaded():
-                        return True
-
-                    try:
-                        user_input = page.locator("input[placeholder*='Client Code']").first
-                        user_input.click(timeout=3000)
-                        user_input.fill(creds["username"])
-                        time.sleep(0.3)
-                    except Exception:
-                        continue
-
-                    try:
-                        pass_input = page.locator("#password-field, input[type='password']").first
-                        pass_input.click(timeout=3000)
-                        pass_input.fill(creds["password"])
-                        time.sleep(0.3)
-                    except Exception:
-                        continue
-
-                    captcha_text = self._solve_captcha(page)
-                    if not captcha_text or len(captcha_text) < 4:
-                        self.app.call_from_thread(
-                            self._set_status,
-                            f"Mode: LIVE  |  Captcha OCR failed (got '{captcha_text}'), retrying..."
-                        )
-                        time.sleep(1)
-                        continue
-
-                    self.app.call_from_thread(
-                        self._set_status,
-                        f"Mode: LIVE  |  Attempt {attempt} ΓÇö captcha: '{captcha_text}' ΓÇö submitting..."
-                    )
-
-                    try:
-                        captcha_input = page.locator("#captchaEnter").first
-                        captcha_input.click(timeout=2000)
-                        captcha_input.fill(captcha_text)
-                        time.sleep(0.3)
-                    except Exception:
-                        continue
-
-                    try:
-                        login_btn = page.locator("button:has-text('Sign In'), input[type='submit']").first
-                        login_btn.click(timeout=3000)
-                    except Exception:
-                        page.keyboard.press("Enter")
-
-                    time.sleep(4)
-                    try:
-                        page.wait_for_load_state("networkidle", timeout=8000)
-                    except Exception:
-                        pass
-
-                    if _dashboard_loaded():
-                        return True
-
-                    try:
-                        body_text = page.locator("body").inner_text(timeout=3000)[:500].lower()
-                    except Exception:
-                        body_text = ""
-                    if "captcha" in body_text:
-                        self.app.call_from_thread(
-                            self._set_status,
-                            f"Mode: LIVE  |  Captcha wrong on attempt {attempt}, retrying..."
-                        )
-                        time.sleep(1)
-
-                self.app.call_from_thread(
-                    self._set_status,
-                    f"Mode: LIVE  |  Solve captcha manually in browser..."
-                )
-                try:
-                    user_input = page.locator("input[placeholder*='Client Code']").first
-                    user_input.click(timeout=2000)
-                    user_input.fill(creds["username"])
-                    time.sleep(0.2)
-                    pass_input = page.locator("#password-field, input[type='password']").first
-                    pass_input.click(timeout=2000)
-                    pass_input.fill(creds["password"])
-                    captcha_input = page.locator("#captchaEnter").first
-                    captcha_input.click(timeout=2000)
-                except Exception:
-                    pass
-
-                for _ in range(120):
-                    time.sleep(1)
-                    if _dashboard_loaded():
-                        return True
-                return False
-
-            logged_in = executor._run_with_page(_login_callback, headless=False)
-
-            if logged_in:
-                self.app.call_from_thread(
-                    self._set_status,
-                    f"Mode: LIVE TMS  |  Logged in ΓÇö fetching portfolio..."
-                )
-                self.tms_service = service
-                self.tms_service.start()
-                self.app.call_from_thread(self._populate_portfolio_and_risk)
-                self.app.call_from_thread(self._populate_trades_full)
-                self.app.call_from_thread(self._refresh_watchlist_live, True)
-                self.app.call_from_thread(
-                    self._set_status,
-                    f"Mode: LIVE TMS  |  Connected  |  Session: {self.md.latest}  |  "
-                    f"Γû▓{self.md.adv} Γû╝{self.md.dec}"
-                )
-            else:
-                try:
-                    service.executor.close()
-                except Exception:
-                    pass
-                self.app.call_from_thread(
-                    self._set_status,
-                    f"Mode: LIVE  |  Login failed  |  Session: {self.md.latest}"
-                )
-
-        except Exception as e:
-            try:
-                if service is not None and self.tms_service is None:
-                    service.executor.close()
-            except Exception:
-                pass
-            self.app.call_from_thread(
-                self._set_status,
-                f"Mode: LIVE  |  TMS failed: {e}  |  Session: {self.md.latest}"
-            )
-
-    # ΓöÇΓöÇ News ticker ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+    # ── News ticker ──────────────────────────────────────────────────────────
 
     def _build_ticker(self) -> None:
         """Build the ticker string from market data."""
@@ -3677,12 +3996,12 @@ class NepseDashboard(App):
         if not self.md.gainers.empty:
             for _, r in self.md.gainers.head(5).iterrows():
                 chg = r["chg"]
-                arrow = "Γû▓" if chg >= 0 else "Γû╝"
+                arrow = "▲" if chg >= 0 else "▼"
                 items.append(f"{r['symbol']} {r['close']:.1f} {arrow}{chg:+.2f}%")
         # Top losers
         if not self.md.losers.empty:
             for _, r in self.md.losers.head(5).iterrows():
-                items.append(f"{r['symbol']} {r['close']:.1f} Γû╝{r['chg']:+.2f}%")
+                items.append(f"{r['symbol']} {r['close']:.1f} ▼{r['chg']:+.2f}%")
         # Volume leaders
         if not self.md.vol_top.empty:
             for _, r in self.md.vol_top.head(3).iterrows():
@@ -3721,7 +4040,7 @@ class NepseDashboard(App):
                 break
 
         # Build the full ticker line with separators
-        sep = "  Γùå  "
+        sep = "  ◆  "
         self._ticker_text = sep + sep.join(items) + sep
         self._ticker_offset = 0
 
@@ -3745,11 +4064,11 @@ class NepseDashboard(App):
         i = 0
         while i < len(visible):
             ch = visible[i]
-            if ch == "Γû▓":
+            if ch == "▲":
                 styled.append(ch, style=f"bold {GAIN_HI}")
-            elif ch == "Γû╝":
+            elif ch == "▼":
                 styled.append(ch, style=f"bold {LOSS_HI}")
-            elif ch == "Γùå":
+            elif ch == "◆":
                 styled.append(ch, style="#555555")
             elif ch == "+" or (ch == "-" and i + 1 < len(visible) and visible[i + 1].isdigit()):
                 # Collect the number
@@ -3792,7 +4111,7 @@ class NepseDashboard(App):
         self.query_one("#ticker-bar", Static).update(styled)
         self._ticker_offset += 1
 
-    # ΓöÇΓöÇ Tab switching ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+    # ── Tab switching ─────────────────────────────────────────────────────────
 
     def action_tab(self, name: str) -> None:
         if name == "screener":
@@ -3803,10 +4122,8 @@ class NepseDashboard(App):
         self.query_one("#content", ContentSwitcher).current = name
         self._update_header()
         self._refresh_active_tab_view(force_watchlist_sync=True)
-        if name == "signals":
-            self._load_signals_async()
 
-    # ΓöÇΓöÇ Actions ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+    # ── Actions ───────────────────────────────────────────────────────────────
 
     def action_buy(self) -> None:
         self.push_screen(
@@ -3842,7 +4159,7 @@ class NepseDashboard(App):
                 self._set_status(f"Account activate failed: {exc}")
             return
         self.action_tab("agents")
-        self._run_agent_analysis(force=False)
+        self._run_agent_analysis(force=True)
 
     def action_tf(self, tf: str) -> None:
         """Switch lookup chart timeframe: D/W/M/I."""
@@ -3858,16 +4175,30 @@ class NepseDashboard(App):
         self.lookup_tf = tf
         self._populate_lookup()
         tf_names = {"D": "Daily", "W": "Weekly", "M": "Monthly", "Y": "Yearly", "I": "Intraday"}
-        self._set_status(f"Chart: {tf_names.get(tf, tf)}  Γöé  D=Daily  W=Weekly  M=Monthly  Y=Yearly  I=Intraday")
+        self._set_status(f"Chart: {tf_names.get(tf, tf)}  │  D=Daily  W=Weekly  M=Monthly  Y=Yearly  I=Intraday")
 
     def action_refresh(self) -> None:
+        if self.active_tab == "signals":
+            self.action_force_signals_reload()
+            self._do_refresh()
+            return
         if self.active_tab == "watchlist" and self.trade_mode == "live" and self.tms_service:
             self._refresh_watchlist_live(force=True)
         self._do_refresh()
 
+    def action_force_signals_reload(self) -> None:
+        if self.active_tab != "signals":
+            self._set_status("Force signals reload is available on the Signals tab")
+            return
+        self._reload_account_bindings_from_disk()
+        self._signals_table_cache_key = ""
+        self._signals_table_cache_payload = None
+        self._set_signals_table_loading()
+        self._load_signals_async(force=True)
+
     def _on_buy(self, result: dict | None) -> None:
         if not result: return
-        # Agent veto gate (reads cached analysis only ΓÇö no Sonnet call)
+        # Agent veto gate (reads cached analysis only — no Sonnet call)
         approved, reason = check_trade_approval(result["symbol"], "BUY")
         if not approved:
             self._set_status(f"AGENT BLOCKED BUY {result['symbol']}: {reason}")
@@ -3898,9 +4229,6 @@ class NepseDashboard(App):
         if not approved:
             self._set_status(f"AGENT BLOCKED SELL {result['symbol']}: {reason}")
             return
-        if self.trade_mode == "live":
-            self._submit_tms_order(result, "SELL", reason)
-            return
         holdings = _build_sell_holdings_map(self._stats.get("positions", []) if hasattr(self, "_stats") else [])
         try:
             qty = _resolve_sell_qty(result["symbol"], result["shares"], holdings)
@@ -3918,52 +4246,25 @@ class NepseDashboard(App):
 
     @work(thread=True)
     def _submit_tms_order(self, result: dict, action: str, agent_reason: str) -> None:
-        """Submit order through TMS browser automation."""
-        sym = result["symbol"]
-        shares = result["shares"]
-        price = result.get("price", "")
-
-        if not self.tms_service:
-            self.app.call_from_thread(
-                self._set_status, f"TMS not initialized ΓÇö cannot submit {action} {sym}")
-            return
-
-        try:
-            control = build_tui_control_plane(self)
-            qty = int(shares) if str(shares).isdigit() else 10
-            px = float(price) if price else None
-            self.app.call_from_thread(
-                self._set_status,
-                f"TMS: Submitting {action} {sym} x{qty}..."
-            )
-            command = control.create_live_intent(
-                action=action.lower(),
-                symbol=sym,
-                quantity=qty,
-                limit_price=px,
-                mode="live",
-                source="owner_manual",
-                reason="tui_agent_order",
-                metadata={"interactive": True, "agent_reason": agent_reason},
-                operator_surface="tui",
-            )
-            status = f"TMS {action} {sym}: {command.message}"
-            status += f"  |  Agent: {agent_reason[:50]}"
-            self.app.call_from_thread(self._set_status, status)
-        except Exception as e:
-            self.app.call_from_thread(
-                self._set_status, f"TMS {action} {sym} failed: {e}"
-            )
+        """Live TMS order submission is disabled in the public paper build."""
+        self.app.call_from_thread(self._set_status, "Only paper trading is supported in this build.")
 
     def _on_lookup(self, result: dict | None) -> None:
         if not result: return
         self.lookup_sym = result["symbol"]
         self.action_tab("lookup")
 
-    # ΓöÇΓöÇ Order Management ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+    # ── Order Management ─────────────────────────────────────────────────────
 
     def _load_paper_orders(self) -> None:
         """Load paper orders from JSON files."""
+        account_id = str(getattr(self, "__dict__", {}).get("_current_account_id", "") or "").strip()
+        if account_id:
+            account_dir = _account_dir(account_id)
+            self.PAPER_ORDERS_FILE = account_dir / "tui_paper_orders.json"
+            self.PAPER_ORDER_HISTORY_FILE = account_dir / "tui_paper_order_history.json"
+        self._paper_orders = []
+        self._paper_order_history = []
         if self.PAPER_ORDERS_FILE.exists():
             try:
                 self._paper_orders = _json.loads(self.PAPER_ORDERS_FILE.read_text())
@@ -3974,11 +4275,16 @@ class NepseDashboard(App):
                 self._paper_order_history = _json.loads(self.PAPER_ORDER_HISTORY_FILE.read_text())
             except Exception:
                 self._paper_order_history = []
+        from backend.trading.live_trader import now_nst
+        self._paper_trades_today = _paper_filled_orders_for_day(
+            self._paper_order_history,
+            now_nst().strftime("%Y-%m-%d"),
+        )
 
     def _save_paper_orders(self) -> None:
         """Persist paper orders to JSON files."""
-        self.PAPER_ORDERS_FILE.write_text(_json.dumps(self._paper_orders, indent=2))
-        self.PAPER_ORDER_HISTORY_FILE.write_text(_json.dumps(self._paper_order_history, indent=2))
+        _write_json_locked(Path(self.PAPER_ORDERS_FILE), list(self._paper_orders))
+        _write_json_locked(Path(self.PAPER_ORDER_HISTORY_FILE), list(self._paper_order_history))
 
     def _create_paper_order(self, action: str, symbol: str, qty: int, price: float, slippage: float = 2.0) -> dict:
         """Create a new paper order dict."""
@@ -3998,16 +4304,82 @@ class NepseDashboard(App):
             "created_at": ts,
             "updated_at": ts,
             "day": now_nst().strftime("%Y-%m-%d"),
+            "source": "dashboard_tui",
+            "reason": "",
         }
         return order
 
+    def _paper_has_same_day_order(self, symbol: str, *, action: str) -> bool:
+        from backend.trading.live_trader import now_nst
+        sym = str(symbol or "").strip().upper()
+        act = str(action or "").strip().upper()
+        today = now_nst().strftime("%Y-%m-%d")
+        for row in [*self._paper_orders, *self._paper_order_history]:
+            if str(row.get("symbol") or "").strip().upper() != sym:
+                continue
+            if str(row.get("action") or "").strip().upper() != act:
+                continue
+            row_day = str(row.get("day") or "")[:10] or str(row.get("created_at") or "")[:10]
+            if row_day != today:
+                continue
+            if str(row.get("status") or "").strip().upper() in {"OPEN", "FILLED"}:
+                return True
+        return False
+
+    def _paper_position_opened_today(self, symbol: str) -> bool:
+        from backend.trading.live_trader import now_nst
+        sym = str(symbol or "").strip().upper()
+        today = now_nst().strftime("%Y-%m-%d")
+        port = load_port()
+        if port.empty or "Symbol" not in port.columns:
+            return False
+        rows = port[port["Symbol"].astype(str).str.upper() == sym]
+        if rows.empty:
+            return False
+        entry_dates = rows.get("Entry_Date")
+        if entry_dates is None:
+            return False
+        return any(str(value)[:10] == today for value in entry_dates.tolist())
+
+    def _paper_same_day_trade_block(self, action: str, symbol: str) -> Optional[str]:
+        sym = str(symbol or "").strip().upper()
+        act = str(action or "").strip().upper()
+        if act == "BUY" and self._paper_has_same_day_order(sym, action="SELL"):
+            return f"Rejected: NEPSE same-day rule blocks buying {sym} after a sell today."
+        if act == "SELL":
+            if self._paper_position_opened_today(sym) or self._paper_has_same_day_order(sym, action="BUY"):
+                return f"Rejected: NEPSE same-day rule blocks selling {sym} on the same day as a buy."
+        return None
+
     def _submit_paper_order(self, action: str, symbol: str, qty: int, price: float, slippage: float = 2.0) -> str:
         """Submit a new paper limit order."""
-        order = self._create_paper_order(action, symbol, qty, price, slippage)
-        self._paper_orders.append(order)
-        self._save_paper_orders()
+        self._load_paper_orders()
+        block_reason = self._paper_same_day_trade_block(action, symbol)
+        if block_reason:
+            return block_reason
+        account_id = str(getattr(self, "__dict__", {}).get("_current_account_id", "") or "account_1")
+        account_dir = _account_dir(account_id)
+        service = PaperExecutionService(
+            account_id,
+            account_dir=account_dir,
+            initial_capital=_account_initial_capital_from_files(account_dir),
+        )
+        result = service.submit_order(
+            account_id,
+            action,
+            symbol,
+            qty,
+            price,
+            "dashboard_tui",
+            "",
+            slippage_pct=slippage,
+        )
+        self._load_paper_orders()
         self._populate_orders_tab()
-        return f"Order {order['id']}: {action} {symbol} x{qty} @ {price:,.1f} slip:{slippage:.1f}% ΓÇö OPEN"
+        if not result.ok:
+            return f"Rejected: {action} {symbol} x{qty} @ {price:,.1f} — {result.message}"
+        order = result.order
+        return f"Order {order.order_id}: {action} {symbol} x{qty} @ {price:,.1f} slip:{slippage:.1f}% — OPEN"
 
     def _cancel_paper_order(self, order_id: str) -> str:
         """Cancel a specific paper order by ID."""
@@ -4042,6 +4414,8 @@ class NepseDashboard(App):
     def _match_paper_orders(self) -> None:
         """Check open orders against current prices and fill if matched."""
         from backend.trading.live_trader import now_nst
+        if str(getattr(self, "__dict__", {}).get("_current_account_id", "") or "").strip():
+            self._load_paper_orders()
         if not self._paper_orders:
             return
         # Get current LTPs from market data
@@ -4061,44 +4435,80 @@ class NepseDashboard(App):
                     if sym and price > 0:
                         ltps[sym] = float(price)
 
-        ts = now_nst().strftime("%Y-%m-%d %H:%M:%S")
-        filled = []
-        for o in self._paper_orders:
-            if o["status"] != "OPEN":
-                continue
-            sym = o["symbol"]
-            if sym not in ltps:
-                continue
-            ltp = ltps[sym]
-            slip_pct = o.get("slippage_pct", 2.0) / 100.0
-            matched = False
-            if o["action"] == "BUY" and ltp <= o["price"] * (1 + slip_pct):
-                matched = True
-            elif o["action"] == "SELL" and ltp >= o["price"] * (1 - slip_pct):
-                matched = True
-            if matched:
+        if not str(getattr(self, "__dict__", {}).get("_current_account_id", "") or "").strip():
+            ts = now_nst().strftime("%Y-%m-%d %H:%M:%S")
+            filled = []
+            for o in self._paper_orders:
+                if o["status"] != "OPEN":
+                    continue
+                sym = o["symbol"]
+                if sym not in ltps:
+                    continue
+                ltp = ltps[sym]
+                slip_pct = o.get("slippage_pct", 2.0) / 100.0
+                matched = (
+                    o["action"] == "BUY" and ltp <= o["price"] * (1 + slip_pct)
+                ) or (
+                    o["action"] == "SELL" and ltp >= o["price"] * (1 - slip_pct)
+                )
+                if not matched:
+                    continue
+                block_reason = self._paper_same_day_trade_block(o["action"], sym)
+                if block_reason:
+                    o["status"] = "CANCELLED"
+                    o["updated_at"] = ts
+                    o["reason"] = "same_day_rule"
+                    filled.append(o)
+                    status_msg = f"Order cancelled: {o['action']} {sym} — {block_reason}"
+                    self._append_activity(f"ORDER CANCELLED: {o['action']} {sym} — {block_reason}")
+                    self._set_status(status_msg)
+                    continue
                 o["status"] = "FILLED"
                 o["filled_qty"] = o["qty"]
                 o["fill_price"] = ltp
                 o["updated_at"] = ts
                 filled.append(o)
-                # Execute the trade in paper portfolio
-                if o["action"] == "BUY":
-                    msg = exec_buy(o["symbol"], str(o["qty"]), str(ltp))
-                else:
-                    msg = exec_sell(o["symbol"], str(o["qty"]), str(ltp))
-                self._append_activity(f"ORDER FILLED: {o['action']} {sym} x{o['qty']} @ {ltp:,.1f} ΓÇö {msg}")
+                msg = exec_buy(o["symbol"], str(o["qty"]), str(ltp)) if o["action"] == "BUY" else exec_sell(o["symbol"], str(o["qty"]), str(ltp))
+                self._append_activity(f"ORDER FILLED: {o['action']} {sym} x{o['qty']} @ {ltp:,.1f} — {msg}")
+            if filled:
+                for o in filled:
+                    self._paper_order_history.append(o)
+                    self._paper_trades_today.append(o)
+                self._paper_orders = [x for x in self._paper_orders if x["status"] == "OPEN"]
+                self._save_paper_orders()
+                self._populate_orders_tab()
+                self._populate_portfolio_and_risk()
+                self._populate_trades_full()
+            self._render_hedge_panel()
+            return
 
-        if filled:
-            today = now_nst().strftime("%Y-%m-%d")
-            for o in filled:
-                self._paper_order_history.append(o)
-                self._paper_trades_today.append(o)
-            self._paper_orders = [x for x in self._paper_orders if x["status"] == "OPEN"]
-            self._save_paper_orders()
+        account_id = str(getattr(self, "__dict__", {}).get("_current_account_id", "") or "account_1")
+        account_dir = _account_dir(account_id)
+        service = PaperExecutionService(
+            account_id,
+            account_dir=account_dir,
+            initial_capital=_account_initial_capital_from_files(account_dir),
+        )
+        result = service.match_open_orders(
+            account_id,
+            {sym: {"ltp": ltp, "source": "dashboard_market_snapshot", "age_seconds": 0} for sym, ltp in ltps.items()},
+        )
+
+        for order in result.filled_orders:
+            self._append_activity(
+                f"ORDER FILLED: {order.action} {order.symbol} x{order.filled_qty} @ {order.fill_price:,.1f}"
+            )
+        for order in result.rejected_orders:
+            self._append_activity(
+                f"ORDER REJECTED: {order.action} {order.symbol} — {order.risk_result.get('reason', order.reason)}"
+            )
+
+        if result.filled_orders or result.rejected_orders:
+            self._load_paper_orders()
             self._populate_orders_tab()
             self._populate_portfolio_and_risk()
             self._populate_trades_full()
+        self._render_hedge_panel()
 
     def _populate_orders_tab(self) -> None:
         """Populate the Orders tab DataTables."""
@@ -4109,6 +4519,7 @@ class NepseDashboard(App):
 
     def _populate_orders_tab_paper(self) -> None:
         """Populate orders tab from paper order book."""
+        self._load_paper_orders()
         # -- Daily order book (open orders) --
         dt_daily = self.query_one("#dt-orders-daily", DataTable)
         dt_daily.clear(columns=True)
@@ -4134,9 +4545,9 @@ class NepseDashboard(App):
             )
         if not daily:
             dt_daily.add_row(
-                Text("ΓÇö", style=DIM), Text("ΓÇö", style=DIM), Text("No open orders", style=DIM),
-                Text("ΓÇö", style=DIM), Text("ΓÇö", style=DIM), Text("ΓÇö", style=DIM),
-                Text("ΓÇö", style=DIM), Text("ΓÇö", style=DIM), Text("ΓÇö", style=DIM),
+                Text("—", style=DIM), Text("—", style=DIM), Text("No open orders", style=DIM),
+                Text("—", style=DIM), Text("—", style=DIM), Text("—", style=DIM),
+                Text("—", style=DIM), Text("—", style=DIM), Text("—", style=DIM),
             )
 
         # -- Historic order book (filled + cancelled) --
@@ -4151,7 +4562,7 @@ class NepseDashboard(App):
                 status_style = LOSS
             else:
                 status_style = YELLOW
-            fill_px = f'{o["fill_price"]:,.1f}' if o.get("fill_price") else "ΓÇö"
+            fill_px = f'{o["fill_price"]:,.1f}' if o.get("fill_price") else "—"
             dt_hist.add_row(
                 Text(o["id"][:8], style=DIM),
                 Text(o["action"], style=act_style),
@@ -4160,7 +4571,7 @@ class NepseDashboard(App):
                 Text(f'{o["price"]:,.1f}', style=AMBER),
                 Text(o["status"], style=status_style),
                 Text(fill_px, style=WHITE),
-                Text(o.get("updated_at", "")[-8:], style=DIM),
+                Text(str(o.get("created_at") or o.get("updated_at") or "")[-8:], style=DIM),
             )
 
         # -- Today's trades (filled orders) --
@@ -4185,10 +4596,10 @@ class NepseDashboard(App):
         filled_today = len(self._paper_trades_today)
         bar = self.query_one("#order-status-bar", Static)
         bar.update(Text.from_markup(
-            f"[bold #ffaf00]ORDER MANAGEMENT[/]  Γöé  "
-            f"[{GAIN}]Open: {open_count}[/]  Γöé  "
-            f"[{CYAN}]Filled today: {filled_today}[/]  Γöé  "
-            f"[#888888]Mode: PAPER  Γöé  B/S hotkeys create slippage-aware tickets[/]"
+            f"[bold #ffaf00]ORDER MANAGEMENT[/]  │  "
+            f"[{GAIN}]Open: {open_count}[/]  │  "
+            f"[{CYAN}]Filled today: {filled_today}[/]  │  "
+            f"[#888888]Mode: PAPER  │  Place orders via the order book[/]"
         ))
 
     def _populate_orders_tab_live(self) -> None:
@@ -4246,11 +4657,11 @@ class NepseDashboard(App):
         open_count = len([r for r in daily_records if "open" in str(r).lower() or "pending" in str(r).lower()])
         bar = self.query_one("#order-status-bar", Static)
         bar.update(Text.from_markup(
-            f"[bold #ffaf00]ORDER MANAGEMENT[/]  Γöé  "
-            f"[{GAIN if session_ok else LOSS}]TMS: {'CONNECTED' if session_ok else 'DISCONNECTED'}[/]  Γöé  "
-            f"[{CYAN}]Daily orders: {len(daily_records)}[/]  Γöé  "
-            f"[{YELLOW}]Open: {open_count}[/]  Γöé  "
-            f"[#888888]Mode: LIVE TMS[/]"
+            f"[bold #ffaf00]ORDER MANAGEMENT[/]  │  "
+            f"[{GAIN if session_ok else LOSS}]TMS: {'CONNECTED' if session_ok else 'DISCONNECTED'}[/]  │  "
+            f"[{CYAN}]Daily orders: {len(daily_records)}[/]  │  "
+            f"[{YELLOW}]Open: {open_count}[/]  │  "
+            f"[#888888]Mode: PAPER[/]"
         ))
 
     def _on_order_submit(self) -> None:
@@ -4387,45 +4798,33 @@ class NepseDashboard(App):
         slip = max(0.0, slippage_pct) / 100.0
         if action == "BUY":
             upper = price * (1 + slip)
-            return f"Γëñ {upper:,.1f}"
+            return f"≤ {upper:,.1f}"
         lower = price * (1 - slip)
-        return f"ΓëÑ {lower:,.1f}"
+        return f"≥ {lower:,.1f}"
 
     @work(thread=True)
     def _submit_live_order(self, action: str, sym: str, qty: int, price: float) -> None:
-        """Submit order through TMS in live mode."""
-        if not self.tms_service:
-            self.app.call_from_thread(self._set_status, f"TMS not initialized")
-            return
-        try:
-            control = build_tui_control_plane(self)
-            self.app.call_from_thread(self._set_status, f"TMS: Submitting {action} {sym} x{qty} @ {price:,.1f}...")
-            command = control.create_live_intent(
-                action=action.lower(),
-                symbol=sym,
-                quantity=qty,
-                limit_price=price,
-                mode="live",
-                source="owner_manual",
-                reason="tui_orders_tab",
-                metadata={"interactive": True},
-                operator_surface="tui",
-            )
-            self.app.call_from_thread(self._set_status, f"TMS {action} {sym}: {command.message}")
-            # Refresh orders tab
-            self.app.call_from_thread(self._populate_orders_tab)
-        except Exception as e:
-            self.app.call_from_thread(self._set_status, f"TMS order failed: {e}")
+        """Live TMS order submission is disabled in the public paper build."""
+        self.app.call_from_thread(self._set_status, "Only paper trading is supported in this build.")
 
     def on_unmount(self) -> None:
-        """Graceful shutdown ΓÇö stop trading engine."""
+        """Graceful shutdown — stop trading engine."""
         try:
             if self.trade_mode == "paper":
                 self._persist_active_account_snapshot()
         except Exception:
             pass
-        if self._trading_engine:
-            self._trading_engine.stop()
+        for _eng in list(getattr(self, "_account_engines", {}).values()):
+            try:
+                _eng.stop()
+            except Exception:
+                pass
+        try:
+            src = getattr(self, "_tms_live_src", None)
+            if src is not None:
+                src.stop()
+        except Exception:
+            pass
 
     @staticmethod
     def _upsert_live_prices(snap) -> None:
@@ -4477,13 +4876,91 @@ class NepseDashboard(App):
         except Exception:
             pass
 
-    # ΓöÇΓöÇ Trading Engine ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+    # ── Trading Engine ─────────────────────────────────────────────────────────
 
     @work(thread=True)
     def _start_trading_loop(self) -> None:
-        """Run the auto-trading engine in a background thread."""
+        """Run the auto-trading engine in a background thread (legacy single-account)."""
         if self._trading_engine:
             self._trading_engine.run_loop()
+
+    # ── Multi-account engine management ────────────────────────────────────────
+
+    def _start_all_account_engines(self) -> None:
+        """Create and start one TUITradingEngine per account."""
+        self._account_engines = {}
+        for account in list(getattr(self, "_paper_accounts", []) or []):
+            account_id = str(account.get("id") or "")
+            if not account_id:
+                continue
+            strategy_id = str(account.get("strategy_id") or "")
+            strategy = strategy_registry.load_strategy(strategy_id) if strategy_id else None
+            config = dict((strategy or {}).get("config") or {}) or dict(LONG_TERM_CONFIG)
+            account_dir = _account_dir(account_id)
+            account_capital = _account_initial_capital_from_files(
+                account_dir,
+                float(config.get("initial_capital") or INITIAL_CAPITAL),
+            )
+            engine = TUITradingEngine(
+                capital=account_capital,
+                signal_types=list(config.get("signal_types") or list(LONG_TERM_CONFIG.get("signal_types") or [])),
+                max_positions=int(config.get("max_positions") or LONG_TERM_CONFIG.get("max_positions") or 5),
+                holding_days=int(config.get("holding_days") or LONG_TERM_CONFIG.get("holding_days") or 40),
+                sector_limit=float(config.get("sector_limit") or LONG_TERM_CONFIG.get("sector_limit") or 0.35),
+                stop_loss_pct=float(config.get("stop_loss_pct") or LONG_TERM_CONFIG.get("stop_loss_pct") or 0.08),
+                trailing_stop_pct=float(config.get("trailing_stop_pct") or LONG_TERM_CONFIG.get("trailing_stop_pct") or 0.10),
+                hedge_enabled=bool(getattr(self, "_hedge_enabled", True)),
+                portfolio_file=account_dir / "paper_portfolio.csv",
+                trade_log_file=account_dir / "paper_trade_log.csv",
+                nav_log_file=account_dir / "paper_nav_log.csv",
+                state_file=account_dir / "paper_state.json",
+                account_id=account_id,
+                strategy_id=strategy_id,
+                strategy_config=config,
+                on_status=self._make_engine_status_cb(account_id),
+                on_activity=self._make_engine_activity_cb(account_id),
+                on_portfolio_changed=self._make_engine_portfolio_cb(account_id),
+                on_agent_updated=self._make_engine_agent_cb(account_id),
+            )
+            self._account_engines[account_id] = engine
+            if account_id == self._current_account_id:
+                self._trading_engine = engine
+            self._start_account_engine_worker(account_id)
+
+    @work(thread=True)
+    def _start_account_engine_worker(self, account_id: str) -> None:
+        """Run one account's trading engine in a dedicated background worker thread."""
+        engine = self._account_engines.get(account_id)
+        if engine:
+            engine.run_loop()
+
+    def _make_engine_status_cb(self, account_id: str):
+        """Status callback — only updates UI when this account is active."""
+        def cb(msg: str) -> None:
+            if account_id == getattr(self, "_current_account_id", ""):
+                self.call_from_thread(self._set_status, msg)
+        return cb
+
+    def _make_engine_activity_cb(self, account_id: str):
+        """Activity log callback — only updates UI when this account is active."""
+        def cb(msg: str) -> None:
+            if account_id == getattr(self, "_current_account_id", ""):
+                self.call_from_thread(self._append_activity, msg)
+        return cb
+
+    def _make_engine_portfolio_cb(self, account_id: str):
+        """Portfolio-changed callback — only refreshes UI when this account is active."""
+        def cb() -> None:
+            if account_id == getattr(self, "_current_account_id", ""):
+                self.call_from_thread(self._on_engine_portfolio_changed)
+        return cb
+
+    def _make_engine_agent_cb(self, account_id: str):
+        """Agent-updated callback — only refreshes UI when this account is active."""
+        def cb() -> None:
+            if account_id == getattr(self, "_current_account_id", ""):
+                self.call_from_thread(self._on_engine_agent_updated)
+        return cb
 
     def _append_activity(self, msg: str) -> None:
         """Append a message to the activity log in the portfolio tab."""
@@ -4501,15 +4978,16 @@ class NepseDashboard(App):
             pass
 
     def _on_engine_portfolio_changed(self) -> None:
-        """Called by engine when positions change ΓÇö refresh portfolio display."""
+        """Called by engine when positions change — refresh portfolio display."""
         if self._trading_engine:
             self._stats = self._trading_engine.get_portfolio_stats()
             self._populate_portfolio_tab(self._stats)
             self._populate_risk_tab(self._stats)
             self._populate_trades_full()
+        self._render_hedge_panel()
 
     def _on_engine_agent_updated(self) -> None:
-        """Called by engine after agent analysis ΓÇö refresh agents tab."""
+        """Called by engine after agent analysis — refresh agents tab."""
         try:
             self._load_agent_runtime_state()
             self._populate_agent_tab()
@@ -4518,7 +4996,12 @@ class NepseDashboard(App):
 
     def _load_agent_runtime_state(self) -> None:
         self._agent_analysis = load_agent_analysis() or {}
-        if str((self._agent_analysis or {}).get("account_id") or "") != str(getattr(self, "_current_account_id", "account_1") or "account_1"):
+        current_account_id = str(getattr(self, "_current_account_id", "account_1") or "account_1")
+        current_strategy_id = str((self._strategy_account_binding(current_account_id) or {}).get("strategy_id") or strategy_registry.default_strategy_for_account(current_account_id))
+        if (
+            str((self._agent_analysis or {}).get("account_id") or "") != current_account_id
+            or str((self._agent_analysis or {}).get("strategy_id") or "") != current_strategy_id
+        ):
             self._agent_analysis = {}
         all_recent = list(load_agent_history() or [])
         visible_cutoff = float(getattr(self, "_agent_visible_since", 0.0) or 0.0)
@@ -4541,18 +5024,44 @@ class NepseDashboard(App):
     def _sync_agent_account_context_env(self) -> None:
         account_id = str(getattr(self, "_current_account_id", "account_1") or "account_1")
         account_dir = _account_dir(account_id)
+        strategy_id = str((self._strategy_account_binding(account_id) or {}).get("strategy_id") or strategy_registry.default_strategy_for_account(account_id))
         os.environ["NEPSE_ACTIVE_ACCOUNT_ID"] = account_id
         os.environ["NEPSE_ACTIVE_ACCOUNT_NAME"] = self._active_account_name()
         os.environ["NEPSE_ACTIVE_ACCOUNT_DIR"] = str(account_dir)
         os.environ["NEPSE_ACTIVE_PORTFOLIO_FILE"] = str(account_dir / "paper_portfolio.csv")
+        os.environ["NEPSE_ACTIVE_STRATEGY_ID"] = strategy_id
+        os.environ["NEPSE_ACTIVE_STRATEGY_NAME"] = strategy_registry.strategy_name(strategy_id)
 
     def _current_agent_provider_label(self) -> str:
-        meta = dict((getattr(self, "_agent_analysis", {}) or {}).get("agent_runtime_meta") or {})
-        return str(
-            meta.get("provider")
+        try:
+            cfg = load_active_agent_config()
+        except Exception:
+            cfg = {}
+        configured = str(
+            cfg.get("provider_label")
+            or cfg.get("backend")
             or os.environ.get("NEPSE_AGENT_PROVIDER_LABEL")
             or "gemma4_mlx"
-        )
+        ).strip()
+        if configured:
+            return configured
+        meta = dict((getattr(self, "_agent_analysis", {}) or {}).get("agent_runtime_meta") or {})
+        return str(meta.get("provider") or "gemma4_mlx")
+
+    def _agent_runtime_summary(self) -> str:
+        cfg = load_active_agent_config()
+        preset = str(cfg.get("selected_preset") or cfg.get("backend") or "ollama")
+        backend = str(cfg.get("backend") or preset)
+        model = str(cfg.get("model") or "").strip() or "default"
+        return f"{preset} backend={backend} model={model}"
+
+    def _agent_backends_help(self) -> str:
+        backends = list_agent_backends()
+        parts = [
+            f"{row['id']} ({row.get('model') or 'no default model'})"
+            for row in backends
+        ]
+        return "Agent backends: " + ", ".join(parts)
 
     def _stop_active_agent_chat(self, *, announce: bool = True) -> bool:
         proc = getattr(self, "_agent_chat_process", None)
@@ -4626,7 +5135,7 @@ class NepseDashboard(App):
         archived = list(getattr(self, "_agent_archived_history", []) or [])
         recent = list(getattr(self, "_agent_history", []) or [])
         if getattr(self, "_agent_show_archived", False) and archived:
-            self._append_chat_note(f"ARCHIVE ┬╖ showing {len(archived)} older messages")
+            self._append_chat_note(f"ARCHIVE · showing {len(archived)} older messages")
             for item in archived:
                 role = str(item.get("role") or "AGENT").upper()
                 color = BLUE if role == "YOU" else AMBER if role == "AGENT" else LABEL
@@ -4654,7 +5163,7 @@ class NepseDashboard(App):
             self._detach_agent_typing_widget()
         self._update_agent_chat_hint()
 
-    # ΓöÇΓöÇ Auto-refresh ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+    # ── Auto-refresh ──────────────────────────────────────────────────────────
 
     def _auto_refresh(self) -> None:
         if self._refresh_inflight:
@@ -4667,6 +5176,17 @@ class NepseDashboard(App):
             return "unknown"
         return f"{self.md.latest}:{int(self.md.ts.timestamp())}"
 
+    def _signals_cache_key(self) -> str:
+        payload = self._active_strategy_payload() or {}
+        config = dict(payload.get("config") or {})
+        signal_types = ",".join(str(item).strip() for item in list(config.get("signal_types") or []))
+        return ":".join([
+            self._data_version(),
+            str(payload.get("id") or "default_c5"),
+            signal_types,
+            "regime" if bool(config.get("use_regime_filter", True)) else "no_regime",
+        ])
+
     def _refresh_active_tab_view(self, *, force_watchlist_sync: bool = False) -> None:
         """Refresh only the currently visible tab to keep redraws stable."""
         tab = str(self.active_tab or "market")
@@ -4676,9 +5196,11 @@ class NepseDashboard(App):
         if tab == "portfolio":
             self._populate_portfolio_and_risk()
             self._populate_trades_full()
+            self._render_hedge_panel()
             return
         if tab == "signals":
             self._populate_signals_workspace()
+            self._load_signals_async()
             return
         if tab == "lookup":
             if not str(self.lookup_sym or "").strip():
@@ -4703,6 +5225,10 @@ class NepseDashboard(App):
         if tab == "account":
             self._populate_portfolio_and_risk()
             self._populate_paper_profile_panel(self._stats)
+            return
+        if tab == "strategies":
+            self._populate_strategies_tab()
+            return
 
     @work(thread=True)
     def _do_refresh(self) -> None:
@@ -4738,7 +5264,7 @@ class NepseDashboard(App):
             ts = self.md.ts.strftime("%H:%M:%S")
             self.call_from_thread(
                 self._set_status,
-                f"Refreshed {ts}  Γöé  Γû▓{self.md.adv} Γû╝{self.md.dec}  ={self.md.unch}",
+                f"Refreshed {ts}  │  ▲{self.md.adv} ▼{self.md.dec}  ={self.md.unch}",
             )
         finally:
             self._refresh_inflight = False
@@ -4748,11 +5274,11 @@ class NepseDashboard(App):
         self._regime = _get_regime(self.md)
         self.call_from_thread(self._update_index)
 
-    # ΓöÇΓöÇ Signal generation ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+    # ── Signal generation ─────────────────────────────────────────────────────
 
     @work(thread=True)
     def _load_signals_async(self, force: bool = False) -> None:
-        cache_key = self._data_version()
+        cache_key = self._signals_cache_key()
         if (
             not force
             and cache_key == self._signals_table_cache_key
@@ -4761,47 +5287,63 @@ class NepseDashboard(App):
             cols, rows, count = self._signals_table_cache_payload
             self.call_from_thread(self._set_signals_table, cols, rows)
             return
-        self.call_from_thread(self._set_status, "Loading signals...")
+        payload = self._active_strategy_payload() or {}
+        config = dict(payload.get("config") or {})
+        strategy_name = str(payload.get("name") or "Active Strategy")
+        signal_types = list(config.get("signal_types") or list(LONG_TERM_CONFIG.get("signal_types") or []))
+        use_regime_filter = bool(config.get("use_regime_filter", True))
+        self.call_from_thread(self._set_signals_table_loading, strategy_name)
+        self.call_from_thread(self._set_status, f"Loading signals for {strategy_name}...")
         try:
-            from backend.backtesting.simple_backtest import (
-                load_all_prices,
-                generate_volume_breakout_signals_at_date,
-                generate_quality_signals_at_date,
-                generate_low_volatility_signals_at_date,
-                generate_mean_reversion_signals_at_date,
-                generate_xsec_momentum_signals_at_date,
-                generate_accumulation_signals_at_date,
-            )
+            from backend.backtesting.simple_backtest import load_all_prices
+            from backend.trading.live_trader import generate_signals
             conn = _db()
             prices_df = load_all_prices(conn)
             conn.close()
-            today = datetime.strptime(self.md.latest, "%Y-%m-%d")
-            sigs = []
-            sigs.extend(generate_volume_breakout_signals_at_date(prices_df, today))
-            sigs.extend(generate_quality_signals_at_date(prices_df, today))
-            sigs.extend(generate_low_volatility_signals_at_date(prices_df, today))
-            sigs.extend(generate_mean_reversion_signals_at_date(prices_df, today))
-            sigs.extend(generate_xsec_momentum_signals_at_date(prices_df, today))
-            sigs.extend(generate_accumulation_signals_at_date(prices_df, today))
-            sigs = sorted(sigs, key=lambda x: x.score, reverse=True)[:40]
+            sigs, _regime = generate_signals(
+                prices_df,
+                signal_types,
+                use_regime_filter=use_regime_filter,
+            )
+            min_score = float(getattr(self, "_signal_min_score", 0.0))
+            if min_score > 0:
+                sigs = [s for s in sigs if float(s.get("score") or 0.0) >= min_score]
+            sigs = list(sorted(sigs, key=lambda x: float(x.get("score") or 0.0), reverse=True)[:50])
 
             cols = [("  #", "n"), ("SYMBOL", "sym"), ("SCORE", "score"),
                     ("TYPE", "type"), ("STR", "str"), ("CONF", "conf"), ("DIR", "dir")]
             rows = []
             for i, s in enumerate(sigs, 1):
-                score_style = GAIN_HI if s.score > 0 else LOSS if s.score < 0 else LABEL
+                score = float(s.get("score") or 0.0)
+                strength = float(s.get("strength") or 0.0)
+                confidence = float(s.get("confidence") or 0.0)
+                signal_type = str(s.get("signal_type") or "")
+                score_style = GAIN_HI if score > 0 else LOSS if score < 0 else LABEL
                 rows.append([
-                    _dim_text(str(i)), _sym_text(s.symbol),
-                    Text(f"{s.score:.3f}", style=score_style),
-                    Text(s.signal_type.value, style=CYAN),
-                    Text(f"{s.strength:.2f}", style=WHITE),
-                    Text(f"{s.confidence:.2f}", style=WHITE),
-                    Text("Γû▓ LONG", style=f"bold {GAIN_HI}") if s.direction > 0
-                    else _dim_text("ΓÇö"),
+                    _dim_text(str(i)), _sym_text(str(s.get("symbol") or "")),
+                    Text(f"{score:.3f}", style=score_style),
+                    Text(signal_type, style=CYAN),
+                    Text(f"{strength:.2f}", style=WHITE),
+                    Text(f"{confidence:.2f}", style=WHITE),
+                    Text("▲ LONG", style=f"bold {GAIN_HI}"),
                 ])
+            self._signals_last_strategy_name = strategy_name
+            self._signals_last_count = len(sigs)
+            self._signals_last_loaded_at = datetime.now().strftime("%H:%M:%S")
+            publish_agent_signal_snapshot(
+                {
+                    "account_id": str(getattr(self, "_current_account_id", "account_1") or "account_1"),
+                    "strategy_id": str((self._strategy_account_binding(getattr(self, "_current_account_id", "account_1")) or {}).get("strategy_id") or strategy_registry.default_strategy_for_account(getattr(self, "_current_account_id", "account_1"))),
+                    "strategy_name": strategy_name,
+                    "context_date": str(getattr(self.md, "latest", datetime.now().strftime("%Y-%m-%d")) or datetime.now().strftime("%Y-%m-%d")),
+                    "regime": _regime,
+                    "signals": list(sigs),
+                }
+            )
             self.call_from_thread(self._render_signals_table_payload, cache_key, cols, rows, len(sigs))
+            self.call_from_thread(self._update_signals_table_title)
             self.call_from_thread(self._set_status,
-                f"Signals loaded: {len(sigs)} Γöé Session: {self.md.latest}")
+                f"Signals loaded: {len(sigs)} │ {strategy_name} │ Session: {self.md.latest}")
         except Exception as e:
             self.call_from_thread(self._set_status, f"Signal error: {e}")
 
@@ -4816,6 +5358,24 @@ class NepseDashboard(App):
         self._signals_table_cache_payload = (cols, rows, count)
         self._set_signals_table(cols, rows)
 
+    def _set_signals_table_loading(self, strategy_name: str = "") -> None:
+        label = str(strategy_name or self._signals_last_strategy_name or self._strategy_name_for_account(getattr(self, "_current_account_id", "account_1"))).strip()
+        suffix = f" — {label}" if label else ""
+        try:
+            self.query_one("#signals-table-title", Static).update(f"SIGNALS{suffix} — Loading...  |  R/F force reload")
+        except Exception:
+            pass
+
+    def _update_signals_table_title(self) -> None:
+        strategy_name = str(self._signals_last_strategy_name or self._strategy_name_for_account(getattr(self, "_current_account_id", "account_1"))).strip()
+        loaded_at = str(self._signals_last_loaded_at or "not loaded")
+        count = int(self._signals_last_count or 0)
+        title = f"SIGNALS — {strategy_name}  |  {count} loaded  |  {loaded_at}  |  R/F force reload"
+        try:
+            self.query_one("#signals-table-title", Static).update(title)
+        except Exception:
+            pass
+
     def _set_signals_table(self, cols, rows):
         dt = self.query_one("#dt-signals", DataTable)
         dt.clear(columns=True)
@@ -4824,7 +5384,7 @@ class NepseDashboard(App):
         for row in rows:
             dt.add_row(*row)
 
-    # ΓöÇΓöÇ Rates & Commodities ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+    # ── Rates & Commodities ──────────────────────────────────────────────────
 
     @work(thread=True)
     def _load_kalimati_async(self) -> None:
@@ -4847,29 +5407,55 @@ class NepseDashboard(App):
         noc = _fetch_noc_fuel_prices()
         forex_rows = _fetch_nrb_forex_rates(("USD", "EUR", "GBP", "INR", "CNY", "JPY", "AUD", "CAD"))
         indicator_rows: list[dict] = []
+        indicator_history = _load_macro_indicator_history()
+        snapshot_ts = datetime.utcnow().isoformat()
 
         if metals:
             gold = float(metals.get("gold_per_tola") or 0)
             silver = float(metals.get("silver_per_tola") or 0)
             if gold > 0:
+                # Prefer DB-stored CHG% (cross-session, today vs yesterday)
+                # Fall back to in-session memory tracker if DB has no previous day yet
+                db_gold_chg_pct = metals.get("gold_chg_pct")
+                db_gold_chg_abs = metals.get("gold_chg_abs")
+                if db_gold_chg_pct is not None:
+                    gold_change = db_gold_chg_abs
+                    gold_change_pct = db_gold_chg_pct
+                else:
+                    gold_change, gold_change_pct = _apply_indicator_history_change(
+                        indicator_history, key="gold_per_tola",
+                        value=gold, timestamp=snapshot_ts,
+                    )
                 indicator_rows.append(
                     {
                         "item": "Gold / Tola",
                         "group": "Metals",
                         "value": gold,
                         "unit": "NPR/tola",
-                        "change_pct": None,
+                        "change": gold_change,
+                        "change_pct": gold_change_pct,
                         "source": "FENEGOSIDA",
                     }
                 )
             if silver > 0:
+                db_silver_chg_pct = metals.get("silver_chg_pct")
+                db_silver_chg_abs = metals.get("silver_chg_abs")
+                if db_silver_chg_pct is not None:
+                    silver_change = db_silver_chg_abs
+                    silver_change_pct = db_silver_chg_pct
+                else:
+                    silver_change, silver_change_pct = _apply_indicator_history_change(
+                        indicator_history, key="silver_per_tola",
+                        value=silver, timestamp=snapshot_ts,
+                    )
                 indicator_rows.append(
                     {
                         "item": "Silver / Tola",
                         "group": "Metals",
                         "value": silver,
                         "unit": "NPR/tola",
-                        "change_pct": None,
+                        "change": silver_change,
+                        "change_pct": silver_change_pct,
                         "source": "FENEGOSIDA",
                     }
                 )
@@ -4898,17 +5484,25 @@ class NepseDashboard(App):
                 value = float(noc.get(key) or 0)
                 if value <= 0:
                     continue
+                change, change_pct = _apply_indicator_history_change(
+                    indicator_history,
+                    key=f"noc_{key}",
+                    value=value,
+                    timestamp=snapshot_ts,
+                )
                 indicator_rows.append(
                     {
                         "item": label,
                         "group": "NOC",
                         "value": value,
                         "unit": unit,
-                        "change_pct": None,
+                        "change": change,
+                        "change_pct": change_pct,
                         "source": f"NOC {noc.get('date_bs') or ''}".strip(),
                     }
                 )
 
+        _save_macro_indicator_history(indicator_history)
         rates = {
             "metals": metals,
             "noc": noc,
@@ -4924,22 +5518,22 @@ class NepseDashboard(App):
         status = self._kalimati_status
         filtered_rows, filtered_indicators, filtered_forex = self._get_filtered_rates_payload()
 
-        # ΓöÇΓöÇ Status bar ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+        # ── Status bar ────────────────────────────────────────────────────────
         with_chg = [r for r in filtered_rows if r.get("change_pct") is not None]
         gainers = sum(1 for r in with_chg if r["change_pct"] > 0)
         losers  = sum(1 for r in with_chg if r["change_pct"] < 0)
-        date_str = rows[0]["date"] if rows else "ΓÇö"
+        date_str = rows[0]["date"] if rows else "—"
         bar_text = (
             f"[bold #ffaf00] RATES & COMMODITIES [/]"
-            f"[#444444] Γöé [/]"
+            f"[#444444] │ [/]"
             f"[#888888]{len(filtered_rows)}/{len(rows)} commodities[/]  "
-            f"[#444444] Γöé [/]"
+            f"[#444444] │ [/]"
             f"[#888888]{len(filtered_indicators)} macro[/]  "
             f"[#888888]{len(filtered_forex)} forex[/]"
-            f"[#444444] Γöé [/]"
-            f"[#00C853]Γû▓ {gainers}[/]  [#ff4444]Γû╝ {losers}[/]"
-            f"[#444444] Γöé [/][#888888]{date_str}[/]"
-            f"[#444444] Γöé [/][#555555]{status}[/]"
+            f"[#444444] │ [/]"
+            f"[#00C853]▲ {gainers}[/]  [#ff4444]▼ {losers}[/]"
+            f"[#444444] │ [/][#888888]{date_str}[/]"
+            f"[#444444] │ [/][#555555]{status}[/]"
         )
         self.query_one("#kalimati-status-bar", Static).update(bar_text)
 
@@ -4956,21 +5550,21 @@ class NepseDashboard(App):
             f"FOREX RATES [{len(filtered_forex)}]"
         )
 
-        # ΓöÇΓöÇ Top movers bar (only shown if we have change data) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+        # ── Top movers bar (only shown if we have change data) ────────────────
         if with_chg:
             top_gain = sorted(with_chg, key=lambda r: r["change_pct"], reverse=True)[:5]
             top_lose = sorted(with_chg, key=lambda r: r["change_pct"])[:5]
             parts: list[str] = ["[#555555] MOVERS [/]"]
             for r in top_gain:
                 nm = r["name_english"].split("(")[0].strip()[:14]
-                parts.append(f"[bold #00C853]Γû▓[/][#00C853]{nm} +{r['change_pct']:.1f}%[/]")
-            parts.append("[#333333] Γöâ [/]")
+                parts.append(f"[bold #00C853]▲[/][#00C853]{nm} +{r['change_pct']:.1f}%[/]")
+            parts.append("[#333333] ┃ [/]")
             for r in top_lose:
                 nm = r["name_english"].split("(")[0].strip()[:14]
-                parts.append(f"[bold #ff4444]Γû╝[/][#ff4444]{nm} {r['change_pct']:.1f}%[/]")
+                parts.append(f"[bold #ff4444]▼[/][#ff4444]{nm} {r['change_pct']:.1f}%[/]")
             movers_markup = "  ".join(parts)
         else:
-            # No prev-day data yet ΓÇö show price stats instead
+            # No prev-day data yet — show price stats instead
             if rows:
                 most_exp = max(rows, key=lambda r: r["avg"])
                 cheapest = min(rows, key=lambda r: r["avg"])
@@ -4978,19 +5572,19 @@ class NepseDashboard(App):
                 movers_markup = (
                     f"[#555555] MARKET STATS [/]  "
                     f"[#888888]Avg Price:[/] [#ffaf00]{avg_price:.2f}[/]  "
-                    f"[#555555]Γöé[/]  "
+                    f"[#555555]│[/]  "
                     f"[#888888]Most Expensive:[/] [#ffaf00]{most_exp['name_english'].split('(')[0].strip()[:20]}[/] "
                     f"[bold #ffaf00]{most_exp['avg']:,.0f}[/]  "
-                    f"[#555555]Γöé[/]  "
+                    f"[#555555]│[/]  "
                     f"[#888888]Cheapest:[/] [#00C853]{cheapest['name_english'].split('(')[0].strip()[:20]}[/] "
                     f"[bold #00C853]{cheapest['avg']:,.0f}[/]  "
-                    f"[#444444]Γöé  Price change available after 2nd fetch[/]"
+                    f"[#444444]│  Price change available after 2nd fetch[/]"
                 )
             else:
                 movers_markup = "[#444444] Fetching commodities data...[/]"
         self.query_one("#kalimati-movers-bar", Static).update(movers_markup)
 
-        # ΓöÇΓöÇ Kalimati table ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+        # ── Kalimati table ────────────────────────────────────────────────────
         dt = self.query_one("#dt-kalimati", DataTable)
         dt.clear(columns=True)
 
@@ -5001,30 +5595,30 @@ class NepseDashboard(App):
         dt.add_column("CHG %",  key="pct",  width=7)
         dt.add_column("MIN",    key="min",  width=9)
         dt.add_column("MAX",    key="max",  width=9)
-        dt.add_column("Γûò  RANGE  ΓûÅ", key="rng", width=12)
+        dt.add_column("▕  RANGE  ▏", key="rng", width=12)
 
         def _range_bar(mn: float, mx: float, avg: float, width: int = 10) -> Text:
             """Show where avg sits within the [min, max] band."""
             if mx <= mn:
-                return Text("Γûò" + "ΓöÇ" * width + "ΓûÅ", style=LABEL)
+                return Text("▕" + "─" * width + "▏", style=LABEL)
             pos = int((avg - mn) / (mx - mn) * width)
             pos = max(0, min(width - 1, pos))
-            bar = "Γûæ" * pos + "Γûê" + "Γûæ" * (width - pos - 1)
+            bar = "░" * pos + "█" + "░" * (width - pos - 1)
             # Colour: green if avg > midpoint, red if below
             mid = (mn + mx) / 2
             color = GAIN if avg >= mid else LOSS
-            return Text(f"Γûò{bar}ΓûÅ", style=color)
+            return Text(f"▕{bar}▏", style=color)
 
         def _chg_text(chg: float | None, pct: float | None) -> tuple[Text, Text]:
             """Return (change_text, pct_text) coloured appropriately."""
             if chg is None or pct is None:
-                return Text("   ΓöÇ", style=LABEL), Text("  ΓöÇ", style=LABEL)
+                return Text("   ─", style=LABEL), Text("  ─", style=LABEL)
             if pct > 0:
-                style, arrow = GAIN_HI if pct > 5 else GAIN, "Γû▓"
+                style, arrow = GAIN_HI if pct > 5 else GAIN, "▲"
             elif pct < 0:
-                style, arrow = LOSS_HI if pct < -5 else LOSS, "Γû╝"
+                style, arrow = LOSS_HI if pct < -5 else LOSS, "▼"
             else:
-                style, arrow = LABEL, "ΓöÇ"
+                style, arrow = LABEL, "─"
             chg_str = f"{arrow}{abs(chg):,.1f}"
             pct_str = f"{'+' if pct > 0 else ''}{pct:.1f}%"
             return Text(chg_str, style=style), Text(pct_str, style=style)
@@ -5053,7 +5647,7 @@ class NepseDashboard(App):
                 _range_bar(r["min"], r["max"], r["avg"], width=10),
             )
 
-        # ΓöÇΓöÇ Macro indicators ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+        # ── Macro indicators ──────────────────────────────────────────────────
         dt_macro = self.query_one("#dt-macro", DataTable)
         dt_macro.clear(columns=True)
         dt_macro.add_column("ITEM", key="item", width=16)
@@ -5072,7 +5666,7 @@ class NepseDashboard(App):
 
             pct = row.get("change_pct")
             if pct is None:
-                pct_text = Text("ΓÇö", style=LABEL)
+                pct_text = Text("—", style=LABEL)
             elif float(pct) > 0:
                 pct_text = Text(f"+{float(pct):.2f}%", style=GAIN)
             elif float(pct) < 0:
@@ -5088,7 +5682,7 @@ class NepseDashboard(App):
                 Text(str(row.get("source") or "")[:16], style=DIM),
             )
 
-        # ΓöÇΓöÇ Forex table ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+        # ── Forex table ───────────────────────────────────────────────────────
         dt_forex = self.query_one("#dt-forex", DataTable)
         dt_forex.clear(columns=True)
         dt_forex.add_column("CCY", key="ccy", width=6)
@@ -5104,7 +5698,7 @@ class NepseDashboard(App):
             sell = float(row.get("sell_rate") or 0)
             pct = row.get("change_pct")
             if pct is None:
-                pct_text = Text("ΓÇö", style=LABEL)
+                pct_text = Text("—", style=LABEL)
             elif float(pct) > 0:
                 pct_text = Text(f"+{float(pct):.2f}%", style=GAIN)
             elif float(pct) < 0:
@@ -5148,7 +5742,7 @@ class NepseDashboard(App):
         ]
         return filtered_rows, filtered_indicators, filtered_forex
 
-    # ΓöÇΓöÇ OSINT news feed ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+    # ── OSINT news feed ───────────────────────────────────────────────────────
 
     @work(thread=True)
     def _load_osint_async(self) -> None:
@@ -5186,7 +5780,7 @@ class NepseDashboard(App):
         n = len(self._osint_stories)
         self.call_from_thread(
             self._set_status,
-            f"OSINT headlines loaded: {n} stories Γöé Session: {self.md.latest}",
+            f"OSINT headlines loaded: {n} stories │ Session: {self.md.latest}",
         )
 
     def _populate_news(self) -> None:
@@ -5204,7 +5798,7 @@ class NepseDashboard(App):
         else:
             self._news_selected_index = max(0, min(self._news_selected_index, len(stories) - 1))
 
-        # News list (OptionList ΓÇö avoids DataTable cell-level positioning
+        # News list (OptionList — avoids DataTable cell-level positioning
         # which garbles Devanagari combining characters)
         ol = self.query_one("#news-list", OptionList)
         ol.clear_options()
@@ -5235,7 +5829,7 @@ class NepseDashboard(App):
                 row.append("  ")
                 row.append(src, style=DIM)
                 if stype:
-                    row.append("  ΓÇó  ", style=LABEL)
+                    row.append("  •  ", style=LABEL)
                     row.append(_truncate_text(stype, 10), style=TYPE_STYLE.get(stype, CYAN))
                 options.append(Option(row, id=f"news-{i}"))
             ol.add_options(options)
@@ -5259,14 +5853,14 @@ class NepseDashboard(App):
         )
         search_info = ""
         if query and is_vector:
-            search_info = f"[bold #ffaf00]  Γîò VECTOR \"{query}\"  {n} results[/]   "
+            search_info = f"[bold #ffaf00]  ⌕ VECTOR \"{query}\"  {n} results[/]   "
         elif query:
-            search_info = f"[bold #ffaf00]  Γîò \"{query}\"[/]   "
+            search_info = f"[bold #ffaf00]  ⌕ \"{query}\"[/]   "
         brief_bar.update(Text.from_markup(
-            f"[bold {AMBER}]Γùå LIVE NEWS FEED[/]   "
+            f"[bold {AMBER}]◆ LIVE NEWS FEED[/]   "
             f"{search_info}"
             f"[#888888]Total:[/] [bold {WHITE}]{n}[/]   "
-            f"[{LOSS_HI}]Γû▓{high_n} high[/]   "
+            f"[{LOSS_HI}]▲{high_n} high[/]   "
             f"[{YELLOW}]{med_n} medium[/]   "
             f"{type_parts}"
         ))
@@ -5330,12 +5924,12 @@ class NepseDashboard(App):
                 f"Text search: {len(filtered)} results for \"{query}\" (vector empty, local fallback)"
             )
 
-    # ΓöÇΓöÇ Agent tab ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+    # ── Agent tab ─────────────────────────────────────────────────────────────
 
     @work(thread=True)
     def _run_agent_analysis(self, force: bool = True) -> None:
         self._sync_agent_account_context_env()
-        self.call_from_thread(self._set_status, "Γºû Agent analyzing..." if force else "Γºû Loading agent...")
+        self.call_from_thread(self._set_status, "⧖ Agent analyzing..." if force else "⧖ Loading agent...")
         self.call_from_thread(self._update_agent_status, "ANALYZING..." if force else "LOADING...", "running")
         try:
             preview = build_algo_shortlist_snapshot()
@@ -5347,10 +5941,10 @@ class NepseDashboard(App):
             age = time.time() - result.get("timestamp", 0)
             if age < 5:
                 self.call_from_thread(self._set_status,
-                    f"Agent analysis complete Γöé {len(result.get('stocks', []))} stocks reviewed")
+                    f"Agent analysis complete │ {len(result.get('stocks', []))} stocks reviewed")
             else:
                 self.call_from_thread(self._set_status,
-                    f"Agent loaded from cache ({int(age/60)}m ago) Γöé Press A+Enter to refresh")
+                    f"Agent loaded from cache ({int(age/60)}m ago) │ Press A+Enter to refresh")
         except Exception as e:
             self.call_from_thread(self._set_status, f"Agent error: {e}")
 
@@ -5416,7 +6010,7 @@ class NepseDashboard(App):
             )
             self._agent_chat_process = proc
             self.call_from_thread(self._set_typing, True)
-            self.call_from_thread(self._set_status, "Γºû Agent thinking...")
+            self.call_from_thread(self._set_status, "⧖ Agent thinking...")
 
             started = time.monotonic()
             while True:
@@ -5466,7 +6060,7 @@ class NepseDashboard(App):
         a = getattr(self, '_agent_analysis', {})
         if state == "running":
             bar.update(Text.from_markup(
-                f"[bold #bb88ff]Γùå AGENT[/]   [{YELLOW}]Γºû {text_str}[/]"))
+                f"[bold #bb88ff]◆ AGENT[/]   [{YELLOW}]⧖ {text_str}[/]"))
             return
         trade = a.get("trade_today", None)
         tc = GAIN_HI if trade else LOSS_HI if trade is False else LABEL
@@ -5478,33 +6072,33 @@ class NepseDashboard(App):
         n_super = sum(1 for s in stocks if bool(s.get("auto_entry_candidate")))
         regime = a.get("regime", "?")
         meta = dict(a.get("agent_runtime_meta") or {})
-        provider = str(meta.get("provider") or "sonnet").upper()
+        provider = self._current_agent_provider_label().upper()
         import time as _t
         age = _t.time() - a.get("timestamp", 0)
         age_str = f"{int(age/60)}m ago" if age < 3600 else f"{int(age/3600)}h ago" if age < 86400 else "stale"
         bar.update(Text.from_markup(
-            f"[bold #bb88ff]Γùå {provider} AGENT[/]   "
+            f"[bold #bb88ff]◆ {provider} AGENT[/]   "
             f"[#888888]Trade today:[/] [bold {tc}]{trade_str}[/]   "
-            f"[#888888]Verdicts:[/] [bold {GAIN_HI}]{n_approve}Γ£ô[/] "
-            f"[bold {LOSS_HI}]{n_reject}Γ£ù[/] "
+            f"[#888888]Verdicts:[/] [bold {GAIN_HI}]{n_approve}✓[/] "
+            f"[bold {LOSS_HI}]{n_reject}✗[/] "
             f"[#888888]of {n_total}[/]   "
             f"[#888888]Super:[/] [bold {AMBER}]{n_super}[/]   "
             f"[#888888]Regime:[/] [{YELLOW}]{regime}[/]   "
             f"[#888888]Updated:[/] [{LABEL}]{age_str}[/]   "
-            f"[#555555]A=Analyze  Γöé  /history  Γöé  /recent[/]"
+            f"[#555555]A=Analyze  │  /agent  │  /model  │  /history[/]"
         ))
 
     def _populate_agent_meta_headers(self, analysis: dict) -> None:
         stocks = list((analysis or {}).get("stocks") or [])
         left = self.query_one("#agent-picks-subtitle", Static)
         right = self.query_one("#agent-chat-subtitle", Static)
-        provider = str(dict((analysis or {}).get("agent_runtime_meta") or {}).get("provider") or "agent").upper()
+        provider = self._current_agent_provider_label().upper()
         if stocks:
             buy_count = sum(1 for row in stocks if str(row.get("action_label") or "").upper() == "BUY")
             super_count = sum(1 for row in stocks if bool(row.get("auto_entry_candidate")))
             left.update(
                 Text(
-                    f"Ranked shortlist ┬╖ {len(stocks)} names ┬╖ {buy_count} buys ┬╖ {super_count} super signals",
+                    f"Ranked shortlist · {len(stocks)} names · {buy_count} buys · {super_count} super signals",
                     style=LABEL,
                 )
             )
@@ -5513,7 +6107,7 @@ class NepseDashboard(App):
         archive_count = int(getattr(self, "_agent_archive_count", 0) or 0)
         right.update(
             Text(
-                f"{provider} conversation stream ┬╖ live session",
+                f"{provider} conversation stream · live session",
                 style=LABEL,
             )
         )
@@ -5535,13 +6129,13 @@ class NepseDashboard(App):
         if stocks:
             top = stocks[0]
             parts.append(
-                f"[#888888]Top[/] [bold {AMBER}]{str(top.get('symbol') or 'ΓÇö')}[/] "
+                f"[#888888]Top[/] [bold {AMBER}]{str(top.get('symbol') or '—')}[/] "
                 f"[{WHITE}]{str(top.get('action_label') or top.get('verdict') or 'REVIEW').upper()}[/] "
                 f"[#888888]score[/] [bold {AMBER}]{float(top.get('signal_score') or 0.0):.2f}[/]"
             )
         elif not parts:
             parts.append("[#888888]Agent snapshot is loading[/]")
-        banner.update(Text.from_markup("   [#444444]Γöé[/]   ".join(parts)))
+        banner.update(Text.from_markup("   [#444444]│[/]   ".join(parts)))
 
     def _populate_agent_detail_default(self, analysis: dict) -> None:
         try:
@@ -5553,7 +6147,7 @@ class NepseDashboard(App):
         fresh_market = dict((analysis or {}).get("fresh_market") or {})
         if stocks:
             top = stocks[0]
-            top_symbol = str(top.get("symbol") or "ΓÇö")
+            top_symbol = str(top.get("symbol") or "—")
             top_action = str(top.get("action_label") or top.get("verdict") or "REVIEW").upper()
             top_score = float(top.get("signal_score") or 0.0)
             top_conv = float(top.get("conviction") or 0.0)
@@ -5564,7 +6158,7 @@ class NepseDashboard(App):
             )
             detail.update(Text(summary, style=WHITE))
             return
-        session_date = str(fresh_market.get("session_date") or (analysis or {}).get("context_date") or "ΓÇö")
+        session_date = str(fresh_market.get("session_date") or (analysis or {}).get("context_date") or "—")
         source = str(fresh_market.get("source") or "snapshot")
         quote_count = int(fresh_market.get("quote_count") or 0)
         detail.update(
@@ -5605,7 +6199,7 @@ class NepseDashboard(App):
             (f"Bull: {str(stock.get('bull_case') or 'n/a')}\n", GAIN),
             (f"Risk: {str(stock.get('bear_case') or 'n/a')}", LOSS if stock.get("bear_case") else LABEL),
         )
-        self.query_one("#agent-detail-title", Static).update(f"FOCUS ┬╖ {symbol}")
+        self.query_one("#agent-detail-title", Static).update(f"FOCUS · {symbol}")
         self.query_one("#agent-detail", Static).update(detail)
 
     def _populate_agent_tab(self):
@@ -5622,7 +6216,7 @@ class NepseDashboard(App):
         self._populate_agent_meta_headers(a)
         self._render_agent_chat_history()
 
-        # Verdicts table ΓÇö short summary, full reasoning on row select
+        # Verdicts table — short summary, full reasoning on row select
         dt = self.query_one("#dt-agent-verdicts", DataTable)
         dt.clear(columns=True)
         for label, key, width in [
@@ -5652,7 +6246,7 @@ class NepseDashboard(App):
                 conv_c = GAIN_HI if conv >= 0.7 else YELLOW if conv >= 0.4 else LOSS
                 # Extract first sentence as key point
                 reasoning = str(s.get("what_matters") or s.get("reasoning") or "")
-                first_sentence = reasoning.split(". ")[0].split(" ΓÇö ")[0][:32]
+                first_sentence = reasoning.split(". ")[0].split(" — ")[0][:32]
                 score = float(s.get("signal_score") or 0.0)
                 score_style = GAIN_HI if score >= 1.0 else YELLOW if score >= 0.7 else LABEL
                 dt.add_row(
@@ -5666,13 +6260,13 @@ class NepseDashboard(App):
                 )
         else:
             dt.add_row(
-                _dim_text("ΓÇö"), _dim_text("Loading top picks"),
+                _dim_text("—"), _dim_text("Loading top picks"),
                 *[Text("")] * 5)
         self._populate_agent_detail_default(a)
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Handle row selection across tabs."""
-        # Watchlist: Enter ΓåÆ lookup
+        # Watchlist: Enter → lookup
         if event.data_table.id == "dt-watchlist":
             idx = event.cursor_row
             stock_rows = getattr(self, "_watchlist_stock_rows", [])
@@ -5728,17 +6322,28 @@ class NepseDashboard(App):
                 except Exception:
                     pass
                 self._populate_account_list()
+                self._populate_strategies_tab()
                 selected_name = str(selected.get("name") or self._selected_account_id)
                 self._set_status(f"Selected {selected_name} | press ACTIVATE to switch")
             return
-        # dt-news replaced by OptionList ΓÇö handled in on_option_list_option_highlighted
+        if event.data_table.id == "dt-strategy-list":
+            idx = event.cursor_row
+            strategies = list(getattr(self, "_strategies", []) or [])
+            if 0 <= idx < len(strategies):
+                selected = strategies[idx]
+                self._selected_strategy_id = str(selected.get("id") or self._selected_strategy_id)
+                self._set_strategy_form_from_payload(selected)
+                self._populate_strategies_tab()
+                self._set_status(f"Selected strategy {selected.get('name')}")
+            return
+        # dt-news replaced by OptionList — handled in on_option_list_option_highlighted
 
-        # Screener: Enter ΓåÆ lookup
+        # Screener: Enter → lookup
         if event.data_table.id == "dt-screener":
             try:
                 row_data = event.data_table.get_row_at(event.cursor_row)
                 sym = str(row_data[0]).strip()
-                if sym and sym != "ΓÇö":
+                if sym and sym != "—":
                     self.lookup_sym = sym
                     self.action_tab("lookup")
             except Exception:
@@ -5774,6 +6379,16 @@ class NepseDashboard(App):
             mv.update(Text("Press A to run agent analysis, or type a question below", style=LABEL))
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if event.data_table.id == "dt-strategy-list":
+            idx = event.cursor_row
+            strategies = list(getattr(self, "_strategies", []) or [])
+            if 0 <= idx < len(strategies):
+                selected = strategies[idx]
+                self._selected_strategy_id = str(selected.get("id") or self._selected_strategy_id)
+                # Selecting from the list exits new-strategy mode
+                self._new_strategy_mode = False
+                self._set_strategy_form_from_payload(selected)
+            return
         if event.data_table.id != "dt-agent-verdicts":
             return
         self._show_agent_focus_row(event.cursor_row)
@@ -5794,7 +6409,7 @@ class NepseDashboard(App):
         ts_text = _format_nst_hm(ts)
         flat_message = " ".join(part.strip() for part in str(message or "").splitlines() if part.strip())
         if not flat_message:
-            flat_message = "ΓÇö"
+            flat_message = "—"
         prefix = f"[{label}]"
         msg_text = Text.assemble(
             (prefix, f"bold {color}"),
@@ -5836,8 +6451,54 @@ class NepseDashboard(App):
                 return True
             self._set_status("No active agent response to stop")
             return True
+        if command in {"/agent", "/agent status"}:
+            summary = self._agent_runtime_summary()
+            self._append_chat_note(f"Active agent: {summary}. Config: {ACTIVE_AGENT_FILE}")
+            self._set_status(f"Active agent: {summary}")
+            return True
+        if command in {"/agent list", "/agents", "/backends"}:
+            help_text = self._agent_backends_help()
+            self._append_chat_note(help_text)
+            self._set_status(help_text)
+            return True
+        if command.startswith("/agent "):
+            try:
+                parts = shlex.split(raw)
+                if len(parts) < 2:
+                    raise ValueError("Usage: /agent <ollama|gemma4_mlx|gemma4_experimental|claude> [model]")
+                preset = parts[1].strip()
+                model = parts[2].strip() if len(parts) >= 3 else None
+                cfg = set_active_agent(preset, model=model)
+                summary = self._agent_runtime_summary()
+                self._append_chat_note(f"Agent switched: {summary}")
+                self._set_status(f"Agent switched to {cfg.get('selected_preset')} | model {cfg.get('model') or 'default'}")
+                self._populate_agent_tab()
+                return True
+            except Exception as exc:
+                self._set_status(f"Agent switch failed: {exc}")
+                return True
+        if command.startswith("/model"):
+            try:
+                parts = shlex.split(raw)
+                if len(parts) < 2:
+                    summary = self._agent_runtime_summary()
+                    self._append_chat_note(f"Active model: {summary}")
+                    self._set_status(f"Active agent: {summary}")
+                    return True
+                model = " ".join(parts[1:]).strip()
+                cfg = load_active_agent_config()
+                preset = str(cfg.get("selected_preset") or cfg.get("backend") or "ollama")
+                saved = set_active_agent(preset, model=model)
+                summary = self._agent_runtime_summary()
+                self._append_chat_note(f"Agent model updated: {summary}")
+                self._set_status(f"Agent model set to {saved.get('model')}")
+                self._populate_agent_tab()
+                return True
+            except Exception as exc:
+                self._set_status(f"Model update failed: {exc}")
+                return True
         if command == "/help":
-            self._set_status("Agent chat commands: /history, /recent, /clear, /stop")
+            self._set_status("Agent commands: /agent, /agent list, /agent ollama gemma4:e2b, /model <name>, /history, /recent, /clear, /stop")
             return True
         return False
 
@@ -5922,6 +6583,42 @@ class NepseDashboard(App):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button presses."""
         bid = event.button.id
+        if bid == "hedge-toggle-btn":
+            self._hedge_enabled = not self._hedge_enabled
+            try:
+                btn = self.query_one("#hedge-toggle-btn", Button)
+                if self._hedge_enabled:
+                    btn.label = "● HEDGE ON"
+                    btn.remove_class("hedge-btn-off")
+                    btn.add_class("hedge-btn-on")
+                else:
+                    btn.label = "○ HEDGE OFF"
+                    btn.remove_class("hedge-btn-on")
+                    btn.add_class("hedge-btn-off")
+            except Exception:
+                pass
+            # Propagate to all running engines
+            for _eng in list(getattr(self, "_account_engines", {}).values()):
+                try:
+                    _eng.set_hedge_enabled(self._hedge_enabled)
+                except Exception:
+                    pass
+            self._render_hedge_panel()
+            return
+        if bid in ("bf-filter-all", "bf-filter-circ", "bf-filter-pump", "bf-filter-smart"):
+            self._broker_floor_filter = {"bf-filter-all": "all", "bf-filter-circ": "circ",
+                                         "bf-filter-pump": "pump", "bf-filter-smart": "smart"}[bid]
+            for btn_id in ("bf-filter-all", "bf-filter-circ", "bf-filter-pump", "bf-filter-smart"):
+                try:
+                    btn = self.query_one(f"#{btn_id}", Button)
+                    if btn_id == bid:
+                        btn.add_class("bf-active")
+                    else:
+                        btn.remove_class("bf-active")
+                except Exception:
+                    pass
+            self._apply_broker_floor_filter()
+            return
         if bid == "news-search-clear":
             self._news_search_query = ""
             self._vector_search_results = []
@@ -5954,7 +6651,9 @@ class NepseDashboard(App):
                 msg = self._cancel_all_paper_orders()
                 self._set_status(msg)
             else:
-                self._set_status("Cancel all not supported in live mode from TUI")
+                self._set_status("Cancel all is only available for paper orders")
+        elif bid == "profile-btn-browse-seed":
+            self._browse_seed_file()
         elif bid == "profile-btn-create-account":
             try:
                 self._set_status(self._account_create_from_form())
@@ -5965,6 +6664,11 @@ class NepseDashboard(App):
                 self._set_status(self._account_activate_selected())
             except Exception as exc:
                 self._set_status(f"Account activate failed: {exc}")
+        elif bid == "profile-btn-delete-account":
+            try:
+                self._set_status(self._delete_paper_account(self._selected_account_id))
+            except Exception as exc:
+                self._set_status(f"Account delete failed: {exc}")
         elif bid == "profile-btn-set-nav":
             try:
                 self._set_status(self._account_set_nav_from_form())
@@ -5980,6 +6684,92 @@ class NepseDashboard(App):
                 self._set_status(self._save_current_account_snapshot())
             except Exception as exc:
                 self._set_status(f"Snapshot save failed: {exc}")
+        elif bid.startswith(_SIG_ID_PREFIX):
+            sig_type = _sig_type_from_id(bid)
+            active = getattr(self, "_active_signals", set())
+            if sig_type in active:
+                active.discard(sig_type)
+            else:
+                active.add(sig_type)
+            self._active_signals = active
+            self._sync_signal_buttons()
+            return
+        elif bid == "strategy-btn-new":
+            self._new_strategy_mode = True
+            self._active_signals = set()
+            self._sync_signal_buttons()
+            # Pre-fill sensible defaults — user only needs to enter name, description, and signals
+            _new_defaults = {
+                "strategy-inp-name": "",
+                "strategy-inp-description": "",
+                "strategy-inp-holding-days": "40",
+                "strategy-inp-rebalance": "5",
+                "strategy-inp-max-positions": "5",
+                "strategy-inp-stop-loss": "0.08",
+                "strategy-inp-trailing-stop": "0.15",
+                "strategy-inp-sector-limit": "0.35",
+            }
+            for _wid, _val in _new_defaults.items():
+                try:
+                    self.query_one(f"#{_wid}", Input).value = _val
+                except Exception:
+                    pass
+            try:
+                self.query_one("#strategy-inp-name", Input).focus()
+            except Exception:
+                pass
+            self._set_status("New strategy — enter name, pick signals, then SAVE  (parameters pre-filled with defaults)")
+            return
+        elif bid == "strategy-btn-save":
+            try:
+                self._set_status(self._save_strategy_from_form())
+            except Exception as exc:
+                self._set_status(f"Strategy save failed: {exc}")
+        elif bid == "strategy-btn-delete":
+            try:
+                self._set_status(self._delete_custom_strategy())
+            except Exception as exc:
+                self._set_status(f"Strategy delete failed: {exc}")
+        elif bid == "strategy-btn-assign-current":
+            try:
+                self._set_status(self._assign_strategy_to_account(self._selected_strategy_id, self._current_account_id))
+            except Exception as exc:
+                self._set_status(f"Strategy assign failed: {exc}")
+        elif bid == "strategy-btn-assign-selected":
+            try:
+                self._set_status(self._assign_strategy_to_account(self._selected_strategy_id, self._selected_account_id))
+            except Exception as exc:
+                self._set_status(f"Strategy assign failed: {exc}")
+        elif bid == "strategy-btn-backtest":
+            try:
+                self._set_status(self._start_strategy_backtest())
+            except Exception as exc:
+                self._set_status(f"Strategy backtest failed: {exc}")
+        elif bid == "strategy-btn-chart":
+            selected = self._selected_strategy_payload()
+            selected_id = str((selected or {}).get("id") or getattr(self, "_selected_strategy_id", "") or "").strip()
+            result = self._selected_strategy_chart_result(selected_id)
+            if not result:
+                self._set_status("No chartable saved backtest artifact for this strategy")
+            else:
+                try:
+                    from validation.quick_chart import generate_quick_chart
+                    from backend.quant_pro.database import get_db_path as _get_db_path
+                    name   = str((selected or {}).get("name") or (result.get("strategy") or {}).get("name") or "Strategy")
+                    window = dict(result.get("window") or {})
+                    start  = str(window.get("start") or self.query_one("#strategy-inp-backtest-start", Input).value or "").strip()
+                    end    = str(window.get("end") or self.query_one("#strategy-inp-backtest-end", Input).value or "").strip()
+                    path   = generate_quick_chart(
+                        result,
+                        strategy_name=name,
+                        start_date=start or "2025-01-01",
+                        end_date=end or "2026-04-11",
+                        db_path=str(_get_db_path()),
+                        auto_open=True,
+                    )
+                    self._set_status(f"Chart saved → {path}" if path else "Chart generation failed")
+                except Exception as exc:
+                    self._set_status(f"Chart failed: {exc}")
         elif bid == "order-btn-cancel":
             # Cancel selected order from daily order book
             try:
@@ -5988,7 +6778,7 @@ class NepseDashboard(App):
                 if row_key is not None:
                     row_data = dt.get_row_at(row_key)
                     order_id = str(row_data[0]).strip()
-                    if order_id and order_id != "ΓÇö":
+                    if order_id and order_id != "—":
                         msg = self._cancel_paper_order(order_id)
                         self._set_status(msg)
             except Exception:
@@ -6044,6 +6834,15 @@ class NepseDashboard(App):
             self._rates_search_query = event.value.strip()
             self._populate_kalimati()
             return
+        if input_id == "signal-min-score":
+            try:
+                self._signal_min_score = float(event.value.strip() or "0")
+            except ValueError:
+                self._signal_min_score = 0.0
+            # Invalidate cache so next load respects new threshold
+            self._signals_table_cache_key = ""
+            self._signals_table_cache_payload = None
+            return
 
     def on_key(self, event: events.Key) -> None:
         if str(self.active_tab or "") != "account":
@@ -6085,15 +6884,24 @@ class NepseDashboard(App):
             return
         self.on_option_list_option_highlighted(event)
 
-    # ΓöÇΓöÇ Header / Index / Status bars ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+    # ── Header / Index / Status bars ──────────────────────────────────────────
+
+    def _display_live_badge(self) -> bool:
+        return False
+
+    def _display_mode_label(self) -> str:
+        return "PAPER AUTO"
+
+    def _display_nav_mode_tag(self) -> str:
+        if self._trading_engine:
+            phase = self._trading_engine.phase.upper().replace("_", " ")
+            return f"[bold #00cfff]AUTO[/] [dim]{phase}[/]"
+        return "[bold #00ff7f]PAPER[/]"
 
     def _update_header(self):
         parts = []
         # Mode indicator
-        if self.trade_mode == "live":
-            parts.append("[bold #111820 on #f2b94b] LIVE TMS [/]")
-        else:
-            parts.append("[bold #111820 on #79ffb3] PAPER AUTO [/]")
+        parts.append("[bold #111820 on #79ffb3] PAPER AUTO [/]")
         for name, key in TAB_NAMES.items():
             label = TAB_LABELS.get(name, name.upper())
             if name == self.active_tab:
@@ -6108,15 +6916,37 @@ class NepseDashboard(App):
                     tf_parts.append(f"[bold #f2b94b]{key}={label}[/]")
                 else:
                     tf_parts.append(f"[#708091]{key}={label}[/]")
-            parts.append("[#516273]  ||  " + "  ".join(tf_parts) + "  ||  B BUY  S SELL  L LOOKUP  Q QUIT[/]")
+            parts.append("  [#3d4f5e]│[/]  " + "  [#3d4f5e]·[/]  ".join(tf_parts) + "  [#3d4f5e]│[/]  [#7a9ab0]l[/][#4a6070] lookup[/]  [#3d4f5e]·[/]  [#7a9ab0]q[/][#4a6070] quit[/]")
         else:
-            parts.append("[#516273]  ||  / GO  B BUY  S SELL  + WATCH  R REFRESH  Q QUIT[/]")
+            parts.append("  [#3d4f5e]│[/]  [#7a9ab0]/[/][#4a6070] search[/]  [#3d4f5e]·[/]  [#7a9ab0]+[/][#4a6070] watch[/]  [#3d4f5e]·[/]  [#7a9ab0]r[/][#4a6070] refresh[/]  [#3d4f5e]·[/]  [#7a9ab0]q[/][#4a6070] quit[/]")
         self.query_one("#header-bar", Static).update(Text.from_markup(" ".join(parts)))
 
     def _update_index(self):
         parts = []
-        # NEPSE index
-        if len(self.md.nepse) >= 2:
+        # NEPSE index — prefer live TMS WS value when available.
+        live_nepse = None
+        tms_src = getattr(self.md, "tms", None)
+        if tms_src is not None:
+            try:
+                if tms_src.is_live():
+                    idx = (self.md.tms_indices or {}).get("NEPSE")
+                    if idx is None:
+                        idx = tms_src.indices().get("NEPSE")
+                    if idx is not None:
+                        live_nepse = idx
+            except Exception:
+                live_nepse = None
+
+        if live_nepse is not None:
+            ni = float(getattr(live_nepse, "value", 0.0))
+            chg = float(getattr(live_nepse, "pct_change", 0.0))
+            sign = "+" if chg >= 0 else ""
+            cc = GAIN_HI if chg >= 0 else LOSS_HI
+            parts.append(
+                f"[bold #8da1b5]NEPSE[/] [bold {WHITE}]{ni:,.2f}[/] "
+                f"[{cc}]{sign}{chg:.2f}%[/] [dim #6a8899]live[/]"
+            )
+        elif len(self.md.nepse) >= 2:
             ni = self.md.nepse.iloc[0]["close"]
             np_ = self.md.nepse.iloc[1]["close"]
             chg = (ni - np_) / np_ * 100
@@ -6126,7 +6956,7 @@ class NepseDashboard(App):
         else:
             parts.append("[#8da1b5]NEPSE N/A[/]")
         # Breadth
-        parts.append(f"[bold {GAIN_HI}]Γû▓{self.md.adv}[/] [bold {LOSS_HI}]Γû╝{self.md.dec}[/] [#888888]={self.md.unch}[/]")
+        parts.append(f"[bold {GAIN_HI}]▲{self.md.adv}[/] [bold {LOSS_HI}]▼{self.md.dec}[/] [#888888]={self.md.unch}[/]")
         # Regime
         regime = getattr(self, '_regime', 'unknown')
         rc = {
@@ -6144,16 +6974,20 @@ class NepseDashboard(App):
             parts.append(f"[#708091]QUOTES {ts_q}[/]")
         parts.append(f"[#8da1b5]LOCAL[/] [bold {WHITE}]{self.md.ts.strftime('%H:%M:%S')}[/]")
         self.query_one("#index-bar", Static).update(
-            Text.from_markup("   Γöé   ".join(parts)))
+            Text.from_markup("   │   ".join(parts)))
 
     def _set_status(self, msg: str):
         stamp = datetime.now().strftime("%H:%M:%S")
         compact = " ".join(str(msg).split())
         if len(compact) > 220:
             compact = compact[:217] + "..."
+        lowered = compact.lower()
+        body_style = "#95a4b5"
+        if lowered.startswith("rejected:") or lowered.startswith("order cancelled:") or "same-day rule" in lowered:
+            body_style = LOSS_HI
         self.query_one("#status-bar", Static).update(
             Text.from_markup(
-                f"[bold #f2b94b]{stamp}[/] [#516273]::[/] [#95a4b5]{_escape_markup(compact)}[/]"
+                f"[bold #f2b94b]{stamp}[/] [#516273]::[/] [{body_style}]{_escape_markup(compact)}[/]"
             )
         )
 
@@ -6171,7 +7005,7 @@ class NepseDashboard(App):
             detail = detail[:137] + "..."
         return f"TMS watchlist {action} failed: {detail}"
 
-    # ΓöÇΓöÇ Market tab ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+    # ── Market tab ────────────────────────────────────────────────────────────
 
     def _populate_market(self):
         self.query_one("#p-gainers", MarketPanel).set_data(
@@ -6194,13 +7028,13 @@ class NepseDashboard(App):
         for _, r in self.md.near_hi.iterrows():
             rows_52.append([_sym_text(r["symbol"]), _price_text(r["close"]),
                             Text(f"{r['h']:.1f}", style=WHITE),
-                            Text("Γû▓ NEAR HIGH", style=f"bold {GAIN_HI}")])
+                            Text("▲ NEAR HIGH", style=f"bold {GAIN_HI}")])
         for _, r in self.md.near_lo.iterrows():
             rows_52.append([_sym_text(r["symbol"]), _price_text(r["close"]),
                             Text(f"{r['l']:.1f}", style=WHITE),
-                            Text("Γû╝ NEAR LOW", style=f"bold {LOSS_HI}")])
+                            Text("▼ NEAR LOW", style=f"bold {LOSS_HI}")])
         if not rows_52:
-            rows_52.append([_dim_text("ΓÇö"), _dim_text("None today"), _dim_text(""), _dim_text("")])
+            rows_52.append([_dim_text("—"), _dim_text("None today"), _dim_text(""), _dim_text("")])
         self.query_one("#p-52wk", MarketPanel).set_data(
             [("SYMBOL", "sym"), ("PRICE", "price"), ("REF", "ref"), ("SIGNAL", "sig")], rows_52)
         # Quotes
@@ -6219,22 +7053,31 @@ class NepseDashboard(App):
             for _, r in qq.iterrows()
         ]
         if not quote_rows:
-            quote_rows = [[_dim_text("ΓÇö"), _dim_text("No live quotes"), _dim_text(""), _dim_text("")]]
+            quote_rows = [[_dim_text("—"), _dim_text("No live quotes"), _dim_text(""), _dim_text("")]]
         self.query_one("#p-quotes", MarketPanel).set_data(
             [("SYMBOL", "sym"), ("LTP", "ltp"), ("CHG%", "chg"), ("VOL", "vol")],
             quote_rows)
 
-    # ΓöÇΓöÇ Portfolio + Risk tabs ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+    # ── Portfolio + Risk tabs ─────────────────────────────────────────────────
 
     def _populate_portfolio_and_risk(self):
-        if self._trading_engine:
-            # Paper auto-trading: get stats from engine
-            self._stats = self._trading_engine.get_portfolio_stats()
+        if self._trading_engine or self.trade_mode == "paper":
+            # Always use account-specific paper_portfolio.csv as the authoritative view.
+            # This captures both manual trades and any engine trades persisted there.
+            # The engine's tui_paper_portfolio.csv is used only as a fallback.
+            _acc_dir = _account_dir(self._current_account_id)
+            _paper_port = _acc_dir / "paper_portfolio.csv"
+            if _paper_port.exists():
+                self._stats = _compute_account_portfolio_stats(self.md, _acc_dir)
+            elif self._trading_engine:
+                self._stats = self._trading_engine.get_portfolio_stats()
+            else:
+                self._stats = _compute_portfolio_stats(self.md)
         elif self.trade_mode == "live":
             # Fetch TMS bundle once, cache for _populate_trades_full
             if self.tms_service:
                 try:
-                    self._set_status("Mode: LIVE TMS  |  Scraping TMS pages...")
+                    self._set_status("TMS monitor  |  Scraping TMS pages...")
                     live_bundle = self.tms_service.executor.fetch_monitor_bundle()
                     self._tms_bundle = _merge_tms_bundle_with_cache(live_bundle)
                     h = self._tms_bundle.get("holdings", {})
@@ -6243,7 +7086,7 @@ class NepseDashboard(App):
                     login_req = _tms_health_flag(health, "login_required")
                     status_note = "using cached snapshots" if login_req else "live snapshots"
                     self._set_status(
-                        f"Mode: LIVE TMS  |  Bundle: {len(items)} holdings, "
+                        f"TMS monitor  |  Bundle: {len(items)} holdings, "
                         f"login_required={login_req}  |  {status_note}"
                     )
                 except Exception as e:
@@ -6262,7 +7105,7 @@ class NepseDashboard(App):
     def _compute_tms_portfolio_stats(self) -> dict:
         """Compute portfolio stats from TMS broker data."""
         if not self.tms_service:
-            # TMS not ready yet ΓÇö show empty portfolio with message
+            # TMS not ready yet — show empty portfolio with message
             return {
                 "positions": [], "total_cost": 0, "total_value": 0,
                 "cash": 0, "nav": 0, "total_return": 0,
@@ -6286,7 +7129,7 @@ class NepseDashboard(App):
             # Check if login is required (session expired)
             health = bundle.get("health", {})
             if _tms_health_flag(health, "login_required"):
-                self._set_status("TMS session expired ΓÇö showing last cached broker snapshot")
+                self._set_status("TMS session expired — showing last cached broker snapshot")
 
             holdings_data = bundle.get("holdings", {})
             holdings = holdings_data.get("items", []) if isinstance(holdings_data, dict) else holdings_data
@@ -6406,6 +7249,601 @@ class NepseDashboard(App):
         except Exception:
             pass
 
+    def _strategy_account_binding(self, account_id: str) -> Optional[dict]:
+        aid = str(account_id or "").strip()
+        for account in list(getattr(self, "_paper_accounts", []) or []):
+            if str(account.get("id") or "") == aid:
+                return account
+        return None
+
+    def _strategy_name_for_account(self, account_id: str) -> str:
+        account = self._strategy_account_binding(account_id)
+        strategy_id = str((account or {}).get("strategy_id") or strategy_registry.default_strategy_for_account(account_id))
+        return strategy_registry.strategy_name(strategy_id)
+
+    def _strategy_display_name(self, strategy_id: str, fallback_name: str = "") -> str:
+        sid = str(strategy_id or "").strip()
+        return str(STRATEGY_DISPLAY_NAMES.get(sid) or fallback_name or sid)
+
+    def _reload_account_bindings_from_disk(self) -> None:
+        registry = _load_accounts_registry()
+        accounts = strategy_registry.ensure_account_strategy_ids(list(registry.get("accounts") or []))
+        if not accounts:
+            return
+        self._paper_accounts = accounts
+        known_ids = {str(account.get("id") or "") for account in accounts}
+        profile = _load_profile_config()
+        current_account_id = str(
+            profile.get("current_account_id")
+            or getattr(self, "_current_account_id", "account_1")
+            or "account_1"
+        ).strip()
+        if current_account_id not in known_ids:
+            current_account_id = str(accounts[0].get("id") or "account_1")
+        self._current_account_id = current_account_id
+        selected_account_id = str(getattr(self, "_selected_account_id", current_account_id) or current_account_id).strip()
+        if selected_account_id not in known_ids:
+            selected_account_id = current_account_id
+        self._selected_account_id = selected_account_id
+        binding = self._strategy_account_binding(current_account_id) or {}
+        self._selected_strategy_id = str(
+            binding.get("strategy_id")
+            or getattr(self, "_selected_strategy_id", "")
+            or strategy_registry.default_strategy_for_account(current_account_id)
+        )
+        self._sync_agent_account_context_env()
+
+    def _sync_signal_buttons(self) -> None:
+        """Refresh signal picker button styles and active-display label."""
+        active = getattr(self, "_active_signals", set())
+        for _, sig_type in _SIGNAL_DEFS:
+            try:
+                btn = self.query_one(f"#{_sig_btn_id(sig_type)}", Button)
+                if sig_type in active:
+                    btn.add_class("signal-active")
+                else:
+                    btn.remove_class("signal-active")
+            except Exception:
+                pass
+        try:
+            label = ", ".join(s for _, s in _SIGNAL_DEFS if s in active) or "No signals selected"
+            self.query_one("#signal-picker-active", Static).update(
+                f"  [#555555]Active:[/]  [bold #d8e4f2]{label}[/]"
+            )
+        except Exception:
+            pass
+
+    def _active_strategy_payload(self) -> Optional[dict]:
+        account_id = str(getattr(self, "_current_account_id", "account_1") or "account_1")
+        account = self._strategy_account_binding(account_id)
+        strategy_id = str((account or {}).get("strategy_id") or strategy_registry.default_strategy_for_account(account_id))
+        return strategy_registry.load_strategy(strategy_id)
+
+    def _active_strategy_config(self) -> dict:
+        payload = self._active_strategy_payload() or {}
+        config = dict(payload.get("config") or {})
+        if not config:
+            config = copy.deepcopy(LONG_TERM_CONFIG)
+        return config
+
+    def _apply_active_strategy_runtime(self) -> None:
+        config = self._active_strategy_config()
+        self.signal_types = list(config.get("signal_types") or list(LONG_TERM_CONFIG.get("signal_types") or []))
+        self.max_positions = int(config.get("max_positions") or LONG_TERM_CONFIG.get("max_positions") or 0)
+        self.holding_days = int(config.get("holding_days") or LONG_TERM_CONFIG.get("holding_days") or 0)
+        self.sector_limit = float(config.get("sector_limit") or LONG_TERM_CONFIG.get("sector_limit") or 0.0)
+        self.use_regime_filter = bool(config.get("use_regime_filter", True))
+
+    def _load_strategies_registry(self) -> None:
+        strategy_registry.ensure_builtin_strategies()
+        self._strategies = strategy_registry.list_strategies()
+        self._strategy_comparison_snapshot = strategy_registry.load_strategy_comparison_snapshot()
+        current_account = self._strategy_account_binding(getattr(self, "_current_account_id", "account_1"))
+        preferred = str((current_account or {}).get("strategy_id") or "default_c5")
+        known = {str(item.get("id") or "") for item in self._strategies}
+        self._selected_strategy_id = preferred if preferred in known else (next(iter(known)) if known else "default_c5")
+
+    def _selected_strategy_payload(self) -> Optional[dict]:
+        sid = str(getattr(self, "_selected_strategy_id", "") or "").strip()
+        for item in list(getattr(self, "_strategies", []) or []):
+            if str(item.get("id") or "") == sid:
+                return item
+        return strategy_registry.load_strategy(sid)
+
+    def _set_strategy_form_from_payload(self, payload: Optional[dict]) -> None:
+        if not payload:
+            return
+        config = dict(payload.get("config") or {})
+        # Sync signal picker buttons
+        active = set(str(s) for s in list(config.get("signal_types") or []))
+        self._active_signals = active
+        self._sync_signal_buttons()
+
+        values = {
+            "strategy-inp-name": str(payload.get("name") or ""),
+            "strategy-inp-description": str(payload.get("description") or ""),
+            "strategy-inp-holding-days": str(int(config.get("holding_days") or 0) or ""),
+            "strategy-inp-rebalance": str(int(config.get("rebalance_frequency") or 0) or ""),
+            "strategy-inp-max-positions": str(int(config.get("max_positions") or 0) or ""),
+            "strategy-inp-stop-loss": str(config.get("stop_loss_pct") if config.get("stop_loss_pct") is not None else ""),
+            "strategy-inp-trailing-stop": str(config.get("trailing_stop_pct") if config.get("trailing_stop_pct") is not None else ""),
+            "strategy-inp-sector-limit": str(config.get("sector_limit") if config.get("sector_limit") is not None else ""),
+        }
+        for widget_id, value in values.items():
+            try:
+                self.query_one(f"#{widget_id}", Input).value = value
+            except Exception:
+                pass
+        try:
+            start_widget = self.query_one("#strategy-inp-backtest-start", Input)
+            if not start_widget.value:
+                start_widget.value = "2025-01-01"
+        except Exception:
+            pass
+        try:
+            end_widget = self.query_one("#strategy-inp-backtest-end", Input)
+            if not end_widget.value:
+                end_widget.value = str(getattr(self.md, "latest", datetime.now().strftime("%Y-%m-%d")) or datetime.now().strftime("%Y-%m-%d"))
+        except Exception:
+            pass
+        try:
+            cap_widget = self.query_one("#strategy-inp-backtest-capital", Input)
+            if not cap_widget.value:
+                cap_widget.value = "1000000"
+        except Exception:
+            pass
+
+    def _strategy_form_payload(self) -> dict:
+        if getattr(self, "_new_strategy_mode", False):
+            # New strategy: start from clean defaults, not the currently selected one
+            base = {}
+            config = {
+                "holding_days": 40,
+                "max_positions": 5,
+                "rebalance_frequency": 5,
+                "stop_loss_pct": 0.08,
+                "trailing_stop_pct": 0.15,
+                "sector_limit": 0.35,
+                "use_regime_filter": True,
+                "use_trailing_stop": True,
+                "signal_types": [],
+            }
+        else:
+            base = self._selected_strategy_payload() or strategy_registry.load_strategy("default_c5") or {}
+            config = copy.deepcopy(base.get("config") or {})
+
+        def _read_input(widget_id: str) -> str:
+            return str(self.query_one(f"#{widget_id}", Input).value or "").strip()
+
+        name = _read_input("strategy-inp-name") or str(base.get("name") or "Strategy")
+        description = _read_input("strategy-inp-description")
+        # Signals come from the picker buttons (not a text input)
+        active = set(getattr(self, "_active_signals", set()))
+        if active:
+            # Preserve original ordering where possible, append new ones
+            orig_order = list(config.get("signal_types") or [])
+            ordered = [s for s in orig_order if s in active]
+            ordered += [s for s in active if s not in ordered]
+            config["signal_types"] = ordered
+
+        numeric_fields = {
+            "holding_days": ("strategy-inp-holding-days", int),
+            "rebalance_frequency": ("strategy-inp-rebalance", int),
+            "max_positions": ("strategy-inp-max-positions", int),
+            "stop_loss_pct": ("strategy-inp-stop-loss", float),
+            "trailing_stop_pct": ("strategy-inp-trailing-stop", float),
+            "sector_limit": ("strategy-inp-sector-limit", float),
+        }
+        for key, (widget_id, caster) in numeric_fields.items():
+            raw = _read_input(widget_id)
+            if raw:
+                config[key] = caster(raw)
+
+        return {
+            "id": str(base.get("id") or ""),
+            "name": name,
+            "description": description,
+            "runner_mode": str(base.get("runner_mode") or "temp_patched"),
+            "execution_mode": str(base.get("execution_mode") or "paper_runtime"),
+            "config": config,
+            "ranking_overlay": copy.deepcopy(base.get("ranking_overlay") or {"mode": "baseline"}),
+            "notes": {
+                **dict(base.get("notes") or {}),
+                "base_strategy_id": str(base.get("id") or ""),
+            },
+        }
+
+    def _render_strategy_backtest_summary(self) -> None:
+        try:
+            widget = self.query_one("#strategy-backtest-summary", Static)
+        except Exception:
+            return
+        selected_id = str(getattr(self, "_selected_strategy_id", "") or "").strip()
+        result = self._selected_strategy_chart_result(selected_id)
+        if not result:
+            widget.update(
+                Text.from_markup(
+                    f"[#8aa0b5]Backtest artifacts[/] data/strategy_registry/backtests/\n"
+                    f"[#708091]Run a backtest from this tab, or select a strategy with a saved chartable artifact.[/]"
+                )
+            )
+            return
+        summary = dict(result.get("summary") or {})
+        nepse = dict(result.get("nepse") or {})
+        widget.update(
+            Text.from_markup(
+                f"[bold {WHITE}]Window[/] {result.get('window', {}).get('start')} → {result.get('window', {}).get('end')}   "
+                f"[bold {WHITE}]Capital[/] {_npr_k(float(result.get('window', {}).get('capital') or 0.0))}\n"
+                f"[bold {WHITE}]Strategy[/] {summary.get('total_return_pct', 0.0):+.2f}%   "
+                f"[bold {WHITE}]NEPSE[/] {float(nepse.get('return_pct') or 0.0):+.2f}%   "
+                f"[bold {WHITE}]Alpha[/] {float(summary.get('vs_nepse_pct_points') or 0.0):+.2f}pp   "
+                f"[bold {WHITE}]Sharpe[/] {float(summary.get('sharpe_ratio', summary.get('sharpe')) or 0.0):.2f}   "
+                f"[bold {WHITE}]MaxDD[/] {float(summary.get('max_drawdown_pct') or 0.0):+.2f}%   "
+                f"[bold {WHITE}]Trades[/] {int(summary.get('trade_count', summary.get('total_trades')) or 0)}\n"
+                f"[#8aa0b5]Saved[/] data/strategy_registry/backtests/{str(result.get('strategy', {}).get('id') or 'strategy')}_latest.json"
+            )
+        )
+
+    def _selected_strategy_chart_result(self, strategy_id: str) -> dict:
+        sid = str(strategy_id or "").strip()
+        result = dict(getattr(self, "_strategy_backtest_result", {}) or {})
+        if result and str((result.get("strategy") or {}).get("id") or "") != sid:
+            result = {}
+        if result and len(list((result.get("summary") or {}).get("daily_nav") or [])) >= 5:
+            return result
+        return dict(strategy_registry.load_strategy_chart_result(sid) or {})
+
+    def _strategy_saved_metrics(self, strategy_id: str) -> Optional[dict]:
+        return strategy_registry.comparison_metrics_for_strategy(strategy_id)
+
+    def _set_strategy_backtest_status(
+        self,
+        strategy_id: str,
+        status: str,
+        message: str = "",
+        progress_pct: Optional[int] = None,
+    ) -> None:
+        sid = str(strategy_id or "").strip()
+        if not sid:
+            return
+        statuses = dict(getattr(self, "_strategy_backtest_statuses", {}) or {})
+        current = dict(statuses.get(sid) or {})
+        if progress_pct is None:
+            progress_pct = current.get("progress_pct")
+        statuses[sid] = {
+            **current,
+            "status": str(status or "").upper(),
+            "message": str(message or ""),
+            "progress_pct": progress_pct,
+        }
+        self._strategy_backtest_statuses = statuses
+        self._populate_strategy_list()
+
+    def _strategy_backtest_status_cell(self, strategy_id: str, metrics: dict) -> Text:
+        sid = str(strategy_id or "").strip()
+        state = dict(((getattr(self, "_strategy_backtest_statuses", {}) or {}).get(sid) or {}))
+        status = str(state.get("status") or "").upper()
+        if status == "RUN":
+            progress = state.get("progress_pct")
+            if progress is not None:
+                return Text(f"{int(progress):>3d}%", style=YELLOW)
+            return Text("RUN", style=YELLOW)
+        if status == "CHART":
+            return Text("CHART", style=YELLOW)
+        if status == "FAIL":
+            return Text("FAIL", style=LOSS_HI)
+        if metrics:
+            return Text("OK", style=GAIN_HI)
+        return Text("—", style=LABEL)
+
+    def _on_strategy_backtest_progress(self, strategy_id: str, payload: dict) -> None:
+        sid = str(strategy_id or "").strip()
+        if not sid:
+            return
+        progress = payload.get("progress_pct")
+        try:
+            progress_int = max(0, min(100, int(progress)))
+        except Exception:
+            progress_int = None
+        message = str(payload.get("message") or "").strip()
+        date_text = str(payload.get("date") or "").strip()
+        if date_text:
+            message = f"{message} | {date_text}".strip(" |")
+        self._set_strategy_backtest_status(sid, "RUN", message, progress_int)
+        if message:
+            self._set_status(f"Backtest progress | {progress_int if progress_int is not None else 0}% | {message}")
+
+    def _populate_strategy_list(self) -> None:
+        try:
+            dt = self.query_one("#dt-strategy-list", DataTable)
+        except Exception:
+            return
+        dt.clear(columns=True)
+        for label, key, width in [
+            ("NAME", "name", 8),
+            ("SIG", "sig", 4),
+            ("HOLD", "hold", 5),
+            ("RET", "ret", 9),
+            ("VS NP", "vs_np", 10),
+            ("SHRP", "sharpe", 6),
+            ("DD", "dd", 9),
+            ("TRD", "trades", 4),
+            ("WR", "win_rate", 6),
+            ("BT", "backtest_status", 7),
+        ]:
+            dt.add_column(label, key=key, width=width)
+        selected_index = 0
+        for idx, strategy in enumerate(list(getattr(self, "_strategies", []) or [])):
+            sid = str(strategy.get("id") or "")
+            config = dict(strategy.get("config") or {})
+            signals = list(config.get("signal_types") or [])
+            metrics = self._strategy_saved_metrics(sid) or {}
+            if sid == str(getattr(self, "_selected_strategy_id", "") or ""):
+                selected_index = idx
+            dt.add_row(
+                Text(self._strategy_display_name(sid, str(strategy.get("name") or sid)), style=WHITE),
+                Text(str(len(signals)), style=WHITE),
+                Text(str(config.get("holding_days") or ""), style=WHITE),
+                Text(f"{float(metrics.get('total_return_pct') or 0.0):+.2f}%" if metrics else "—", style=GAIN_HI if float(metrics.get("total_return_pct") or 0.0) >= 0 else LOSS_HI),
+                Text(f"{float(metrics.get('total_return_pct') or 0.0) - float((metrics.get('nepse') or {}).get('return_pct') or 0.0):+.2f}pp" if metrics else "—", style=GAIN_HI if (float(metrics.get("total_return_pct") or 0.0) - float((metrics.get("nepse") or {}).get("return_pct") or 0.0)) >= 0 else LOSS_HI),
+                Text(f"{float(metrics.get('sharpe_ratio') or 0.0):.2f}" if metrics else "—", style=WHITE),
+                Text(f"{float(metrics.get('max_drawdown_pct') or 0.0):+.2f}%" if metrics else "—", style=WHITE),
+                Text(str(int(metrics.get("trade_count") or 0)) if metrics else "—", style=WHITE),
+                Text(f"{float(metrics.get('win_rate_pct') or 0.0):.0f}%" if metrics else "—", style=WHITE),
+                self._strategy_backtest_status_cell(sid, metrics),
+            )
+        if self._strategies:
+            try:
+                dt.move_cursor(row=selected_index)
+            except Exception:
+                pass
+        else:
+            dt.add_row(_dim_text("No strategies"), Text(""), Text(""), Text(""), Text(""), Text(""), Text(""), Text(""), Text(""), Text(""))
+        try:
+            row_count = max(1, len(list(getattr(self, "_strategies", []) or [])))
+            dt.styles.height = min(max(row_count + 3, 7), 10)
+        except Exception:
+            pass
+
+    def _populate_strategies_tab(self) -> None:
+        if not getattr(self, "_strategies", None):
+            self._load_strategies_registry()
+        self._populate_strategy_list()
+        selected = self._selected_strategy_payload()
+        self._set_strategy_form_from_payload(selected)
+        current_strategy = self._strategy_name_for_account(getattr(self, "_current_account_id", "account_1"))
+        selected_account_strategy = self._strategy_name_for_account(getattr(self, "_selected_account_id", self._current_account_id))
+        try:
+            metrics = self._strategy_saved_metrics(str((selected or {}).get("id") or ""))
+            metrics_line = ""
+            if metrics:
+                window = dict(metrics.get("window") or {})
+                nepse = dict(metrics.get("nepse") or {})
+                alpha = float(metrics.get("total_return_pct") or 0.0) - float(nepse.get("return_pct") or 0.0)
+                metrics_line = (
+                    f"\n[bold {WHITE}]Saved baseline[/] {window.get('start')} → {window.get('end')}   "
+                    f"[bold {WHITE}]Growth[/] {float(metrics.get('total_return_pct') or 0.0):+.2f}%   "
+                    f"[bold {WHITE}]vs NEPSE[/] {alpha:+.2f}pp   "
+                    f"[bold {WHITE}]Sharpe[/] {float(metrics.get('sharpe_ratio') or 0.0):.2f}   "
+                    f"[bold {WHITE}]MaxDD[/] {float(metrics.get('max_drawdown_pct') or 0.0):+.2f}%   "
+                    f"[bold {WHITE}]Trades[/] {int(metrics.get('trade_count') or 0)}   "
+                    f"[bold {WHITE}]Win rate[/] {float(metrics.get('win_rate_pct') or 0.0):.0f}%"
+                )
+            self.query_one("#strategy-summary", Static).update(
+                Text.from_markup(
+                    f"[bold {WHITE}]Selected strategy[/] {str((selected or {}).get('name') or self._selected_strategy_id)}   "
+                    f"[bold {WHITE}]Current account[/] {current_strategy}   "
+                    f"[bold {WHITE}]Selected account[/] {selected_account_strategy}\n"
+                    f"[#8aa0b5]Storage[/] data/strategy_registry/{metrics_line}"
+                )
+            )
+        except Exception:
+            pass
+        try:
+            account_lines = []
+            for account in list(getattr(self, "_paper_accounts", []) or []):
+                aid = str(account.get("id") or "")
+                account_lines.append(
+                    f"{str(account.get('name') or aid)} → {strategy_registry.strategy_name(str(account.get('strategy_id') or ''))}"
+                )
+            note = "\n".join(account_lines) if account_lines else "No account bindings"
+            self.query_one("#strategy-accounts-note", Static).update(
+                Text.from_markup(f"[#8aa0b5]Bindings[/]\n{note}")
+            )
+        except Exception:
+            pass
+        self._render_strategy_backtest_summary()
+
+    def _assign_strategy_to_account(self, strategy_id: str, account_id: str) -> str:
+        sid = str(strategy_id or "").strip()
+        aid = str(account_id or "").strip()
+        if not sid:
+            raise ValueError("Select a strategy first")
+        if not aid:
+            raise ValueError("Select an account first")
+        registry = _load_accounts_registry()
+        accounts = list(registry.get("accounts") or [])
+        now_stamp = datetime.now().isoformat(timespec="seconds")
+        updated = False
+        for account in accounts:
+            if str(account.get("id") or "") == aid:
+                account["strategy_id"] = sid
+                account["updated_at"] = now_stamp
+                updated = True
+        if not updated:
+            raise ValueError("Account not found")
+        registry["accounts"] = accounts
+        _save_accounts_registry(registry)
+        self._paper_accounts = strategy_registry.ensure_account_strategy_ids(accounts)
+        if aid == str(getattr(self, "_current_account_id", "") or ""):
+            self._apply_active_strategy_runtime()
+            self._signals_table_cache_key = ""
+            self._signals_table_cache_payload = None
+            self._sync_agent_account_context_env()
+            self._load_signals_async(force=True)
+        self._populate_account_list()
+        self._populate_paper_profile_panel(self._stats)
+        self._populate_strategies_tab()
+        return f"Assigned {strategy_registry.strategy_name(sid)} to {aid}"
+
+    def _delete_custom_strategy(self) -> str:
+        selected = self._selected_strategy_payload()
+        if not selected:
+            return "No strategy selected"
+        if str(selected.get("source") or "") != "custom":
+            return f"Cannot delete built-in strategy '{selected.get('name')}'"
+        sid = str(selected.get("id") or "").strip()
+        if not sid:
+            return "Invalid strategy ID"
+        from backend.trading.strategy_registry import CUSTOM_STRATEGY_DIR
+        path = CUSTOM_STRATEGY_DIR / f"{sid}.json"
+        if path.exists():
+            path.unlink()
+        name = str(selected.get("name") or sid)
+        self._load_strategies_registry()
+        self._populate_strategies_tab()
+        # Clear the form
+        self._active_signals = set()
+        self._sync_signal_buttons()
+        return f"Deleted strategy '{name}'"
+
+    def _save_strategy_from_form(self) -> str:
+        new_mode = getattr(self, "_new_strategy_mode", False)
+        payload = self._strategy_form_payload()
+        if not str(payload.get("name") or "").strip():
+            raise ValueError("Enter a strategy name")
+        selected = self._selected_strategy_payload() or {}
+        # Never overwrite an existing strategy when NEW was pressed
+        overwrite = (
+            not new_mode
+            and str(selected.get("source") or "") == "custom"
+            and str(selected.get("id") or "") == str(payload.get("id") or "")
+        )
+        if not overwrite:
+            payload = dict(payload)
+            payload.pop("id", None)
+        saved = strategy_registry.save_custom_strategy(
+            payload,
+            strategy_id=(str(selected.get("id") or "") if overwrite else None),
+            overwrite=overwrite,
+        )
+        self._new_strategy_mode = False
+        self._load_strategies_registry()
+        self._selected_strategy_id = str(saved.get("id") or self._selected_strategy_id)
+        self._populate_strategies_tab()
+        return f"Saved strategy {saved.get('name')} ({saved.get('id')})"
+
+    @work(thread=True)
+    def _run_strategy_backtest_async(self, strategy_id: str, start_date: str, end_date: str, capital: float) -> None:
+        try:
+            payload = strategy_registry.load_strategy(strategy_id)
+            if not payload:
+                raise ValueError("Strategy not found")
+            self.call_from_thread(self._set_strategy_backtest_status, strategy_id, "RUN")
+            self.call_from_thread(self._set_status, f"Backtesting {payload.get('name')}...")
+            log_path = PROJECT_ROOT / "data" / "runtime" / "logs" / "strategy_backtest.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            file_handler = logging.FileHandler(log_path, mode="a", encoding="utf-8")
+            file_handler.setLevel(logging.INFO)
+            file_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(name)s - %(message)s"))
+
+            _bt_loggers = [
+                logging.getLogger(n)
+                for n in ("backend", "backend.backtesting.simple_backtest", "backend.trading.strategy_registry")
+            ]
+            _bt_prev_levels = [(lg, lg.level) for lg in _bt_loggers]
+            root_logger = logging.getLogger()
+            _root_prev = root_logger.level
+            _stream_prev_levels = [
+                (handler, handler.level)
+                for handler in root_logger.handlers
+                if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler)
+            ]
+            root_logger.addHandler(file_handler)
+            root_logger.setLevel(logging.INFO)
+            for lg in _bt_loggers:
+                lg.setLevel(logging.INFO)
+            for handler, _level in _stream_prev_levels:
+                handler.setLevel(logging.WARNING)
+            try:
+                logging.getLogger(__name__).info(
+                    "Starting strategy backtest id=%s start=%s end=%s capital=%s log=%s",
+                    strategy_id,
+                    start_date,
+                    end_date,
+                    capital,
+                    log_path,
+                )
+                result = strategy_registry.run_strategy_backtest(
+                    payload,
+                    start_date=start_date,
+                    end_date=end_date,
+                    capital=capital,
+                    progress_callback=lambda progress: self.call_from_thread(
+                        self._on_strategy_backtest_progress,
+                        strategy_id,
+                        dict(progress or {}),
+                    ),
+                )
+                logging.getLogger(__name__).info("Finished strategy backtest id=%s", strategy_id)
+            finally:
+                for lg, lvl in _bt_prev_levels:
+                    lg.setLevel(lvl)
+                root_logger.setLevel(_root_prev)
+                for handler, level in _stream_prev_levels:
+                    handler.setLevel(level)
+                root_logger.removeHandler(file_handler)
+                file_handler.close()
+            self._strategy_backtest_result = result
+            summary = dict(result.get("summary") or {})
+            nepse   = dict(result.get("nepse") or {})
+            self.call_from_thread(self._populate_strategies_tab)
+            self.call_from_thread(self._set_strategy_backtest_status, strategy_id, "CHART")
+            strat_ret = float(summary.get("total_return_pct") or 0.0)
+            nepse_ret = float(nepse.get("return_pct") or 0.0)
+            self.call_from_thread(
+                self._set_status,
+                f"Backtest done | {payload.get('name')} {strat_ret:+.2f}% vs NEPSE {nepse_ret:+.2f}%  |  Generating chart...",
+            )
+            # ── Generate quick chart (non-blocking, runs in same thread) ──────
+            try:
+                from validation.quick_chart import generate_quick_chart
+                from backend.quant_pro.database import get_db_path as _get_db_path
+                chart_path = generate_quick_chart(
+                    result,
+                    strategy_name=str(payload.get("name") or strategy_id),
+                    start_date=start_date,
+                    end_date=end_date,
+                    db_path=str(_get_db_path()),
+                    auto_open=True,
+                )
+                chart_note = f"  Chart → {chart_path}" if chart_path else ""
+            except Exception:
+                chart_note = ""
+            self.call_from_thread(
+                self._set_status,
+                f"Backtest done | {payload.get('name')} {strat_ret:+.2f}% vs NEPSE {nepse_ret:+.2f}%{chart_note}",
+            )
+            self.call_from_thread(self._set_strategy_backtest_status, strategy_id, "OK")
+        except Exception as exc:
+            self.call_from_thread(self._set_strategy_backtest_status, strategy_id, "FAIL", str(exc))
+            self.call_from_thread(self._set_status, f"Strategy backtest failed: {exc}")
+
+    def _start_strategy_backtest(self) -> str:
+        selected = self._selected_strategy_payload()
+        if not selected:
+            raise ValueError("Select a strategy first")
+        start = str(self.query_one("#strategy-inp-backtest-start", Input).value or "").strip()
+        end = str(self.query_one("#strategy-inp-backtest-end", Input).value or "").strip()
+        capital_raw = str(self.query_one("#strategy-inp-backtest-capital", Input).value or "").strip().replace(",", "")
+        if not start or not end:
+            raise ValueError("Enter start and end dates")
+        capital = float(capital_raw or INITIAL_CAPITAL)
+        strategy_id = str(selected.get("id") or "")
+        self._set_strategy_backtest_status(strategy_id, "RUN")
+        self._run_strategy_backtest_async(strategy_id, start, end, capital)
+        return f"Backtest launched for {selected.get('name')}"
+
     def _profile_runtime_snapshot(self, *, account_dir: Optional[Path] = None) -> dict:
         if account_dir:
             portfolio_path = account_dir / "paper_portfolio.csv"
@@ -6428,7 +7866,20 @@ class NepseDashboard(App):
         if not isinstance(cash, (int, float)):
             cash = _load_manual_paper_cash(0.0, nav_log)
         nav_value = None
-        if isinstance(nav_log, pd.DataFrame) and not nav_log.empty and "NAV" in nav_log.columns:
+        if account_dir and hasattr(self, "md"):
+            try:
+                stats = _compute_account_portfolio_stats(self.md, account_dir)
+                nav_value = float(stats.get("nav") or 0.0)
+                cash = float(stats.get("cash") or cash)
+            except Exception:
+                nav_value = None
+        elif not account_dir and isinstance(getattr(self, "_stats", None), dict) and self._stats:
+            try:
+                nav_value = float(self._stats.get("nav") or 0.0)
+                cash = float(self._stats.get("cash") or cash)
+            except Exception:
+                nav_value = None
+        if nav_value is None and isinstance(nav_log, pd.DataFrame) and not nav_log.empty and "NAV" in nav_log.columns:
             try:
                 nav_value = float(nav_log.iloc[-1]["NAV"])
             except Exception:
@@ -6446,6 +7897,7 @@ class NepseDashboard(App):
         snapshot = self._profile_runtime_snapshot()
         profile = _load_profile_config()
         current_id = str(getattr(self, "_current_account_id", "account_1") or "account_1")
+        current_strategy = self._strategy_name_for_account(current_id)
         current_name = next(
             (str(account.get("name") or current_id) for account in getattr(self, "_paper_accounts", []) if str(account.get("id") or "") == current_id),
             current_id,
@@ -6457,21 +7909,23 @@ class NepseDashboard(App):
         if not held_syms:
             held_syms = "No holdings loaded"
         selected_id = str(getattr(self, "_selected_account_id", current_id) or current_id)
+        selected_strategy = self._strategy_name_for_account(selected_id)
         selected_name = next(
             (str(account.get("name") or selected_id) for account in getattr(self, "_paper_accounts", []) if str(account.get("id") or "") == selected_id),
             selected_id,
         )
-        mode_note = "Creating or activating an account swaps the full paper runtime" if self.trade_mode == "paper" else "Paper account controls are idle while live mode is selected"
+        mode_note = "Creating or activating an account swaps the full paper runtime"
         summary = Text.from_markup(
             f"[bold {WHITE}]Active[/] {current_name}   "
+            f"[bold {WHITE}]Strategy[/] {current_strategy}   "
             f"[bold {WHITE}]Selected[/] {selected_name}   "
+            f"[bold {WHITE}]Selected strategy[/] {selected_strategy}   "
             f"[bold {WHITE}]Holdings[/] {snapshot['holdings']}   "
             f"[bold {WHITE}]Trades[/] {snapshot['trades']}   "
             f"[bold {WHITE}]NAV rows[/] {snapshot['nav_rows']}   "
             f"[bold {WHITE}]NAV[/] {_npr_k(snapshot['nav'])}   "
             f"[bold {WHITE}]Cash[/] {_npr_k(snapshot['cash'])}\n"
             f"[#8aa0b5]Held symbols:[/] {held_syms}\n"
-            f"[#8aa0b5]Runtime:[/] {snapshot['runtime_dir']}\n"
             f"[#708091]{mode_note}[/]"
         )
         try:
@@ -6519,6 +7973,40 @@ class NepseDashboard(App):
             pass
         self._populate_account_list()
 
+    @work(thread=True)
+    def _browse_seed_file(self) -> None:
+        """Open a native macOS file picker and populate the seed path input."""
+        import subprocess as _sp
+        self.call_from_thread(self._set_status, "Opening file picker…")
+        try:
+            script = (
+                'POSIX path of (choose file with prompt '
+                '"Select portfolio CSV (paper_portfolio.csv or MeroShare CSV)" '
+                'of type {"csv", "CSV"})'
+            )
+            result = _sp.run(
+                ["osascript", "-e", script],
+                capture_output=True, text=True, timeout=120,
+            )
+            chosen = result.stdout.strip()
+            if not chosen:
+                self.call_from_thread(self._set_status, "Browse cancelled")
+                return
+            # Populate the seed input and show a preview
+            self.call_from_thread(
+                lambda p=chosen: (
+                    setattr(self.query_one("#profile-inp-portfolio", Input), "value", p)
+                    or self._set_status(f"Seed file selected: {Path(p).name}")
+                )
+            )
+        except FileNotFoundError:
+            self.call_from_thread(
+                self._set_status,
+                "osascript not found — type the path manually into the SEED field",
+            )
+        except Exception as exc:
+            self.call_from_thread(self._set_status, f"Browse failed: {exc}")
+
     def _account_create_from_form(self) -> str:
         raw_name = self.query_one("#profile-inp-account-name", Input).value
         raw_path = self.query_one("#profile-inp-portfolio", Input).value
@@ -6565,6 +8053,7 @@ class NepseDashboard(App):
         return {
             "id": account_id,
             "name": str(account.get("name") or account_id),
+            "strategy": strategy_registry.strategy_name(str(account.get("strategy_id") or strategy_registry.default_strategy_for_account(account_id))),
             "holdings": snap["holdings"],
             "trades": snap["trades"],
             "nav": snap["nav"],
@@ -6578,7 +8067,7 @@ class NepseDashboard(App):
         except Exception:
             return
         dt.clear(columns=True)
-        for label, key in [("ID", "id"), ("NAME", "name"), ("HOLD", "hold"), ("NAV", "nav"), ("CASH", "cash"), ("STATUS", "status")]:
+        for label, key in [("ID", "id"), ("NAME", "name"), ("STRAT", "strategy"), ("HOLD", "hold"), ("NAV", "nav"), ("CASH", "cash"), ("STATUS", "status")]:
             dt.add_column(label, key=key)
         rows = []
         selected_index = 0
@@ -6592,13 +8081,14 @@ class NepseDashboard(App):
             dt.add_row(
                 Text(account_id.replace("account_", "A"), style=DIM),
                 Text(snap["name"], style=WHITE),
+                Text(snap["strategy"], style=CYAN),
                 Text(str(snap["holdings"]), style=WHITE),
                 Text(_npr_k(snap["nav"]), style=AMBER),
                 Text(_npr_k(snap["cash"]), style=WHITE),
                 Text(status, style=f"bold {GAIN_HI}" if status == "ACTIVE" else CYAN if status == "SELECTED" else DIM),
             )
         if not rows:
-            dt.add_row(_dim_text("ΓÇö"), _dim_text("No accounts"), Text(""), Text(""), Text(""), Text(""))
+            dt.add_row(_dim_text("—"), _dim_text("No accounts"), Text(""), Text(""), Text(""), Text(""), Text(""))
         else:
             try:
                 dt.move_cursor(row=selected_index)
@@ -6612,7 +8102,12 @@ class NepseDashboard(App):
         target_dir = _account_dir(account_id)
         _blank_account_files(target_dir)
         for name, active_path in ACTIVE_ACCOUNT_FILES.items():
-            _copy_file_if_exists(Path(active_path), target_dir / name)
+            target = target_dir / name
+            # Account directories are now the canonical paper books. Keep legacy
+            # active-file snapshots from overwriting live autopilot/manual fills.
+            if name != "watchlist.json" and target.exists():
+                continue
+            _copy_file_if_exists(Path(active_path), target)
         registry = _load_accounts_registry()
         accounts = list(registry.get("accounts") or [])
         now_stamp = datetime.now().isoformat(timespec="seconds")
@@ -6640,6 +8135,13 @@ class NepseDashboard(App):
                 shutil.copy2(source, target)
         self._current_account_id = target_id
         self._selected_account_id = target_id
+        # Switch active engine reference to the newly activated account
+        self._trading_engine = self._account_engines.get(target_id)
+        target_account = self._strategy_account_binding(target_id) or {}
+        self._selected_strategy_id = str(target_account.get("strategy_id") or self._selected_strategy_id)
+        self._apply_active_strategy_runtime()
+        self._signals_table_cache_key = ""
+        self._signals_table_cache_payload = None
         self._sync_agent_account_context_env()
         profile = _load_profile_config()
         profile["current_account_id"] = target_id
@@ -6649,9 +8151,12 @@ class NepseDashboard(App):
         self._load_paper_orders()
         self._populate_portfolio_and_risk()
         self._populate_trades_full()
+        self._render_hedge_panel()
         self._populate_orders_tab()
         self._populate_watchlist()
         self._populate_paper_profile_panel(self._stats)
+        self._populate_strategies_tab()
+        self._load_signals_async(force=True)
         backup_note = f" | backup {backup_dir.name}" if backup_dir else ""
         active_name = next((str(a.get("name") or target_id) for a in self._paper_accounts if str(a.get("id") or "") == target_id), target_id)
         return f"Activated {active_name}{backup_note}"
@@ -6677,6 +8182,8 @@ class NepseDashboard(App):
         state, nav_log = _build_account_seed_state(portfolio_df, target_nav)
         registry = _load_accounts_registry()
         accounts = list(registry.get("accounts") or [])
+        if len(accounts) >= MAX_ACCOUNTS:
+            raise ValueError(f"Maximum {MAX_ACCOUNTS} accounts allowed")
         if any(str(account.get("name") or "").strip().lower() == name.lower() for account in accounts):
             raise ValueError(f"{name} already exists")
         account_id = _next_account_id(accounts)
@@ -6695,13 +8202,51 @@ class NepseDashboard(App):
         (target_dir / "tui_paper_orders.json").write_text("[]")
         (target_dir / "tui_paper_order_history.json").write_text("[]")
         now_stamp = datetime.now().isoformat(timespec="seconds")
-        accounts.append({"id": account_id, "name": name, "created_at": now_stamp, "updated_at": now_stamp})
+        accounts.append({
+            "id": account_id,
+            "name": name,
+            "strategy_id": strategy_registry.default_strategy_for_account(account_id),
+            "created_at": now_stamp,
+            "updated_at": now_stamp,
+        })
         registry["accounts"] = accounts
         _save_accounts_registry(registry)
-        self._paper_accounts = accounts
+        self._paper_accounts = strategy_registry.ensure_account_strategy_ids(accounts)
         self._persist_profile_paths(portfolio_path=str(portfolio_path) if portfolio_path else "", target_nav=target_nav)
         self.query_one("#profile-inp-account-name", Input).value = f"Account {len(accounts) + 1}"
         self._selected_account_id = account_id
+        # Start engine for the new account if multi-engine is running
+        if self.trade_mode == "paper" and account_id not in getattr(self, "_account_engines", {}):
+            _new_strategy = strategy_registry.load_strategy(strategy_registry.default_strategy_for_account(account_id))
+            _new_config = dict((_new_strategy or {}).get("config") or {}) or dict(LONG_TERM_CONFIG)
+            _new_adir = _account_dir(account_id)
+            _new_capital = _account_initial_capital_from_files(
+                _new_adir,
+                float(_new_config.get("initial_capital") or target_nav or INITIAL_CAPITAL),
+            )
+            _new_engine = TUITradingEngine(
+                capital=_new_capital,
+                signal_types=list(_new_config.get("signal_types") or list(LONG_TERM_CONFIG.get("signal_types") or [])),
+                max_positions=int(_new_config.get("max_positions") or LONG_TERM_CONFIG.get("max_positions") or 5),
+                holding_days=int(_new_config.get("holding_days") or LONG_TERM_CONFIG.get("holding_days") or 40),
+                sector_limit=float(_new_config.get("sector_limit") or LONG_TERM_CONFIG.get("sector_limit") or 0.35),
+                stop_loss_pct=float(_new_config.get("stop_loss_pct") or LONG_TERM_CONFIG.get("stop_loss_pct") or 0.08),
+                trailing_stop_pct=float(_new_config.get("trailing_stop_pct") or LONG_TERM_CONFIG.get("trailing_stop_pct") or 0.10),
+                hedge_enabled=bool(getattr(self, "_hedge_enabled", True)),
+                portfolio_file=_new_adir / "paper_portfolio.csv",
+                trade_log_file=_new_adir / "paper_trade_log.csv",
+                nav_log_file=_new_adir / "paper_nav_log.csv",
+                state_file=_new_adir / "paper_state.json",
+                account_id=account_id,
+                strategy_id=strategy_registry.default_strategy_for_account(account_id),
+                strategy_config=_new_config,
+                on_status=self._make_engine_status_cb(account_id),
+                on_activity=self._make_engine_activity_cb(account_id),
+                on_portfolio_changed=self._make_engine_portfolio_cb(account_id),
+                on_agent_updated=self._make_engine_agent_cb(account_id),
+            )
+            self._account_engines[account_id] = _new_engine
+            self._start_account_engine_worker(account_id)
         message = self._activate_paper_account(account_id)
         seed_note = f"{portfolio_df.shape[0]} seeded holdings" if not portfolio_df.empty else "cash-only account"
         return f"Created {name} | {seed_note} | {message}"
@@ -6711,6 +8256,53 @@ class NepseDashboard(App):
         self._populate_paper_profile_panel(self._stats)
         active_name = next((str(a.get("name") or self._current_account_id) for a in self._paper_accounts if str(a.get("id") or "") == self._current_account_id), self._current_account_id)
         return f"Saved snapshot for {active_name}"
+
+    def _delete_paper_account(self, account_id: str) -> str:
+        """Stop engine, backup files, remove account from registry."""
+        target_id = str(account_id or "").strip()
+        if not target_id:
+            raise ValueError("No account selected")
+        registry = _load_accounts_registry()
+        accounts = list(registry.get("accounts") or [])
+        if len(accounts) <= 1:
+            raise ValueError("Cannot delete the only account")
+        target = next((a for a in accounts if str(a.get("id") or "") == target_id), None)
+        if not target:
+            raise ValueError(f"Account {target_id} not found")
+        # Stop and remove the account's engine
+        engine = self._account_engines.pop(target_id, None)
+        if engine:
+            try:
+                engine.stop()
+            except Exception:
+                pass
+        if self._trading_engine is engine:
+            self._trading_engine = None
+        # Backup account directory before deleting
+        account_dir = _account_dir(target_id)
+        if account_dir.exists():
+            try:
+                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                backup = ensure_dir(PAPER_IMPORT_BACKUP_DIR / f"deleted_{target_id}_{stamp}")
+                shutil.copytree(account_dir, backup / target_id)
+                shutil.rmtree(account_dir, ignore_errors=True)
+            except Exception:
+                pass
+        # Remove from registry
+        remaining = [a for a in accounts if str(a.get("id") or "") != target_id]
+        registry["accounts"] = remaining
+        _save_accounts_registry(registry)
+        self._paper_accounts = strategy_registry.ensure_account_strategy_ids(remaining)
+        name = str(target.get("name") or target_id)
+        # If deleting the active account, activate the first remaining one
+        if target_id == self._current_account_id and remaining:
+            try:
+                self._activate_paper_account(str(remaining[0].get("id") or ""))
+            except Exception:
+                pass
+        else:
+            self._populate_account_list()
+        return f"Deleted '{name}' (backup saved)"
 
     def _copy_import_dataframe(
         self,
@@ -6763,11 +8355,13 @@ class NepseDashboard(App):
         state = load_runtime_state(str(PAPER_STATE_FILE))
         state["cash"] = target_cash
         state["daily_start_nav"] = target_nav
+        state["initial_capital"] = target_nav
         save_runtime_state(str(PAPER_STATE_FILE), state)
 
         tui_state = load_runtime_state(str(TUI_PAPER_STATE_FILE))
         tui_state["cash"] = target_cash
         tui_state["daily_start_nav"] = target_nav
+        tui_state["initial_capital"] = target_nav
         save_runtime_state(str(TUI_PAPER_STATE_FILE), tui_state)
 
         nav_log = _load_nav_log()
@@ -6862,6 +8456,7 @@ class NepseDashboard(App):
         )
         self._populate_portfolio_and_risk()
         self._populate_trades_full()
+        self._render_hedge_panel()
         self._populate_watchlist()
         self._populate_paper_profile_panel(self._stats)
         backup_note = f" | backup {backup_dir.name}" if backup_dir else ""
@@ -6931,6 +8526,7 @@ class NepseDashboard(App):
             raise ValueError(f"Unsupported import kind: {kind}")
         self._populate_portfolio_and_risk()
         self._populate_trades_full()
+        self._render_hedge_panel()
         self._populate_watchlist()
         self._populate_paper_profile_panel(self._stats)
         backup_note = f" | backup {backup_dir.name}" if backup_dir else ""
@@ -6939,14 +8535,9 @@ class NepseDashboard(App):
     def _populate_portfolio_tab(self, s: dict):
         # NAV summary bar
         rc = _pnl_color(s["total_return"])
+        gross_rc = _pnl_color(s.get("gross_return", s["total_return"]))
         alpha_c = _pnl_color(s["alpha"])
-        if self.trade_mode == "live":
-            mode_tag = "[bold #ff8800]LIVE[/]"
-        elif self._trading_engine:
-            phase = self._trading_engine.phase.upper().replace("_", " ")
-            mode_tag = f"[bold #00cfff]AUTO[/] [dim]{phase}[/]"
-        else:
-            mode_tag = "[bold #00ff7f]PAPER[/]"
+        mode_tag = self._display_nav_mode_tag()
         nav_parts = [
             mode_tag,
             f"[bold {AMBER}]NAV[/] [bold {WHITE}]{_npr_k(s['nav'])}[/]",
@@ -6954,7 +8545,8 @@ class NepseDashboard(App):
             f"[#888888]Invested[/] [bold {WHITE}]{_npr_k(s['total_cost'])}[/]",
             f"[#888888]Day[/] [bold {_pnl_color(s.get('day_pnl', 0.0))}]{_npr_k(s.get('day_pnl', 0.0))}[/] "
             f"[{_pnl_color(s.get('day_ret', 0.0))}]{s.get('day_ret', 0.0):+.2f}%[/]",
-            f"[#888888]Return[/] [bold {rc}]{s['total_return']:+.2f}%[/]",
+            f"[#888888]Net[/] [bold {rc}]{s['total_return']:+.2f}%[/]",
+            f"[#888888]Gross[/] [bold {gross_rc}]{s.get('gross_return', s['total_return']):+.2f}%[/]",
             f"[#888888]NEPSE[/] [{_pnl_color(s['nepse_ret'])}]{s['nepse_ret']:+.2f}%[/]",
             f"[#888888]Alpha[/] [bold {alpha_c}]{s['alpha']:+.2f}pts[/]",
             f"[#888888]MaxDD[/] [bold {LOSS_HI}]{s['max_dd']:.1f}%[/]",
@@ -6995,7 +8587,7 @@ class NepseDashboard(App):
             f"[#888888]Top3 Conc[/] [bold {YELLOW}]{s['top3_conc']:.1f}%[/]",
             f"[#888888]Realized[/] [{_pnl_color(s['realized'])}]{_npr_k(s['realized'])}[/]",
             f"[#888888]Unrealized[/] [{_pnl_color(s['unrealized'])}]{_npr_k(s['unrealized'])}[/]",
-            f"[#888888]Age[/] [bold {WHITE}]{s['age_0_5']}Γëñ5d {s['age_6_15']}Γëñ15d {s['age_16']}>15d[/]",
+            f"[#888888]Age[/] [bold {WHITE}]{s['age_0_5']}≤5d {s['age_6_15']}≤15d {s['age_16']}>15d[/]",
         ]
         self.query_one("#risk-summary", Static).update(
             Text.from_markup("   ".join(parts)))
@@ -7036,20 +8628,20 @@ class NepseDashboard(App):
 
         for p in sorted(s["winners"], key=lambda x: -x["pnl"])[:5]:
             dt2.add_row(
-                Text("Γû▓ WIN", style=f"bold {GAIN_HI}"), _sym_text(p["sym"]),
+                Text("▲ WIN", style=f"bold {GAIN_HI}"), _sym_text(p["sym"]),
                 _npr(p["pnl"]), _chg_text(p["ret"]),
                 _dim_text(f"{p['days']}d"),
             )
         for p in sorted(s["losers"], key=lambda x: x["pnl"])[:5]:
             dt2.add_row(
-                Text("Γû╝ LOSS", style=f"bold {LOSS_HI}"), _sym_text(p["sym"]),
+                Text("▼ LOSS", style=f"bold {LOSS_HI}"), _sym_text(p["sym"]),
                 _npr(p["pnl"]), _chg_text(p["ret"]),
                 _dim_text(f"{p['days']}d"),
             )
         if not s["winners"] and not s["losers"]:
-            dt2.add_row(_dim_text("ΓÇö"), _dim_text("No positions"), *[Text("")] * 3)
+            dt2.add_row(_dim_text("—"), _dim_text("No positions"), *[Text("")] * 3)
 
-    # ΓöÇΓöÇ Signals workspace ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+    # ── Signals workspace ─────────────────────────────────────────────────────
 
     def _populate_signals_workspace(self, force: bool = False) -> None:
         cache_key = self._data_version()
@@ -7066,9 +8658,9 @@ class NepseDashboard(App):
     def _set_signals_workspace_loading(self) -> None:
         bar = self.query_one("#screener-status-bar", Static)
         bar.update(Text.from_markup(
-            f"[bold {AMBER}]Γùå SIGNALS WORKSPACE[/]   [#888888]Loading screener, calendar and sector view...[/]"
+            f"[bold {AMBER}]◆ SIGNALS WORKSPACE[/]   [#888888]Loading screener, calendar and sector view...[/]"
         ))
-        self.query_one("#screener-list-title", Static).update("ACTIVE STOCKS ΓÇö Loading...")
+        self.query_one("#screener-list-title", Static).update("ACTIVE STOCKS — Loading...")
         self.query_one("#heatmap-content", Static).update(Text("  Loading sector data...", style=LABEL))
 
     @work(thread=True)
@@ -7081,7 +8673,7 @@ class NepseDashboard(App):
             calendar_rows: list[list[Text]] = []
             now = datetime.now()
             if self.md.corp.empty:
-                calendar_rows.append([_dim_text("ΓÇö"), _dim_text("No upcoming events"), *[Text("")] * 4])
+                calendar_rows.append([_dim_text("—"), _dim_text("No upcoming events"), *[Text("")] * 4])
             else:
                 for _, r in self.md.corp.iterrows():
                     bc = r["bookclose_date"]
@@ -7094,8 +8686,8 @@ class NepseDashboard(App):
                         _sym_text(str(r["symbol"])),
                         Text(bc.strftime("%Y-%m-%d"), style=WHITE),
                         Text(f"{days}d", style=uc),
-                        Text(f"{cash:.1f}%", style=f"bold {GAIN_HI}") if cash >= 5 else _dim_text("ΓÇö"),
-                        Text(f"{bonus:.1f}%", style=f"bold {GAIN_HI}") if bonus >= 10 else _dim_text("ΓÇö"),
+                        Text(f"{cash:.1f}%", style=f"bold {GAIN_HI}") if cash >= 5 else _dim_text("—"),
+                        Text(f"{bonus:.1f}%", style=f"bold {GAIN_HI}") if bonus >= 10 else _dim_text("—"),
                         Text(buy_by, style=CYAN),
                     ])
 
@@ -7107,9 +8699,9 @@ class NepseDashboard(App):
             screener_rows: list[list[Text]] = []
             heatmap = Text("  Loading sector data...", style=LABEL)
             status_markup = (
-                f"[bold {AMBER}]Γùå SIGNALS WORKSPACE[/]   [#888888]Loading screener, calendar and sector view...[/]"
+                f"[bold {AMBER}]◆ SIGNALS WORKSPACE[/]   [#888888]Loading screener, calendar and sector view...[/]"
             )
-            list_title = "ACTIVE STOCKS ΓÇö Loading..."
+            list_title = "ACTIVE STOCKS — Loading..."
 
             conn = None
             all_stocks: list[dict] = []
@@ -7133,12 +8725,13 @@ class NepseDashboard(App):
                         "WHERE date=? AND symbol != 'NEPSE'",
                         (latest_date,)
                     ).fetchall()
+                    today_rows = _dedupe_symbol_rows(today_rows)
                     prev_map = {
                         r[0]: float(r[1])
-                        for r in conn.execute(
+                        for r in _dedupe_symbol_rows(conn.execute(
                             "SELECT symbol, close FROM stock_prices WHERE date=?",
                             (prev_date,)
-                        ).fetchall()
+                        ).fetchall())
                     }
                     avg_vol_map = {
                         r[0]: float(r[1]) if r[1] else 0.0
@@ -7223,7 +8816,7 @@ class NepseDashboard(App):
                             else:
                                 fg = "#ff4545"
                             n_filled = max(1, int(abs(avg_chg) / max_abs * 8))
-                            blocks = "Γûê" * n_filled + "Γûæ" * (8 - n_filled)
+                            blocks = "█" * n_filled + "░" * (8 - n_filled)
                             heatmap.append(f"  {blocks} ", style=fg)
                             heatmap.append(f"{avg_chg:+5.1f}%  ", style=f"bold {fg}")
                             heatmap.append(f"{sec}", style=WHITE)
@@ -7232,8 +8825,8 @@ class NepseDashboard(App):
                         n_up = sum(1 for s in all_stocks if s["chg"] > 0)
                         n_dn = sum(1 for s in all_stocks if s["chg"] < 0)
                         heatmap.append(f"\n  {total_stocks} stocks  {_vol(total_vol_all)} vol  ", style=LABEL)
-                        heatmap.append(f"Γû▓{n_up}", style=GAIN_HI)
-                        heatmap.append(f" Γû╝{n_dn}\n", style=LOSS_HI)
+                        heatmap.append(f"▲{n_up}", style=GAIN_HI)
+                        heatmap.append(f" ▼{n_dn}\n", style=LOSS_HI)
 
                     all_stocks.sort(key=lambda x: -x["vol"])
                     for s in all_stocks[:100]:
@@ -7250,15 +8843,15 @@ class NepseDashboard(App):
                         elif vr > 0:
                             vr_text = Text(f"{vr:.1f}x", style=DIM)
                         else:
-                            vr_text = Text("ΓÇö", style=DIM)
+                            vr_text = Text("—", style=DIM)
                         rng = s["high"] - s["low"]
                         rng_pct = rng / s["low"] * 100 if s["low"] > 0 else 0
                         rng_text = (
                             Text(f"{s['low']:.0f}-{s['high']:.0f}", style=DIM)
                             if rng_pct > 0
-                            else Text("ΓÇö", style=DIM)
+                            else Text("—", style=DIM)
                         )
-                        sec_display = "ΓÇö" if s["sector"] == "Other" else s["sector"][:14]
+                        sec_display = "—" if s["sector"] == "Other" else s["sector"][:14]
                         screener_rows.append([
                             _sym_text(s["sym"]),
                             _dim_text(sec_display),
@@ -7275,18 +8868,114 @@ class NepseDashboard(App):
                     n_down = sum(1 for s in all_stocks if s["chg"] < 0)
                     n_sectors = len([s for s in sector_data if s != "Other"])
                     status_markup = (
-                        f"[bold {AMBER}]Γùå SIGNALS WORKSPACE[/]   "
-                        f"[#888888]Active[/] [bold {WHITE}]{n_stocks}[/] [#555555](volΓëÑ1K)[/]   "
-                        f"[{GAIN_HI}]Γû▓{n_up}[/]  [{LOSS_HI}]Γû╝{n_down}[/]   "
+                        f"[bold {AMBER}]◆ SIGNALS WORKSPACE[/]   "
+                        f"[#888888]Active[/] [bold {WHITE}]{n_stocks}[/] [#555555](vol≥1K)[/]   "
+                        f"[{GAIN_HI}]▲{n_up}[/]  [{LOSS_HI}]▼{n_down}[/]   "
                         f"[#888888]{n_sectors} sectors[/]   "
-                        f"[#555555]Signals + screener merged  Γöé  ENTER Lookup  Γöé  / Command[/]"
+                        f"[#555555]Signals + screener merged  │  ENTER Lookup  │  / Command[/]"
                     )
                     list_title = (
-                        f"ACTIVE STOCKS ΓÇö {n_stocks}  Γöé  VolΓëÑ1K  Γöé  Sorted by volume  Γöé  VRAT=vol/20d avg"
+                        f"ACTIVE STOCKS — {n_stocks}  │  Vol≥1K  │  Sorted by volume  │  VRAT=vol/20d avg"
                     )
             finally:
                 if conn:
                     conn.close()
+
+            # ── Broker floor signals ─────────────────────────────────────────
+            # (label, key, width) — explicit widths for perfect alignment
+            broker_cols = [
+                ("SYMBOL",   "bsym",    8),
+                ("SIGNAL",   "btype",  14),
+                ("BUY HHI",  "bhhi_b",  8),
+                ("SLR HHI",  "bhhi_s",  8),
+                ("CIRC",     "bcirc",   6),
+                ("SELF%",    "bself",   6),
+                ("SM SCORE", "bscore",  9),
+                ("TRADES",   "btr",     7),
+            ]
+            broker_rows: list[list[Text]] = []
+            top_broker_cols: list = []
+            top_broker_rows: list[list[Text]] = []
+            broker_title = "BROKER FLOOR SIGNALS — Run floorsheet scraper to enable"
+            try:
+                import sqlite3 as _sqlite3
+                from backend.quant_pro.database import get_db_path as _get_db_path
+                _bconn = _sqlite3.connect(str(_get_db_path()))
+                _bconn.row_factory = _sqlite3.Row
+                # Check if broker_signals_v2 table has any data
+                try:
+                    _latest_bdate = (_bconn.execute(
+                        "SELECT MAX(as_of_date) FROM broker_signals_v2"
+                    ).fetchone() or [None])[0]
+                except Exception:
+                    _latest_bdate = None
+                if False:  # broker signal computation not included in public release
+                    _brows = _bconn.execute("""
+                        SELECT b.symbol,
+                               b.hhi_buy, b.hhi_sell,
+                               b.circular_score, b.pump_score,
+                               COALESCE(b.self_trade_pct, b.pump_score) AS self_trade_pct,
+                               b.smart_money_score, b.n_trades,
+                               m.micro_score
+                        FROM broker_signals_v2 b
+                        LEFT JOIN broker_microstructure m
+                          ON b.symbol = m.symbol AND m.as_of_date = b.as_of_date
+                        WHERE b.as_of_date = ?
+                          AND (b.circular_score > 0.15 OR b.pump_score > 0.05 OR b.smart_money_score > 0.08)
+                        ORDER BY
+                            CASE WHEN b.circular_score > 0.15 OR b.pump_score > 0.05 THEN 0 ELSE 1 END ASC,
+                            b.circular_score DESC,
+                            b.smart_money_score DESC
+                        LIMIT 60
+                    """, (_latest_bdate,)).fetchall()
+                    n_circ = sum(1 for _r in _brows if float(_r["circular_score"] or 0) > 0.15)
+                    n_sm   = sum(1 for _r in _brows if float(_r["smart_money_score"] or 0) > 0.08)
+                    broker_title = (
+                        f"BROKER FLOOR  {_latest_bdate}  |"
+                        f"  {n_circ} circular/pump  ·  {n_sm} smart money  ·  {len(_brows)} total"
+                    )
+                    for _r in _brows:
+                        circ  = float(_r["circular_score"]  or 0.0)
+                        self_ = float(_r["self_trade_pct"]  or 0.0)  # self-trade fraction
+                        pump  = float(_r["pump_score"]       or 0.0)  # composite pump score
+                        sm    = float(_r["smart_money_score"] or 0.0)
+                        hhi_b = float(_r["hhi_buy"]          or 0.0)
+                        hhi_s = float(_r["hhi_sell"]         or 0.0)
+                        trades = int(_r["n_trades"]          or 0)
+                        # Microstructure-adjusted score
+                        _ms = _r["micro_score"]
+                        micro = float(_ms) if _ms is not None else 0.5
+                        display_score = sm * (0.5 + 0.5 * micro)
+                        # Signal classification — self_ is now direct self-trade evidence
+                        if self_ > 0.20 and circ > 0.15:
+                            sig_label, sig_style = "[!] WASH+SELF ", f"bold {LOSS_HI}"
+                        elif self_ > 0.10:
+                            sig_label, sig_style = "[!] SELF-TRADE", LOSS_HI
+                        elif circ > 0.15:
+                            sig_label, sig_style = "[!] CIRCULAR  ", LOSS_HI
+                        elif display_score > 0.25:
+                            sig_label, sig_style = "[+] SMART $   ", f"bold {GAIN_HI}"
+                        else:
+                            sig_label, sig_style = "[~] ACCUM     ", GAIN_HI
+                        broker_rows.append([
+                            _sym_text(str(_r["symbol"])),
+                            Text(sig_label, style=sig_style),
+                            Text(f"{hhi_b:5.2f}", style=GAIN_HI if hhi_b > 0.30 else WHITE),
+                            Text(f"{hhi_s:5.2f}", style=LOSS_HI if hhi_s > 0.20 else GAIN_HI),
+                            Text(f"{circ*100:4.0f}%", style=LOSS_HI if circ > 0.15 else WHITE),
+                            Text(f"{self_*100:4.0f}%", style=LOSS_HI if self_ > 0.10 else WHITE),
+                            Text(f"{display_score:7.3f}" if display_score > 0 else "      —",
+                                 style=GAIN_HI if display_score > 0.15 else WHITE),
+                            _dim_text(f"{trades:6d}"),
+                        ])
+                # Top Brokers panel — populated by floorsheet scraper (not in public release)
+                top_broker_cols = []
+                top_broker_rows = []
+                _bconn.close()
+            except Exception as _be:
+                broker_rows.append([_dim_text("—"), _dim_text("Run floorsheet scraper to populate broker data"), *[Text("")] * 6])
+                top_broker_cols = []
+                top_broker_rows = []
 
             payload = {
                 "calendar_cols": calendar_cols,
@@ -7296,6 +8985,11 @@ class NepseDashboard(App):
                 "heatmap": heatmap,
                 "status_markup": status_markup,
                 "list_title": list_title,
+                "broker_cols": broker_cols,
+                "broker_rows": broker_rows,
+                "broker_title": broker_title,
+                "top_broker_cols": top_broker_cols,
+                "top_broker_rows": top_broker_rows,
             }
             self.call_from_thread(self._render_signals_workspace_payload, cache_key, payload)
         except Exception as e:
@@ -7323,7 +9017,57 @@ class NepseDashboard(App):
         self.query_one("#screener-status-bar", Static).update(Text.from_markup(payload["status_markup"]))
         self.query_one("#screener-list-title", Static).update(payload["list_title"])
 
-    # ΓöÇΓöÇ Calendar tab ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+        try:
+            dt_broker = self.query_one("#dt-broker-floor", DataTable)
+            dt_broker.clear(columns=True)
+            for label, key, width in payload.get("broker_cols") or []:
+                dt_broker.add_column(label, key=key, width=width)
+            self._apply_broker_floor_filter()
+            broker_title = payload.get("broker_title") or "BROKER FLOOR SIGNALS"
+            self.query_one("#broker-floor-title", Static).update(broker_title)
+        except Exception:
+            pass
+
+        try:
+            dt_top = self.query_one("#dt-broker-top", DataTable)
+            dt_top.clear(columns=True)
+            top_cols = payload.get("top_broker_cols") or []
+            top_rows = payload.get("top_broker_rows") or []
+            for label, key, width in top_cols:
+                dt_top.add_column(label, key=key, width=width)
+            for row in top_rows:
+                dt_top.add_row(*row)
+            # Update title with latest date
+            broker_title = payload.get("broker_title") or ""
+            date_part = broker_title.split("|")[0].replace("BROKER FLOOR", "").strip() if "|" in broker_title else ""
+            self.query_one("#broker-top-title", Static).update(
+                f"TOP BROKERS BY VOLUME{('  ' + date_part) if date_part else ''}"
+            )
+        except Exception:
+            pass
+
+    def _apply_broker_floor_filter(self) -> None:
+        """Re-populate broker floor table from cached payload using current filter."""
+        payload = getattr(self, "_signals_workspace_cache_payload", None) or {}
+        all_rows = list(payload.get("broker_rows") or [])
+        f = getattr(self, "_broker_floor_filter", "all")
+        if f == "circ":
+            rows = [r for r in all_rows if str(r[1]) and ("CIRC" in str(r[1]) or "WASH" in str(r[1]))]
+        elif f == "pump":
+            rows = [r for r in all_rows if str(r[1]) and ("SELF" in str(r[1]) or "WASH" in str(r[1]))]
+        elif f == "smart":
+            rows = [r for r in all_rows if str(r[1]) and ("SMART" in str(r[1]) or "ACCUM" in str(r[1]))]
+        else:
+            rows = all_rows
+        try:
+            dt_broker = self.query_one("#dt-broker-floor", DataTable)
+            dt_broker.clear()
+            for row in rows:
+                dt_broker.add_row(*row)
+        except Exception:
+            pass
+
+    # ── Calendar tab ──────────────────────────────────────────────────────────
 
     def _populate_calendar(self):
         dt = self.query_one("#dt-calendar", DataTable)
@@ -7333,7 +9077,7 @@ class NepseDashboard(App):
             dt.add_column(label, key=key)
         now = datetime.now()
         if self.md.corp.empty:
-            dt.add_row(_dim_text("ΓÇö"), _dim_text("No upcoming events"), *[Text("")] * 4)
+            dt.add_row(_dim_text("—"), _dim_text("No upcoming events"), *[Text("")] * 4)
         else:
             for _, r in self.md.corp.iterrows():
                 bc = r["bookclose_date"]; days = (bc - now).days
@@ -7345,11 +9089,109 @@ class NepseDashboard(App):
                     _sym_text(str(r["symbol"])),
                     Text(bc.strftime("%Y-%m-%d"), style=WHITE),
                     Text(f"{days}d", style=uc),
-                    Text(f"{cash:.1f}%", style=f"bold {GAIN_HI}") if cash >= 5 else _dim_text("ΓÇö"),
-                    Text(f"{bonus:.1f}%", style=f"bold {GAIN_HI}") if bonus >= 10 else _dim_text("ΓÇö"),
+                    Text(f"{cash:.1f}%", style=f"bold {GAIN_HI}") if cash >= 5 else _dim_text("—"),
+                    Text(f"{bonus:.1f}%", style=f"bold {GAIN_HI}") if bonus >= 10 else _dim_text("—"),
                     Text(buy_by, style=CYAN))
 
-    # ΓöÇΓöÇ Trades tab (full history) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+    # ── Gold/Silver Hedge Panel ───────────────────────────────────────────────
+
+    def _render_hedge_panel(self) -> None:
+        """Render the compact 4-line hedge strip in the Portfolio tab."""
+        from backend.quant_pro.gold_hedge import get_gold_regime
+        from backend.quant_pro.data_scrapers.gold_silver_ingestion import get_latest_nepal_metals
+        from backend.quant_pro.database import get_db_path as _get_db_path
+        import math as _math
+
+        SEP   = "  [#2a3038]│[/]  "
+        GOLD  = "#FFCA28"
+        SILV  = "#90CAF9"
+
+        def _ok(v):
+            return v is not None and not (isinstance(v, float) and _math.isnan(v))
+
+        def _chg(pct, abs_v):
+            if not _ok(pct):
+                return "[#3a3f45]—[/]"
+            col  = "#2ebd6e" if pct >= 0 else "#e05050"
+            sign = "+" if pct >= 0 else ""
+            ab   = f" {sign}{abs_v:,.0f}" if _ok(abs_v) else ""
+            return f"[{col}]{sign}{pct:.2f}%{ab}[/]"
+
+        try:
+            db      = str(_get_db_path())
+            regime  = get_gold_regime(db)
+            metals  = get_latest_nepal_metals(db)
+            g_tola  = metals.get("gold_npr_tola") or 0
+            s_tola  = metals.get("silver_npr_tola") or 0
+            g_chg   = metals.get("gold_chg_pct")
+            s_chg   = metals.get("silver_chg_pct")
+            g_abs   = metals.get("gold_chg_abs")
+            s_abs   = metals.get("silver_chg_abs")
+
+            rname   = regime.get("regime", "no_data")
+            mom     = regime.get("momentum_20d", 0) * 100
+            rcol    = {"risk_off": "#E05050", "neutral": "#D1980B", "risk_on": "#2ebd6e"}.get(rname, "#606870")
+            ricon   = {"risk_off": "▲ RISK-OFF", "neutral": "◉ NEUTRAL", "risk_on": "▼ RISK-ON"}.get(rname, "NO DATA")
+
+            # ── Line 2: prices ────────────────────────────────────────────────
+            info = (
+                f"  [{rcol}]{ricon}[/]  [{rcol}]{mom:+.1f}%[/]"
+                f"{SEP}[bold {GOLD}]GOLD[/]  NPR [bold]{g_tola:,.0f}[/]/tola  {_chg(g_chg, g_abs)}"
+                f"{SEP}[bold {SILV}]SILVER[/]  NPR [bold]{s_tola:,.0f}[/]/tola  {_chg(s_chg, s_abs)}"
+            )
+            self.query_one("#hedge-info-bar", Static).update(info)
+
+            # ── Line 3: recommendation ────────────────────────────────────────
+            capital = getattr(self._trading_engine, "capital", None) if self._trading_engine else None
+            hedge_on = self._hedge_enabled
+            if not hedge_on:
+                rec = f"  [#3a3f45]Hedge monitoring disabled — click [bold]● HEDGE ON[/] to enable[/]"
+            elif rname == "risk_off":
+                cap_str = f"  NPR {capital * 0.10:,.0f}" if (capital and capital > 0) else ""
+                g_t = (capital * 0.10 * 0.70 / g_tola) if (capital and g_tola) else 0
+                s_t = (capital * 0.10 * 0.30 / s_tola) if (capital and s_tola) else 0
+                t_str = f"  →  [{GOLD}]{g_t:.2f}t[/] gold + [{SILV}]{s_t:.2f}t[/] silver" if (capital and capital > 0) else ""
+                rec = f"  [bold #E05050]▲ HEDGE RECOMMENDED[/]  Withhold 10%{cap_str}{t_str}"
+            elif rname == "neutral":
+                rec = f"  [{rcol}]◉ Monitor — neutral regime, consider partial gold buffer[/]"
+            else:
+                rec = f"  [{rcol}]▼ Risk-on — full capital deployable, no hedge needed[/]"
+            self.query_one("#hedge-rec-bar", Static).update(rec)
+
+            # ── Line 4: hedge trade history summary ───────────────────────────
+            trades = list(getattr(self, "_hedge_trade_log", []) or [])
+            if trades:
+                last = trades[-1]
+                metal = str(last.get("metal", "GOLD"))
+                col   = GOLD if metal == "GOLD" else SILV
+                total_g = sum(float(t.get("total", 0)) for t in trades if t.get("metal") == "GOLD")
+                total_s = sum(float(t.get("total", 0)) for t in trades if t.get("metal") == "SILVER")
+                g_part  = f"[{GOLD}]GOLD NPR {total_g:,.0f}[/]" if total_g else ""
+                s_part  = f"[{SILV}]SILVER NPR {total_s:,.0f}[/]" if total_s else ""
+                invested = "  ".join(p for p in [g_part, s_part] if p)
+                trade_bar = (
+                    f"  [#3a3f45]HEDGE TRADES[/]  {len(trades)} recorded{SEP}"
+                    f"Last  [{col}]{last.get('date','')}  {metal}  {float(last.get('tola',0)):.2f}t[/]"
+                    f"{SEP}Total invested  {invested}"
+                )
+            else:
+                trade_bar = (
+                    f"  [#2a3038]HEDGE TRADES[/]  "
+                    f"[#3a3f45]None recorded — physical gold/silver purchases logged here when executed[/]"
+                )
+            self.query_one("#hedge-trade-bar", Static).update(trade_bar)
+
+        except Exception as e:
+            try:
+                self.query_one("#hedge-info-bar", Static).update(
+                    f"  [#555555]Hedge data unavailable — {e}[/]"
+                )
+                self.query_one("#hedge-rec-bar", Static).update("")
+                self.query_one("#hedge-trade-bar", Static).update("")
+            except Exception:
+                pass
+
+    # ── Trades tab (full history) ─────────────────────────────────────────────
 
     def _populate_trades_full(self):
         dt = self.query_one("#dt-trades-full", DataTable)
@@ -7359,7 +9201,7 @@ class NepseDashboard(App):
             # Live mode but TMS not connected yet
             for label, key in [("STATUS", "st")]:
                 dt.add_column(label, key=key)
-            dt.add_row(Text("Connecting to TMS ΓÇö solve captcha in browser...", style=AMBER))
+            dt.add_row(Text("Connecting to TMS — solve captcha in browser...", style=AMBER))
             self.query_one("#trades-title", Static).update("TMS TRADE BOOK  |  Connecting...")
             return
 
@@ -7405,7 +9247,31 @@ class NepseDashboard(App):
                            ("SHARES", "sh"), ("PRICE", "pr"), ("FEES", "fees"),
                            ("P&L", "pnl"), ("RTN%", "rtn"), ("REASON", "rsn")]:
             dt.add_column(label, key=key)
-        tl = self._trading_engine.get_trade_log() if self._trading_engine else _load_trade_log()
+        # Merge all trade log sources for the current account: engine (auto), paper (manual), tui (engine csv)
+        _tl_sources: list[pd.DataFrame] = []
+        if self._trading_engine:
+            _etl = self._trading_engine.get_trade_log()
+            if not _etl.empty:
+                _tl_sources.append(_etl)
+        _acc_tl_dir = _account_dir(self._current_account_id)
+        for _fname in ("paper_trade_log.csv", "tui_paper_trade_log.csv"):
+            _tl_path = _acc_tl_dir / _fname
+            if _tl_path.exists():
+                try:
+                    _df = pd.read_csv(_tl_path)
+                    if not _df.empty:
+                        _tl_sources.append(_df)
+                except Exception:
+                    pass
+        if _tl_sources:
+            tl = pd.concat(_tl_sources, ignore_index=True)
+            _dedup_keys = [c for c in ("Date", "Action", "Symbol", "Shares", "Price") if c in tl.columns]
+            if _dedup_keys:
+                tl = tl.drop_duplicates(subset=_dedup_keys, keep="first")
+            if "Date" in tl.columns:
+                tl = tl.sort_values("Date").reset_index(drop=True)
+        else:
+            tl = _load_trade_log()
         if not tl.empty:
             for _, r in tl.iloc[::-1].iterrows():
                 action = str(r.get("Action", ""))
@@ -7419,12 +9285,33 @@ class NepseDashboard(App):
                     Text(str(int(r.get("Shares", 0))), style=WHITE),
                     _price_text(float(r.get("Price", 0))),
                     _dim_text(f"{float(r.get('Fees', 0)):.0f}"),
-                    Text(f"{_npr_k(pnl_v)}", style=_pnl_color(pnl_v)) if pnl_v else _dim_text("ΓÇö"),
-                    _chg_text(pnl_pct) if pnl_pct else _dim_text("ΓÇö"),
+                    Text(f"{_npr_k(pnl_v)}", style=_pnl_color(pnl_v)) if pnl_v else _dim_text("—"),
+                    _chg_text(pnl_pct * 100.0) if pnl_pct else _dim_text("—"),
                     _dim_text(str(r.get("Reason", ""))[:16]),
                 )
         else:
             dt.add_row(_dim_text("No trades yet"), *[Text("")] * 8)
+        # Append hedge trades (gold/silver physical purchases) at the top
+        hedge_trades = list(reversed(getattr(self, "_hedge_trade_log", []) or []))
+        GOLD_COL   = "#FFCA28"
+        SILVER_COL = "#90CAF9"
+        for ht in hedge_trades:
+            metal = str(ht.get("metal", "GOLD"))
+            col = GOLD_COL if metal == "GOLD" else SILVER_COL
+            tola = float(ht.get("tola", 0) or 0)
+            price = float(ht.get("price", 0) or 0)
+            total = float(ht.get("total", 0) or 0)
+            dt.add_row(
+                _dim_text(str(ht.get("date", ""))[:10]),
+                Text("HEDGE", style=f"bold {col}"),
+                Text(metal, style=f"bold {col}"),
+                Text(f"{tola:.2f}t", style=WHITE),
+                _price_text(price),
+                _dim_text("—"),
+                Text(f"{_npr_k(total)}", style=col),
+                _dim_text("—"),
+                _dim_text(str(ht.get("reason", ""))[:16]),
+            )
         if not tl.empty:
             buys = (tl["Action"] == "BUY").sum()
             sells = (tl["Action"] == "SELL").sum()
@@ -7432,11 +9319,13 @@ class NepseDashboard(App):
             wins = ((tl["PnL"] > 0) & (tl["Action"] == "SELL")).sum() if "PnL" in tl.columns else 0
             losses = ((tl["PnL"] < 0) & (tl["Action"] == "SELL")).sum() if "PnL" in tl.columns else 0
             wr = wins / (wins + losses) * 100 if (wins + losses) > 0 else 0
+            hedge_count = len(hedge_trades)
+            hedge_note = f"  +{hedge_count} hedge" if hedge_count else ""
             self.query_one("#trades-title", Static).update(
-                f"TRADE HISTORY  |  {buys} buys  {sells} sells  |  "
+                f"TRADE HISTORY  |  {buys} buys  {sells} sells{hedge_note}  |  "
                 f"Win rate: {wr:.0f}%  |  Total P&L: {_npr_k(total_pnl)}")
 
-    # ΓöÇΓöÇ Lookup tab ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+    # ── Lookup tab ────────────────────────────────────────────────────────────
 
     def _populate_lookup(self):
         sym = str(self.lookup_sym or "").strip().upper()
@@ -7458,16 +9347,16 @@ class NepseDashboard(App):
     def _set_lookup_loading(self, sym: str, tf: str) -> None:
         tf_labels = {"D": "Daily", "W": "Weekly", "M": "Monthly", "Y": "Yearly", "I": "Intraday"}
         self.query_one("#lookup-title", Static).update(
-            f"LOOKUP: {sym}  ΓÇö  {tf_labels.get(tf, 'Daily')}  ΓÇö  Loading..."
+            f"LOOKUP: {sym}  —  {tf_labels.get(tf, 'Daily')}  —  Loading..."
         )
         self.query_one("#lookup-header", Static).update(Text("  Loading price and report data...", style=LABEL))
         self.query_one("#lookup-chart", Static).update(Text("  Rendering chart...", style=LABEL))
         self.query_one("#lookup-stats", Static).update(Text("  Loading statistics...", style=LABEL))
         self.query_one("#lookup-report", Static).update(Text("  Building financial report...", style=LABEL))
-        self.query_one("#lookup-intel-title", Static).update(f"CORPORATE INTELLIGENCE ΓÇö {sym}")
+        self.query_one("#lookup-intel-title", Static).update(f"CORPORATE INTELLIGENCE — {sym}")
         self.query_one("#lookup-intel", Static).update(Text("  Loading intelligence...", style=LABEL))
-        self.query_one("#lookup-fin-title", Static).update(f"QUARTERLY FINANCIALS ΓÇö {sym}")
-        self.query_one("#lookup-ca-title", Static).update(f"CORPORATE ACTIONS ΓÇö {sym}")
+        self.query_one("#lookup-fin-title", Static).update(f"QUARTERLY FINANCIALS — {sym}")
+        self.query_one("#lookup-ca-title", Static).update(f"CORPORATE ACTIONS — {sym}")
         for table_id in ("#dt-lookup", "#dt-lookup-fin", "#dt-lookup-ca"):
             self.query_one(table_id, DataTable).clear(columns=True)
 
@@ -7520,19 +9409,19 @@ class NepseDashboard(App):
                         stats_source = intraday_rows
                         count_label = "bars"
                         if intraday_session_date:
-                            intraday_note = f"  ({intraday_session_date} ┬╖ {intraday_snapshots} snapshots)"
+                            intraday_note = f"  ({intraday_session_date} · {intraday_snapshots} snapshots)"
                     else:
-                        intraday_note = "  (no intraday snapshots ΓÇö showing daily)"
+                        intraday_note = "  (no intraday snapshots — showing daily)"
                 else:
                     intraday_note = (
-                        f"  (market closed at {nst_now.strftime('%H:%M')} NST ΓÇö showing daily)"
+                        f"  (market closed at {nst_now.strftime('%H:%M')} NST — showing daily)"
                     )
 
             n_sessions = len(chart_source)
             title = (
-                f"LOOKUP: {sym}  ΓÇö  {tf_labels.get(tf, 'Daily')}  "
-                f"({n_sessions} {count_label})  ΓÇö  "
-                f"D/W/M/Y/I to switch  ΓÇö  Press L to change{intraday_note}"
+                f"LOOKUP: {sym}  —  {tf_labels.get(tf, 'Daily')}  "
+                f"({n_sessions} {count_label})  —  "
+                f"D/W/M/Y/I to switch  —  Press L to change{intraday_note}"
             )
             header = Text.assemble(
                 (f"  {sym}  ", f"bold {CYAN}"),
@@ -7576,7 +9465,7 @@ class NepseDashboard(App):
             stats.append("  VOLUME", style=LABEL)
             stats.append_text(_render_sparkline(vols, width=26))
 
-            fin_title = f"QUARTERLY FINANCIALS ΓÇö {sym}"
+            fin_title = f"QUARTERLY FINANCIALS — {sym}"
             fin_cols: list[tuple[str, str]] = []
             fin_rows: list[list[Text]] = []
             try:
@@ -7590,19 +9479,19 @@ class NepseDashboard(App):
                 if rows:
                     for row in rows:
                         fin_rows.append([
-                            _dim_text(row.get("period", "ΓÇö")),
-                            Text(str(row.get("revenue", "ΓÇö")), style=CYAN),
-                            Text(str(row.get("net_profit", "ΓÇö")), style=WHITE),
-                            Text(str(row.get("eps", "ΓÇö")), style=GAIN_HI),
-                            Text(str(row.get("book_value", "ΓÇö")), style=WHITE),
+                            _dim_text(row.get("period", "—")),
+                            Text(str(row.get("revenue", "—")), style=CYAN),
+                            Text(str(row.get("net_profit", "—")), style=WHITE),
+                            Text(str(row.get("eps", "—")), style=GAIN_HI),
+                            Text(str(row.get("book_value", "—")), style=WHITE),
                         ])
                 else:
                     fin_rows.append([
-                        _dim_text("ΓÇö"),
+                        _dim_text("—"),
                         _dim_text("No cached financials"),
                         _dim_text("Run scraper"),
-                        _dim_text("ΓÇö"),
-                        _dim_text("ΓÇö"),
+                        _dim_text("—"),
+                        _dim_text("—"),
                     ])
             except Exception as e:
                 fin_report = {}
@@ -7610,11 +9499,11 @@ class NepseDashboard(App):
                 fin_cols = [("STATUS", "status")]
                 fin_rows = [[_dim_text("Financial report unavailable")]]
 
-            intel_title = f"CORPORATE INTELLIGENCE ΓÇö {sym}"
+            intel_title = f"CORPORATE INTELLIGENCE — {sym}"
             intel = _render_lookup_intelligence(fin_report, sym)
 
             tf_col_label = {"D": "DATE", "W": "WEEK", "M": "MONTH", "Y": "YEAR", "I": "TIME"}
-            ohlcv_title = f"OHLCV ΓÇö {sym} ({tf_labels.get(tf, 'Daily')})"
+            ohlcv_title = f"OHLCV — {sym} ({tf_labels.get(tf, 'Daily')})"
             ohlcv_cols = [
                 (tf_col_label.get(tf, "DATE"), "dt"), ("OPEN", "o"), ("HIGH", "h"),
                 ("LOW", "l"), ("CLOSE", "c"), ("VOL", "vol"), ("CHG%", "chg"),
@@ -7632,7 +9521,7 @@ class NepseDashboard(App):
                     chg_map[date_key] = (curr_close - prev_close) / prev_close * 100 if prev_close > 0 else None
             for _, r in h_display.iterrows():
                 date_key = str(r["date"])[:10]
-                ct = _chg_text(chg_map.get(date_key)) if chg_map.get(date_key) is not None else _dim_text("ΓÇö")
+                ct = _chg_text(chg_map.get(date_key)) if chg_map.get(date_key) is not None else _dim_text("—")
                 ohlcv_rows.append([
                     _dim_text(date_key),
                     _price_text(r["open"]),
@@ -7644,7 +9533,7 @@ class NepseDashboard(App):
                 ])
 
             ca = det["ca"]
-            ca_title = f"CORPORATE ACTIONS ΓÇö {sym}" if not ca.empty else f"CORPORATE ACTIONS ΓÇö {sym} ΓÇö None"
+            ca_title = f"CORPORATE ACTIONS — {sym}" if not ca.empty else f"CORPORATE ACTIONS — {sym} — None"
             ca_cols = [("BOOK CLOSE", "bc"), ("CASH DIV%", "cash"), ("BONUS%", "bonus")]
             ca_rows: list[list[Text]] = []
             if not ca.empty:
@@ -7653,10 +9542,10 @@ class NepseDashboard(App):
                         Text(str(r["bookclose_date"])[:10], style=WHITE),
                         Text(f"{r['cash_dividend_pct']:.1f}%", style=GAIN_HI)
                         if pd.notna(r.get("cash_dividend_pct")) and r["cash_dividend_pct"]
-                        else _dim_text("ΓÇö"),
+                        else _dim_text("—"),
                         Text(f"{r['bonus_share_pct']:.1f}%", style=GAIN_HI)
                         if pd.notna(r.get("bonus_share_pct")) and r["bonus_share_pct"]
-                        else _dim_text("ΓÇö"),
+                        else _dim_text("—"),
                     ])
 
             payload = {
@@ -7710,7 +9599,7 @@ class NepseDashboard(App):
 
         if not payload.get("found"):
             sym = payload.get("sym", self.lookup_sym)
-            title_w.update(f"LOOKUP: {sym} ΓÇö NOT FOUND")
+            title_w.update(f"LOOKUP: {sym} — NOT FOUND")
             header_w.update("")
             chart_w.update("")
             stats_w.update("")
@@ -7761,7 +9650,7 @@ class NepseDashboard(App):
             pass
 
 
-    # ΓöÇΓöÇ Command Palette ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+    # ── Command Palette ────────────────────────────────────────────────────────
 
     def action_command_palette(self) -> None:
         self.push_screen(CommandPalette(), callback=self._on_command)
@@ -7786,7 +9675,7 @@ class NepseDashboard(App):
             self.lookup_sym = target
             self.action_tab("lookup")
 
-    # ΓöÇΓöÇ Watchlist ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+    # ── Watchlist ─────────────────────────────────────────────────────────────
 
     def action_watchlist_add(self) -> None:
         if self.active_tab == "kalimati":
@@ -7947,9 +9836,9 @@ class NepseDashboard(App):
                 continue
             seen.add(sym)
             symbols.append(sym)
-        self._live_watchlist = [_stock_watchlist_entry(sym) for sym in symbols]
+        self._live_watchlist = _dedupe_watchlist_entries([_stock_watchlist_entry(sym) for sym in symbols])
         local_extras = [item for item in self._paper_watchlist if str(item.get("kind") or "stock") != "stock"]
-        self._watchlist = list(self._live_watchlist) + local_extras
+        self._watchlist = _merge_watchlist_entries(self._live_watchlist, local_extras)
         bundle = dict(getattr(self, "_tms_bundle", None) or {})
         bundle["watchlist"] = snapshot
         self._tms_bundle = bundle
@@ -7961,7 +9850,7 @@ class NepseDashboard(App):
 
     @work(thread=True)
     def _watchlist_add_live(self, sym: str) -> None:
-        self.app.call_from_thread(self._set_status, f"Mode: LIVE TMS  |  Adding {sym} to broker watchlist...")
+        self.app.call_from_thread(self._set_status, f"TMS monitor  |  Adding {sym} to broker watchlist...")
         try:
             result = build_tui_control_plane(self).sync_watchlist(action="add", symbol=sym)
             snapshot = dict(result.payload or {})
@@ -7973,7 +9862,7 @@ class NepseDashboard(App):
 
     @work(thread=True)
     def _watchlist_remove_live(self, sym: str) -> None:
-        self.app.call_from_thread(self._set_status, f"Mode: LIVE TMS  |  Removing {sym} from broker watchlist...")
+        self.app.call_from_thread(self._set_status, f"TMS monitor  |  Removing {sym} from broker watchlist...")
         try:
             result = build_tui_control_plane(self).sync_watchlist(action="remove", symbol=sym)
             snapshot = dict(result.payload or {})
@@ -7994,7 +9883,7 @@ class NepseDashboard(App):
             return
         self._tms_watchlist_refresh_inflight = True
         try:
-            self.app.call_from_thread(self._set_status, "Mode: LIVE TMS  |  Syncing broker watchlist...")
+            self.app.call_from_thread(self._set_status, "TMS monitor  |  Syncing broker watchlist...")
             result = build_tui_control_plane(self).sync_watchlist(action="fetch")
             snapshot = dict(result.payload or {})
             self._last_tms_watchlist_fetch_at = time.monotonic()
@@ -8003,7 +9892,7 @@ class NepseDashboard(App):
             symbols = snapshot.get("symbols") or []
             self.app.call_from_thread(
                 self._set_status,
-                f"Mode: LIVE TMS  |  Broker watchlist synced ({len(symbols)} symbols)",
+                f"TMS monitor  |  Broker watchlist synced ({len(symbols)} symbols)",
             )
         except Exception as e:
             self._last_tms_watchlist_fetch_at = time.monotonic()
@@ -8028,10 +9917,12 @@ class NepseDashboard(App):
                 watchlist_source = "TMS"
             elif self._live_watchlist:
                 local_extras = [item for item in self._paper_watchlist if str(item.get("kind") or "stock") != "stock"]
-                self._watchlist = list(self._live_watchlist) + local_extras
+                self._watchlist = _merge_watchlist_entries(self._live_watchlist, local_extras)
                 watchlist_source = "CACHE"
             else:
-                self._watchlist = [item for item in self._paper_watchlist if str(item.get("kind") or "stock") != "stock"]
+                self._watchlist = _dedupe_watchlist_entries(
+                    [item for item in self._paper_watchlist if str(item.get("kind") or "stock") != "stock"]
+                )
                 watchlist_source = "TMS"
         else:
             self._watchlist, held_count = self._effective_paper_watchlist()
@@ -8039,14 +9930,14 @@ class NepseDashboard(App):
                 watchlist_source = "LOCAL+HELD"
 
         if not self._watchlist:
-            dt.add_row(_dim_text("ΓÇö"), _dim_text("Press = to add stocks"),
+            dt.add_row(_dim_text("—"), _dim_text("Press = to add stocks"),
                        *[Text("")] * 8)
             bar = self.query_one("#wl-status-bar", Static)
             bar.update(Text.from_markup(
-                f"[bold {AMBER}]Γùå WATCHLIST[/]   "
+                f"[bold {AMBER}]◆ WATCHLIST[/]   "
                 f"[#888888]Tracking[/] [bold {WHITE}]0[/] [#888888]items[/]   "
                 f"[#888888]Source[/] [bold {WHITE}]{watchlist_source}[/]   "
-                f"[#555555]= Add  Γöé  Sync holdings from Portfolio profile  Γöé  - Remove  Γöé  ENTER Open[/]"
+                f"[#555555]= Add  │  Sync holdings from Portfolio profile  │  - Remove  │  ENTER Open[/]"
             ))
             self._populate_watchlist_side_panels([], [], {}, {})
             return
@@ -8083,15 +9974,15 @@ class NepseDashboard(App):
 
         def _watch_pct_text(pct: Optional[float]) -> Text:
             if pct is None:
-                return _dim_text("ΓÇö")
+                return _dim_text("—")
             return _chg_text(float(pct))
 
         def _watch_range_bar(mn: float, mx: float, avg: float, width: int = 15) -> Text:
             if mx <= mn:
-                return Text("ΓÇö", style=LABEL)
+                return Text("—", style=LABEL)
             pos = int((avg - mn) / (mx - mn) * width)
             pos = max(0, min(width - 1, pos))
-            bar = "Γûæ" * pos + "Γûê" + "Γûæ" * (width - pos - 1)
+            bar = "░" * pos + "█" + "░" * (width - pos - 1)
             color = GAIN if avg >= ((mn + mx) / 2) else LOSS
             return Text(bar, style=color)
 
@@ -8102,7 +9993,7 @@ class NepseDashboard(App):
             chg_val = 0.0
             open_p = high_p = low_p = 0.0
             vol = 0
-            sparkline = Text("ΓÇö", style=LABEL)
+            sparkline = Text("—", style=LABEL)
             signal_text = Text("", style=DIM)
 
             if kind == "stock" and conn:
@@ -8136,7 +10027,7 @@ class NepseDashboard(App):
 
             if kind == "stock":
                 if not port.empty and sym in port["Symbol"].values:
-                    signal_text = Text("ΓùÅ HELD", style=f"bold {CYAN}")
+                    signal_text = Text("● HELD", style=f"bold {CYAN}")
                 if chg_val > 0:
                     gainers += 1
                 elif chg_val < 0:
@@ -8144,12 +10035,12 @@ class NepseDashboard(App):
                 dt.add_row(
                     _dim_text(f"{i:2d}"),
                     _sym_text(sym),
-                    _price_text(ltp) if ltp > 0 else _dim_text("ΓÇö"),
+                    _price_text(ltp) if ltp > 0 else _dim_text("—"),
                     _chg_text(chg_val),
-                    _price_text(open_p) if open_p > 0 else _dim_text("ΓÇö"),
-                    _price_text(high_p) if high_p > 0 else _dim_text("ΓÇö"),
-                    _price_text(low_p) if low_p > 0 else _dim_text("ΓÇö"),
-                    _vol_text(vol) if vol > 0 else _dim_text("ΓÇö"),
+                    _price_text(open_p) if open_p > 0 else _dim_text("—"),
+                    _price_text(high_p) if high_p > 0 else _dim_text("—"),
+                    _price_text(low_p) if low_p > 0 else _dim_text("—"),
+                    _vol_text(vol) if vol > 0 else _dim_text("—"),
                     sparkline,
                     signal_text,
                 )
@@ -8166,14 +10057,14 @@ class NepseDashboard(App):
                 dt.add_row(
                     _dim_text(f"{i:2d}"),
                     Text(label[:18], style=WHITE),
-                    Text(f"{float(row.get('avg') or 0):,.1f}", style=f"bold {AMBER}") if row else _dim_text("ΓÇö"),
-                    _watch_pct_text(float(pct)) if pct is not None else _dim_text("ΓÇö"),
-                    Text(f"{float(row.get('min') or 0):,.1f}", style=DIM) if row else _dim_text("ΓÇö"),
-                    Text(f"{float(row.get('max') or 0):,.1f}", style=DIM) if row else _dim_text("ΓÇö"),
+                    Text(f"{float(row.get('avg') or 0):,.1f}", style=f"bold {AMBER}") if row else _dim_text("—"),
+                    _watch_pct_text(float(pct)) if pct is not None else _dim_text("—"),
+                    Text(f"{float(row.get('min') or 0):,.1f}", style=DIM) if row else _dim_text("—"),
+                    Text(f"{float(row.get('max') or 0):,.1f}", style=DIM) if row else _dim_text("—"),
                     Text(str(row.get("unit") or entry.get("unit") or "")[:8], style=LABEL),
                     Text("KALIMATI", style=DIM),
-                    _watch_range_bar(float(row.get("min") or 0), float(row.get("max") or 0), float(row.get("avg") or 0), width=15) if row else Text("ΓÇö", style=LABEL),
-                    Text("ΓùÅ COMMODITY", style=f"bold {CYAN}"),
+                    _watch_range_bar(float(row.get("min") or 0), float(row.get("max") or 0), float(row.get("avg") or 0), width=15) if row else Text("—", style=LABEL),
+                    Text("● COMMODITY", style=f"bold {CYAN}"),
                 )
                 continue
 
@@ -8187,20 +10078,20 @@ class NepseDashboard(App):
                 value = float(row.get("value") or 0)
                 unit = str(row.get("unit") or "")
                 if unit.startswith("NPR"):
-                    value_text = Text(_format_compact_npr(value), style=f"bold {AMBER}") if value > 0 else _dim_text("ΓÇö")
+                    value_text = Text(_format_compact_npr(value), style=f"bold {AMBER}") if value > 0 else _dim_text("—")
                 else:
-                    value_text = Text(f"{value:,.2f} {unit}".strip(), style=f"bold {AMBER}") if value > 0 else _dim_text("ΓÇö")
+                    value_text = Text(f"{value:,.2f} {unit}".strip(), style=f"bold {AMBER}") if value > 0 else _dim_text("—")
                 dt.add_row(
                     _dim_text(f"{i:2d}"),
                     Text(label[:18], style=WHITE),
                     value_text,
-                    _watch_pct_text(float(pct)) if pct is not None else _dim_text("ΓÇö"),
-                    Text(unit[:10], style=LABEL) if unit else _dim_text("ΓÇö"),
+                    _watch_pct_text(float(pct)) if pct is not None else _dim_text("—"),
+                    Text(unit[:10], style=LABEL) if unit else _dim_text("—"),
                     Text(str(row.get("group") or entry.get("group") or "")[:10], style=CYAN),
-                    _dim_text("ΓÇö"),
+                    _dim_text("—"),
                     Text(str(row.get("source") or "")[:10], style=DIM),
-                    Text("ΓÇö", style=LABEL),
-                    Text("ΓùÅ MACRO", style=f"bold {CYAN}"),
+                    Text("—", style=LABEL),
+                    Text("● MACRO", style=f"bold {CYAN}"),
                 )
                 continue
 
@@ -8214,19 +10105,19 @@ class NepseDashboard(App):
                 dt.add_row(
                     _dim_text(f"{i:2d}"),
                     Text(label[:18], style=f"bold {CYAN}"),
-                    Text(f"{float(row.get('buy_rate') or 0):,.2f}", style=WHITE) if row else _dim_text("ΓÇö"),
-                    _watch_pct_text(float(pct)) if pct is not None else _dim_text("ΓÇö"),
-                    Text(f"{float(row.get('sell_rate') or 0):,.2f}", style=WHITE) if row else _dim_text("ΓÇö"),
+                    Text(f"{float(row.get('buy_rate') or 0):,.2f}", style=WHITE) if row else _dim_text("—"),
+                    _watch_pct_text(float(pct)) if pct is not None else _dim_text("—"),
+                    Text(f"{float(row.get('sell_rate') or 0):,.2f}", style=WHITE) if row else _dim_text("—"),
                     Text(str(row.get("currency_name") or entry.get("currency_name") or "")[:10], style=WHITE),
-                    Text(str(row.get("unit") or 1), style=LABEL) if row else _dim_text("ΓÇö"),
+                    Text(str(row.get("unit") or 1), style=LABEL) if row else _dim_text("—"),
                     Text(str(row.get("source") or "NRB")[:10], style=DIM),
-                    Text("ΓÇö", style=LABEL),
-                    Text("ΓùÅ FOREX", style=f"bold {CYAN}"),
+                    Text("—", style=LABEL),
+                    Text("● FOREX", style=f"bold {CYAN}"),
                 )
 
         if not stock_entries:
             dt.add_row(
-                _dim_text("ΓÇö"),
+                _dim_text("—"),
                 _dim_text("No stock symbols"),
                 *[Text("")] * 8
             )
@@ -8249,7 +10140,7 @@ class NepseDashboard(App):
         n = len(self._watchlist)
         bar = self.query_one("#wl-status-bar", Static)
         bar.update(Text.from_markup(
-            f"[bold {AMBER}]Γùå WATCHLIST[/]   "
+            f"[bold {AMBER}]◆ WATCHLIST[/]   "
             f"[#888888]Tracking[/] [bold {WHITE}]{n}[/] [#888888]items[/]   "
             f"[#888888]Stocks[/] [bold {WHITE}]{len(stock_entries)}[/]   "
             f"[#888888]Rates[/] [bold {CYAN}]{len(rates_entries)}[/]   "
@@ -8258,7 +10149,7 @@ class NepseDashboard(App):
             f"[#888888]Down[/] [bold {LOSS_HI}]{losers}[/]   "
             f"[#888888]Source[/] [bold {WHITE}]{watchlist_source}[/]   "
             f"[#888888]Held[/] [bold {CYAN}]{held_count}[/]   "
-            f"[#555555]= Add  Γöé  Sync holdings from Portfolio profile  Γöé  - Remove  Γöé  ENTER Open[/]"
+            f"[#555555]= Add  │  Sync holdings from Portfolio profile  │  - Remove  │  ENTER Open[/]"
         ))
 
     def _populate_watchlist_side_panels(
@@ -8298,7 +10189,7 @@ class NepseDashboard(App):
 
         def _pct_cell(pct: Optional[float]) -> Text:
             if pct is None:
-                return _dim_text("ΓÇö")
+                return _dim_text("—")
             return _chg_text(float(pct))
 
         if rate_rows:
@@ -8317,7 +10208,7 @@ class NepseDashboard(App):
                         value_text = Text(_format_compact_npr(value), style=f"bold {AMBER}")
                     else:
                         value_text = Text(f"{value:,.2f} {unit}".strip(), style=f"bold {AMBER}")
-                    unit_text = Text(unit[:10], style=LABEL) if unit else _dim_text("ΓÇö")
+                    unit_text = Text(unit[:10], style=LABEL) if unit else _dim_text("—")
                 label_style = f"bold {CYAN}" if item["kind"] == "forex" else WHITE
                 dt_rates.add_row(
                     Text(str(item["label"])[:16], style=label_style),
@@ -8326,7 +10217,7 @@ class NepseDashboard(App):
                     unit_text,
                 )
         else:
-            dt_rates.add_row(_dim_text("ΓÇö"), _dim_text("No tracked rates"), Text(""), Text(""))
+            dt_rates.add_row(_dim_text("—"), _dim_text("No tracked rates"), Text(""), Text(""))
         self.query_one("#wl-rates-title", Static).update(f"FOREX & MACRO [{len(rate_rows)}]")
 
         dt_commodities = self.query_one("#dt-watchlist-commodities", DataTable)
@@ -8350,14 +10241,14 @@ class NepseDashboard(App):
                 dt_commodities.add_row(
                     Text(str(item["label"])[:18], style=WHITE),
                     Text(f"{float(row.get('avg') or 0):,.1f}", style=f"bold {AMBER}") if float(row.get('avg') or 0) > 0 else Text("Loading", style=DIM),
-                    _pct_cell(float(pct)) if pct is not None else _dim_text("ΓÇö"),
-                    Text(str(row.get("unit") or "")[:8], style=LABEL) if row else _dim_text("ΓÇö"),
+                    _pct_cell(float(pct)) if pct is not None else _dim_text("—"),
+                    Text(str(row.get("unit") or "")[:8], style=LABEL) if row else _dim_text("—"),
                 )
         else:
-            dt_commodities.add_row(_dim_text("ΓÇö"), _dim_text("No tracked commodities"), Text(""), Text(""))
+            dt_commodities.add_row(_dim_text("—"), _dim_text("No tracked commodities"), Text(""), Text(""))
         self.query_one("#wl-commodities-title", Static).update(f"COMMODITIES [{len(commodity_rows)}]")
 
-    # ΓöÇΓöÇ Screener ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+    # ── Screener ──────────────────────────────────────────────────────────────
 
     def _populate_screener(self) -> None:
         """Populate sector treemap and stock screener."""
@@ -8394,11 +10285,12 @@ class NepseDashboard(App):
                     "WHERE date=? AND symbol != 'NEPSE'",
                     (latest_date,)
                 ).fetchall()
+                today_rows = _dedupe_symbol_rows(today_rows)
                 prev_map = {}
-                for r in conn.execute(
+                for r in _dedupe_symbol_rows(conn.execute(
                     "SELECT symbol, close FROM stock_prices WHERE date=?",
                     (prev_date,)
-                ).fetchall():
+                ).fetchall()):
                     prev_map[r[0]] = float(r[1])
 
                 # Get 20-day avg volume for vol ratio
@@ -8455,7 +10347,7 @@ class NepseDashboard(App):
             if conn:
                 conn.close()
 
-        # ΓöÇΓöÇ Sector Performance ΓöÇΓöÇ
+        # ── Sector Performance ──
         if sector_data:
             sector_perf = []
             total_vol_all = sum(d["total_vol"] for d in sector_data.values())
@@ -8468,7 +10360,7 @@ class NepseDashboard(App):
             heatmap = Text()
             heatmap.append("\n", style="")
 
-            # Colored block indicators: Γûá = sector health at a glance
+            # Colored block indicators: ■ = sector health at a glance
             max_abs = max(abs(s[1]) for s in sector_perf) if sector_perf else 1
             if max_abs == 0:
                 max_abs = 1
@@ -8490,7 +10382,7 @@ class NepseDashboard(App):
 
                 # Filled/empty blocks proportional to magnitude
                 n_filled = max(1, int(abs(avg_chg) / max_abs * 8))
-                blocks = "Γûê" * n_filled + "Γûæ" * (8 - n_filled)
+                blocks = "█" * n_filled + "░" * (8 - n_filled)
 
                 heatmap.append(f"  {blocks} ", style=fg)
                 heatmap.append(f"{avg_chg:+5.1f}%  ", style=f"bold {fg}")
@@ -8502,13 +10394,13 @@ class NepseDashboard(App):
             n_up = sum(1 for s in all_stocks if s["chg"] > 0)
             n_dn = sum(1 for s in all_stocks if s["chg"] < 0)
             heatmap.append(f"\n  {total_stocks} stocks  {_vol(total_vol_all)} vol  ", style=LABEL)
-            heatmap.append(f"Γû▓{n_up}", style=GAIN_HI)
-            heatmap.append(f" Γû╝{n_dn}\n", style=LOSS_HI)
+            heatmap.append(f"▲{n_up}", style=GAIN_HI)
+            heatmap.append(f" ▼{n_dn}\n", style=LOSS_HI)
             heatmap_w.update(heatmap)
         else:
             heatmap_w.update(Text("  Loading sector data...", style=LABEL))
 
-        # ΓöÇΓöÇ Stock list (liquid stocks only, sorted by volume) ΓöÇΓöÇ
+        # ── Stock list (liquid stocks only, sorted by volume) ──
         all_stocks.sort(key=lambda x: -x["vol"])
         for s in all_stocks[:100]:
             spark = _render_sparkline(spark_data.get(s["sym"], []), width=12) \
@@ -8522,15 +10414,15 @@ class NepseDashboard(App):
             elif vr > 0:
                 vr_text = Text(f"{vr:.1f}x", style=DIM)
             else:
-                vr_text = Text("ΓÇö", style=DIM)
+                vr_text = Text("—", style=DIM)
             # Day range as compact string
             rng = s["high"] - s["low"]
             rng_pct = rng / s["low"] * 100 if s["low"] > 0 else 0
             rng_text = Text(f"{s['low']:.0f}-{s['high']:.0f}", style=DIM) if rng_pct > 0 \
-                else Text("ΓÇö", style=DIM)
+                else Text("—", style=DIM)
             sec_display = s["sector"]
             if sec_display == "Other":
-                sec_display = "ΓÇö"
+                sec_display = "—"
             dt.add_row(
                 _sym_text(s["sym"]),
                 _dim_text(sec_display[:14]),
@@ -8549,17 +10441,17 @@ class NepseDashboard(App):
         n_sectors = len([s for s in sector_data if s != "Other"])
         bar = self.query_one("#screener-status-bar", Static)
         bar.update(Text.from_markup(
-            f"[bold {AMBER}]Γùå SIGNALS WORKSPACE[/]   "
-            f"[#888888]Active[/] [bold {WHITE}]{n_stocks}[/] [#555555](volΓëÑ1K)[/]   "
-            f"[{GAIN_HI}]Γû▓{n_up}[/]  [{LOSS_HI}]Γû╝{n_down}[/]   "
+            f"[bold {AMBER}]◆ SIGNALS WORKSPACE[/]   "
+            f"[#888888]Active[/] [bold {WHITE}]{n_stocks}[/] [#555555](vol≥1K)[/]   "
+            f"[{GAIN_HI}]▲{n_up}[/]  [{LOSS_HI}]▼{n_down}[/]   "
             f"[#888888]{n_sectors} sectors[/]   "
-            f"[#555555]Signals + screener merged  Γöé  ENTER Lookup  Γöé  / Command[/]"
+            f"[#555555]Signals + screener merged  │  ENTER Lookup  │  / Command[/]"
         ))
         self.query_one("#screener-list-title", Static).update(
-            f"ACTIVE STOCKS ΓÇö {n_stocks}  Γöé  VolΓëÑ1K  Γöé  Sorted by volume  Γöé  VRAT=vol/20d avg")
+            f"ACTIVE STOCKS — {n_stocks}  │  Vol≥1K  │  Sorted by volume  │  VRAT=vol/20d avg")
 
 
-# ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def main() -> None:
     NepseDashboard().run()

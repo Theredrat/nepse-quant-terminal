@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from backend.trading.live_trader import (
@@ -14,7 +14,11 @@ from backend.trading.live_trader import (
     now_nst,
     previous_trading_day,
 )
-from backend.quant_pro.tms_audit import list_executed_trade_events
+
+
+def list_executed_trade_events(limit: int = 8) -> List[Dict[str, Any]]:
+    """Return executed live events when private TMS audit storage is available."""
+    return []
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -38,6 +42,27 @@ def _snapshot_trader(trader) -> Dict[str, Any]:
             "last_price_source_detail": str(getattr(trader, "last_price_source_detail", "")),
             "last_price_snapshot_time_utc": getattr(trader, "last_price_snapshot_time_utc", None),
         }
+
+
+def _parse_snapshot_utc_to_nst(raw: Optional[str]) -> Optional[datetime]:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).replace(tzinfo=None) + timedelta(hours=5, minutes=45)
+
+
+def _latest_mark_nst(snapshot: Dict[str, Any]) -> Optional[datetime]:
+    last_refresh = snapshot.get("last_refresh")
+    snapshot_nst = _parse_snapshot_utc_to_nst(snapshot.get("last_price_snapshot_time_utc"))
+    if snapshot_nst and last_refresh:
+        return snapshot_nst if snapshot_nst >= last_refresh else last_refresh
+    return snapshot_nst or last_refresh
 
 
 def _build_recent_trades(trade_log_file: str, *, limit: int = 8) -> List[Dict[str, Any]]:
@@ -107,7 +132,7 @@ def _build_daily_report(snapshot: Dict[str, Any], intelligence: Dict[str, Any]) 
     if isinstance(daily_start_nav, (int, float)) and daily_start_nav > 0:
         day_pnl = float(nav - daily_start_nav)
         day_return_pct = (day_pnl / float(daily_start_nav)) * 100.0
-    last_refresh = snapshot.get("last_refresh")
+    last_mark_nst = _latest_mark_nst(snapshot)
     benchmark = intelligence.get("global_benchmark")
     benchmark_move_pct = None
     if benchmark and benchmark["base_close"] > 0:
@@ -139,7 +164,8 @@ def _build_daily_report(snapshot: Dict[str, Any], intelligence: Dict[str, Any]) 
         "biggest_detractor": biggest_detractor,
         "invested_pct": invested_pct,
         "confidence_score": intelligence["data_quality"]["confidence_score"],
-        "last_refresh_nst": last_refresh.strftime("%Y-%m-%d %H:%M:%S") if last_refresh else None,
+        "last_refresh_nst": snapshot.get("last_refresh").strftime("%Y-%m-%d %H:%M:%S") if snapshot.get("last_refresh") else None,
+        "last_snapshot_nst": last_mark_nst.strftime("%Y-%m-%d %H:%M:%S") if last_mark_nst else None,
     }
 
 

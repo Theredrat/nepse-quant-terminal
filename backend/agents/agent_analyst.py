@@ -1,9 +1,9 @@
 """
 NEPSE Agent Analyst — local-first equity research overlay.
 
-Uses a local Gemma 4 model on MLX as the primary agent, with optional Claude
-fallback, to perform structured bull/bear analysis on algorithmic shortlists,
-cross-referencing OSINT intelligence, quarterly financials, and market regime.
+Uses local Ollama by default, with optional Gemma 4 MLX or Claude backends, to
+perform structured bull/bear analysis on algorithmic shortlists, cross-referencing
+OSINT intelligence, quarterly financials, and market regime.
 
 Two modes:
   1. analyze() — batch analysis of shortlisted stocks (one agent call)
@@ -18,6 +18,7 @@ import sqlite3
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -27,13 +28,23 @@ import pandas as pd
 from configs.long_term import LONG_TERM_CONFIG
 from backend.agents.runtime_config import (
     DEFAULT_GEMMA4_MODEL as RUNTIME_DEFAULT_GEMMA4_MODEL,
+    DEFAULT_OLLAMA_MODEL as RUNTIME_DEFAULT_OLLAMA_MODEL,
     EXPERIMENTAL_GEMMA4_MODEL as RUNTIME_EXPERIMENTAL_GEMMA4_MODEL,
     load_active_agent_config,
 )
 from backend.quant_pro.nepse_calendar import current_nepal_datetime, get_market_schedule, market_session_phase
 from backend.quant_pro.control_plane.models import AgentDecision
-from backend.quant_pro.nepalosint_client import symbol_intelligence, unified_search
+from backend.quant_pro.nepalosint_client import (
+    consolidated_stories,
+    consolidated_stories_history,
+    resolve_osint_base_url,
+    semantic_story_search,
+    symbol_intelligence,
+    unified_search,
+)
 from backend.quant_pro.paths import ensure_dir, get_project_root, get_runtime_dir, migrate_legacy_path
+from backend.quant_pro.signal_ranking import canonicalize_signal_symbol
+from backend.trading import strategy_registry
 
 RUNTIME_DIR = ensure_dir(get_runtime_dir(__file__))
 AGENTS_RUNTIME_DIR = ensure_dir(RUNTIME_DIR / "agents")
@@ -47,7 +58,7 @@ AGENT_ARCHIVE_FILE = migrate_legacy_path(
     AGENTS_RUNTIME_DIR / "agent_chat_archive.json",
     [PROJECT_ROOT / "agent_chat_archive.json"],
 )
-OSINT_BASE = "https://nepalosint.com/api/v1"
+AGENT_SIGNAL_SNAPSHOT_FILE = AGENTS_RUNTIME_DIR / "active_signals_snapshot.json"
 MAX_AGENT_HISTORY_ITEMS = 12
 MAX_AGENT_ARCHIVE_ITEMS = 240
 AGENT_SHORTLIST_LIMIT = 10
@@ -57,9 +68,10 @@ SUPER_SIGNAL_MIN_STRENGTH = 1.0
 SUPER_SIGNAL_MIN_CONFIDENCE = 0.75
 SUPER_SIGNAL_MIN_CONVICTION = 0.9
 ANALYSIS_CACHE_MAX_AGE_SECS = 900
-DEFAULT_AGENT_BACKEND = "gemma4_mlx"
+DEFAULT_AGENT_BACKEND = "ollama"
 DEFAULT_GEMMA4_MLX_MODEL = RUNTIME_DEFAULT_GEMMA4_MODEL
 DEFAULT_GEMMA4_EXPERIMENTAL_MODEL = RUNTIME_EXPERIMENTAL_GEMMA4_MODEL
+DEFAULT_OLLAMA_MODEL = RUNTIME_DEFAULT_OLLAMA_MODEL
 DEFAULT_AGENT_MAX_TOKENS = 4000
 DEFAULT_AGENT_CHAT_MAX_TOKENS = 320
 DEFAULT_AGENT_TEMPERATURE = 0.15
@@ -84,6 +96,15 @@ NEGATIVE_EVENT_TERMS = {
     "violence", "unrest", "protest", "ban", "sanction", "corruption",
     "fraud", "collapse", "pressure", "selloff",
 }
+ANALYST_PATTERN_TAXONOMY = {
+    "earnings_quality_mixed": "Profit improves but asset quality, fee income, or other quality indicators weaken.",
+    "project_delay_execution_risk": "Construction, commissioning, or infrastructure slippage delays monetization.",
+    "financing_dilution_stress": "Rights issue, refinancing, or working-capital stress raises dilution or funding risk.",
+    "policy_support_with_lag": "Policy is directionally supportive but the financial impact arrives with a lag.",
+    "policy_or_tax_rumor_conflict": "Rumor-driven sentiment moves ahead of official confirmation.",
+    "input_cost_margin_pressure": "FX or commodity costs rise faster than the company can pass them through.",
+    "transmission_or_curtailment_revenue_risk": "Grid, offtake, or curtailment issues reduce realizable revenue.",
+}
 
 _MLX_MODEL = None
 _MLX_PROCESSOR = None
@@ -92,7 +113,7 @@ _MLX_LOCK = threading.Lock()
 
 # ── System prompt: defines the analyst's identity and framework ──────────────
 
-SYSTEM_PROMPT = """You are a senior NEPSE equity research analyst. You combine quantitative signals with qualitative intelligence to make sharp, defensible trade decisions.
+SYSTEM_PROMPT = """You are a disciplined NEPSE equity research analyst. You combine quantitative signals with qualitative intelligence to make sharp, defensible analyst notes and trade reviews.
 
 NEPSE MARKET STRUCTURE:
 - ~370 stocks, T+2 settlement, retail-heavy price action, and strong policy sensitivity
@@ -125,6 +146,18 @@ YOUR RULES:
   * story_count/social_count/related_count = NepalOSINT evidence depth
   * forex/metals/commodities = macro pressure context for importers, banks, insurers, and consumer sectors
 - Treat NepalOSINT as event evidence, filings as accounting truth, and the quant stack as timing/context. Final decisions must reconcile all three.
+- Use only the supplied context. Do not invent filings, headlines, dates, prices, or policy facts that are not present.
+- Separate observed facts from inference. Facts should stay source-grounded; interpretation should explain the mechanism.
+- When the prompt includes source ids, cite them for factual claims and list only ids you actually used.
+- When source ids are available, each factual bullet should carry the source id instead of leaving support implicit.
+- If evidence is weak, missing, or conflicting, say that directly and lower confidence.
+- If the supplied evidence includes Nepali, translate it into analyst-grade English while preserving entities, dates, percentages, units, and causal language.
+- If translation nuance matters, call it out explicitly instead of smoothing it over.
+- Ban generic filler. Avoid lines like "this may be positive" unless you explain the transmission channel.
+- Mechanism standard: observed event -> channel -> likely effect on earnings, cash flow, funding cost, valuation, or positioning.
+- If the prompt provides a pattern taxonomy, map the event to the best-fit pattern class and explain why.
+- When the response is a note or research answer rather than raw JSON, prefer this order: Summary, Key facts, Translation notes, Why it matters, Mechanism, Pattern match, Likely relevance, Risks or counterpoints, Confidence, Missing information, Sources.
+- If no taxonomy fit is defensible, say no_clear_match instead of forcing a pattern.
 - Sector lenses:
   * banks: deposits, credit growth, NPL, NRB policy, liquidity pressure
   * insurers/reinsurers: float yield, claims discipline, treaty growth, solvency perception
@@ -141,7 +174,7 @@ YOUR RULES:
   * HOLD when the setup is interesting but incomplete or already owned
   * REJECT when evidence conflicts with the signal or downside dominates
 
-RESPONSE STYLE: Direct, evidence-based, no hedging language. State your view and back it with data."""
+RESPONSE STYLE: Direct, evidence-based, concise. State your view, separate facts from inference, explain why it matters, and surface uncertainty instead of hiding it. Do not drift into generic finance-summary language."""
 
 
 def _agent_backend() -> str:
@@ -157,7 +190,9 @@ def _agent_model_id() -> str:
     if env_value:
         return env_value
     cfg = load_active_agent_config()
-    return str(cfg.get("model") or DEFAULT_GEMMA4_MLX_MODEL).strip()
+    backend = str(cfg.get("backend") or DEFAULT_AGENT_BACKEND).strip().lower()
+    fallback = DEFAULT_OLLAMA_MODEL if backend == "ollama" else DEFAULT_GEMMA4_MLX_MODEL
+    return str(cfg.get("model") or fallback).strip()
 
 
 def _agent_provider_label() -> str:
@@ -191,7 +226,7 @@ def _agent_fallback_backend() -> str:
     if env_value:
         return env_value
     cfg = load_active_agent_config()
-    return str(cfg.get("fallback_backend") or "claude").strip().lower()
+    return str(cfg.get("fallback_backend") or "").strip().lower()
 
 
 def reload_agent_runtime() -> dict:
@@ -291,6 +326,32 @@ def _call_gemma4_mlx(prompt: str, system: str = SYSTEM_PROMPT, max_tokens: int =
         return f"ERROR: Gemma 4 MLX inference failed: {exc}"
 
 
+def _call_ollama(prompt: str, system: str = SYSTEM_PROMPT, max_tokens: int = DEFAULT_AGENT_MAX_TOKENS) -> str:
+    """Call a local Ollama model via its REST API (http://localhost:11434)."""
+    try:
+        import urllib.request, json as _json
+        cfg = load_active_agent_config()
+        model = str(cfg.get("model") or DEFAULT_OLLAMA_MODEL).strip()
+        host = str(cfg.get("ollama_host") or "http://localhost:11434").rstrip("/")
+        payload = _json.dumps({
+            "model": model,
+            "prompt": f"<system>\n{system}\n</system>\n\n{prompt}",
+            "stream": False,
+            "options": {"num_predict": max_tokens},
+        }).encode()
+        req = urllib.request.Request(
+            f"{host}/api/generate",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            data = _json.loads(resp.read().decode())
+        return str(data.get("response") or "").strip() or "ERROR: Ollama returned empty response"
+    except Exception as exc:
+        return f"ERROR: Ollama call failed: {exc}"
+
+
 def _call_primary_agent(prompt: str, system: str = SYSTEM_PROMPT, max_tokens: int = DEFAULT_AGENT_MAX_TOKENS) -> str:
     backend = _agent_backend()
     if backend in {"gemma4_mlx", "gemma4", "mlx", "mlx_gemma4"}:
@@ -303,6 +364,8 @@ def _call_primary_agent(prompt: str, system: str = SYSTEM_PROMPT, max_tokens: in
             if not str(fallback_response).startswith("ERROR:"):
                 return fallback_response
         return response
+    if backend == "ollama":
+        return _call_ollama(prompt, system=system, max_tokens=max_tokens)
     return _call_claude(prompt, system=system, max_tokens=max_tokens)
 
 
@@ -314,6 +377,23 @@ def load_agent_analysis() -> dict:
         return json.loads(ANALYSIS_FILE.read_text())
     except Exception:
         return {}
+
+
+def load_agent_signal_snapshot() -> dict:
+    if not AGENT_SIGNAL_SNAPSHOT_FILE.exists():
+        return {}
+    try:
+        payload = json.loads(AGENT_SIGNAL_SNAPSHOT_FILE.read_text())
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def publish_agent_signal_snapshot(snapshot: dict) -> dict:
+    payload = dict(snapshot or {})
+    payload.setdefault("saved_at", datetime.now(timezone.utc).replace(microsecond=0).isoformat())
+    AGENT_SIGNAL_SNAPSHOT_FILE.write_text(json.dumps(payload, indent=2, default=str))
+    return payload
 
 
 def _read_chat_items(path: Path) -> list[dict]:
@@ -443,10 +523,13 @@ def publish_external_agent_analysis(
     payload = dict(analysis or {})
     now_utc = datetime.now(timezone.utc)
     account = _active_account_context()
+    strategy = _active_strategy_context()
     payload.setdefault("timestamp", time.time())
     payload.setdefault("context_date", now_utc.strftime("%Y-%m-%d"))
     payload.setdefault("account_id", str(account.get("id") or "account_1"))
     payload.setdefault("account_name", str(account.get("name") or payload.get("account_id") or "account_1"))
+    payload.setdefault("strategy_id", str(strategy.get("id") or "default_c5"))
+    payload.setdefault("strategy_name", str(strategy.get("name") or payload.get("strategy_id") or "default_c5"))
     meta = dict(payload.get("agent_runtime_meta") or {})
     meta.update(
         {
@@ -455,6 +538,8 @@ def publish_external_agent_analysis(
             "updated_at": now_utc.replace(microsecond=0).isoformat(),
             "account_id": payload.get("account_id"),
             "account_name": payload.get("account_name"),
+            "strategy_id": payload.get("strategy_id"),
+            "strategy_name": payload.get("strategy_name"),
         }
     )
     payload["source"] = source
@@ -763,18 +848,344 @@ def _analysis_cache_is_fresh(analysis: dict | None) -> bool:
     payload = dict(analysis or {})
     if not payload or not list(payload.get("stocks") or []):
         return False
+    if bool(payload.get("parse_error")):
+        return False
+    verdicts = {
+        str(row.get("verdict") or "").upper()
+        for row in list(payload.get("stocks") or [])
+        if isinstance(row, dict)
+    }
+    verdicts.discard("")
+    if verdicts and not (verdicts & {"APPROVE", "HOLD", "REJECT"}):
+        return False
     age = time.time() - float(payload.get("timestamp") or 0.0)
     if age > ANALYSIS_CACHE_MAX_AGE_SECS:
         return False
     if str(payload.get("context_date") or "") != _current_nst_session_date():
         return False
-    active_account_id = str(_active_account_context().get("id") or "account_1")
-    return str(payload.get("account_id") or "") == active_account_id
+    active_account = _active_account_context()
+    if str(payload.get("account_id") or "") != str(active_account.get("id") or "account_1"):
+        return False
+    if payload.get("strategy_id") is not None:
+        active_strategy = _active_strategy_context()
+        return str(payload.get("strategy_id") or "") == str(active_strategy.get("id") or "")
+    return True
 
 
 def _clip_text(value: object, limit: int = 140) -> str:
     text = " ".join(str(value or "").split())
     return text[:limit].rstrip()
+
+
+def _agent_osint_base() -> str:
+    return resolve_osint_base_url()
+
+
+def _story_title(raw: dict) -> str:
+    return str(
+        raw.get("canonical_headline")
+        or raw.get("headline")
+        or raw.get("title")
+        or raw.get("summary")
+        or ""
+    ).strip()
+
+
+def _story_url(raw: dict) -> str:
+    return str(raw.get("url") or raw.get("canonical_url") or raw.get("link") or "").strip()
+
+
+def _story_time(raw: dict) -> str:
+    return str(
+        raw.get("first_reported_at")
+        or raw.get("published_at")
+        or raw.get("created_at")
+        or raw.get("tweeted_at")
+        or ""
+    ).strip()[:16]
+
+
+def _story_ref(raw: dict) -> tuple[str, str]:
+    return (_story_title(raw), _story_url(raw))
+
+
+def _normalize_semantic_story_item(raw: dict) -> dict:
+    item = dict(raw or {})
+    if not _story_title(item):
+        item["title"] = item.get("headline") or item.get("canonical_headline") or item.get("text") or item.get("summary") or ""
+    if not _story_url(item):
+        item["url"] = item.get("canonical_url") or item.get("link") or ""
+    if not _story_time(item):
+        item["published_at"] = item.get("published_at_utc") or item.get("date") or item.get("created_at") or ""
+    if not (item.get("source_name") or item.get("source")):
+        item["source_name"] = item.get("source") or "NepalOSINT"
+    return item
+
+
+def _format_citable_story(item: dict) -> str:
+    title = _clip_text(_story_title(item), 150)
+    source = str(item.get("source_name") or item.get("source") or "Unknown source").strip()
+    timestamp = _story_time(item)
+    url = _story_url(item)
+    parts = [part for part in (title, source, timestamp, url) if part]
+    return " | ".join(parts)
+
+
+def _format_story_source_ref(item: dict, ref_id: int) -> str:
+    title = _clip_text(_story_title(item), 120)
+    source = str(item.get("source_name") or item.get("source") or "Unknown source").strip()
+    timestamp = _story_time(item)
+    url = _story_url(item)
+    parts = [part for part in (source, timestamp, url) if part]
+    suffix = " | ".join(parts)
+    return f"[{ref_id}] {title}" + (f" | {suffix}" if suffix else "")
+
+
+def _detect_text_language(*texts: object) -> str:
+    blob = " ".join(str(text or "") for text in texts)
+    if not blob.strip():
+        return "unknown"
+    has_devanagari = bool(re.search(r"[\u0900-\u097F]", blob))
+    has_ascii_letters = bool(re.search(r"[A-Za-z]", blob))
+    if has_devanagari and has_ascii_letters:
+        return "mixed"
+    if has_devanagari:
+        return "ne"
+    if has_ascii_letters:
+        return "en"
+    return "unknown"
+
+
+def _analyst_pattern_taxonomy_text() -> str:
+    lines = ["ANALYST PATTERN TAXONOMY:"]
+    for key, description in ANALYST_PATTERN_TAXONOMY.items():
+        lines.append(f"  - {key}: {description}")
+    return "\n".join(lines) + "\n"
+
+
+def _analysis_source_id(prefix: str, suffix: str) -> str:
+    clean_prefix = re.sub(r"[^A-Z0-9]+", "_", str(prefix or "").upper()).strip("_")
+    clean_suffix = re.sub(r"[^A-Z0-9]+", "_", str(suffix or "").upper()).strip("_")
+    joined = "_".join(part for part in (clean_prefix, clean_suffix) if part)
+    return joined[:48] or "SOURCE"
+
+
+def _build_metric_source_packet(symbol: str, metrics: dict | None, last_price: float = 0.0) -> Optional[dict]:
+    formatted = _format_metrics({"symbol": symbol, **dict(metrics or {})})
+    if not formatted:
+        return None
+    text = formatted
+    if last_price > 0:
+        text = f"{text}  CMP={last_price:.1f}"
+    return {
+        "id": _analysis_source_id(symbol, "filing"),
+        "label": "latest filing metrics",
+        "language": "en",
+        "text": text,
+    }
+
+
+def _build_story_source_packets(prefix: str, items: list[dict] | None, *, limit: int = 2) -> list[dict]:
+    packets: list[dict] = []
+    for idx, item in enumerate(list(items or [])[:limit], start=1):
+        text = _format_citable_story(dict(item or {}))
+        if not text:
+            continue
+        language = _detect_text_language(
+            dict(item or {}).get("canonical_headline"),
+            dict(item or {}).get("headline"),
+            dict(item or {}).get("title"),
+            dict(item or {}).get("summary"),
+        )
+        packets.append(
+            {
+                "id": _analysis_source_id(prefix, f"news{idx}"),
+                "label": f"{prefix} news {idx}",
+                "language": language,
+                "text": text,
+            }
+        )
+    return packets
+
+
+def _build_analysis_source_packets(
+    ctx: dict,
+    metrics_map: dict[str, dict],
+    intel_map: dict[str, dict],
+    sector_intel_map: dict[str, dict],
+) -> dict:
+    packets: list[dict] = []
+    by_symbol: dict[str, list[str]] = {}
+    prices = dict(ctx.get("prices") or {})
+
+    market_packet = {
+        "id": "MARKET_STATE",
+        "label": "market state",
+        "text": (
+            f"Date {ctx.get('session_date', 'unknown')} | NEPSE {ctx.get('nepse_index', 'N/A')} "
+            f"({ctx.get('nepse_change_pct', 'N/A')}%) | Breadth ▲{ctx.get('advancers', '?')} "
+            f"▼{ctx.get('decliners', '?')} | Regime {ctx.get('regime', 'unknown')}"
+        ),
+    }
+    packets.append(market_packet)
+
+    for signal in list(ctx.get("signals") or []):
+        symbol = str(signal.get("symbol") or "").upper()
+        if not symbol:
+            continue
+        ids: list[str] = []
+
+        metric_packet = _build_metric_source_packet(
+            symbol,
+            metrics_map.get(symbol),
+            float(prices.get(symbol) or 0.0),
+        )
+        if metric_packet:
+            packets.append(metric_packet)
+            ids.append(metric_packet["id"])
+
+        symbol_story_packets = _build_story_source_packets(
+            symbol,
+            list(dict(intel_map.get(symbol) or {}).get("story_items") or []),
+            limit=2,
+        )
+        for packet in symbol_story_packets:
+            packets.append(packet)
+            ids.append(packet["id"])
+
+        sector_name = str(metrics_map.get(symbol, {}).get("sector") or "").strip()
+        sector_key = _sector_key(sector_name)
+        sector_packets = _build_story_source_packets(
+            sector_key or symbol,
+            list(dict(sector_intel_map.get(sector_key) or {}).get("story_items") or []),
+            limit=1,
+        )
+        for packet in sector_packets:
+            packets.append(packet)
+            ids.append(packet["id"])
+
+        by_symbol[symbol] = ids
+
+    lines = ["CITABLE SOURCE PACKETS:"]
+    for packet in packets:
+        lines.append(
+            f"  [{packet['id']}][{packet.get('language') or 'unknown'}] {packet['label']}: {packet['text']}"
+        )
+    return {"packets": packets, "by_symbol": by_symbol, "text": "\n".join(lines) + "\n"}
+
+
+def _story_blob(raw: dict) -> str:
+    return " ".join(
+        str(
+            raw.get(key) or ""
+        ).strip()
+        for key in (
+            "canonical_headline",
+            "headline",
+            "title",
+            "summary",
+            "content",
+            "story_type",
+            "category",
+            "source_name",
+            "source",
+        )
+    ).strip().lower()
+
+
+def _story_published_dt(raw: dict) -> Optional[datetime]:
+    value = (
+        raw.get("first_reported_at")
+        or raw.get("published_at")
+        or raw.get("created_at")
+        or raw.get("tweeted_at")
+        or ""
+    )
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _parse_news_date_window(question: str) -> dict:
+    text = str(question or "")
+    now = datetime.now(timezone.utc)
+    lowered = text.lower()
+    explicit_dates: list[datetime] = []
+
+    for match in re.finditer(r"\b(20\d{2})[-/](\d{1,2})[-/](\d{1,2})\b", text):
+        try:
+            explicit_dates.append(datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)), tzinfo=timezone.utc))
+        except ValueError:
+            pass
+    for match in re.finditer(
+        r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})(?:,)?\s+(20\d{2})\b",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        months = {
+            "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+            "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+        }
+        try:
+            explicit_dates.append(datetime(int(match.group(3)), months[match.group(1)[:3].lower()], int(match.group(2)), tzinfo=timezone.utc))
+        except ValueError:
+            pass
+
+    if explicit_dates:
+        start = min(explicit_dates).replace(hour=0, minute=0, second=0, microsecond=0)
+        end = max(explicit_dates).replace(hour=23, minute=59, second=59, microsecond=0)
+        hours = max(24, int((now - start).total_seconds() // 3600) + 48)
+        return {"start": start, "end": end, "hours": hours, "label": f"{start.date().isoformat()} to {end.date().isoformat()}"}
+
+    rel = re.search(r"\blast\s+(\d{1,3})\s*(h|hr|hrs|hour|hours)\b", lowered)
+    if rel:
+        hours = max(1, min(24 * 3650, int(rel.group(1))))
+        start = now - timedelta(hours=hours)
+        return {"start": start, "end": now, "hours": hours + 2, "label": f"last {hours} hours"}
+
+    rel = re.search(r"\blast\s+(\d{1,3})\s*(d|day|days)\b", lowered)
+    if rel:
+        days = max(1, min(3650, int(rel.group(1))))
+        start = now - timedelta(days=days)
+        return {"start": start, "end": now, "hours": days * 24 + 24, "label": f"last {days} days"}
+
+    if "last week" in lowered or "past week" in lowered:
+        start = now - timedelta(days=7)
+        return {"start": start, "end": now, "hours": 8 * 24, "label": "last 7 days"}
+    if "last month" in lowered or "past month" in lowered:
+        start = now - timedelta(days=31)
+        return {"start": start, "end": now, "hours": 32 * 24, "label": "last 31 days"}
+    if "recent" in lowered:
+        start = now - timedelta(days=14)
+        return {"start": start, "end": now, "hours": 15 * 24, "label": "recent 14 days"}
+
+    return {"start": None, "end": None, "hours": 720, "label": ""}
+
+
+def _story_in_date_window(item: dict, date_window: dict) -> bool:
+    start = date_window.get("start")
+    end = date_window.get("end")
+    if start is None and end is None:
+        return True
+    published = _story_published_dt(item)
+    if published is None:
+        return False
+    if start is not None and published < start:
+        return False
+    if end is not None and published > end:
+        return False
+    return True
+
+
+def _date_window_is_explicit(date_window: dict) -> bool:
+    return date_window.get("start") is not None and date_window.get("end") is not None
 
 
 def _active_account_context() -> dict:
@@ -794,6 +1205,42 @@ def _active_account_context() -> dict:
         "dir": account_dir,
         "portfolio_path": portfolio_path,
     }
+
+
+def _active_strategy_context() -> dict:
+    strategy_id = str(os.environ.get("NEPSE_ACTIVE_STRATEGY_ID", "") or "").strip()
+    strategy_name = str(os.environ.get("NEPSE_ACTIVE_STRATEGY_NAME", "") or "").strip()
+    payload = strategy_registry.load_strategy(strategy_id) if strategy_id else None
+    config = dict((payload or {}).get("config") or {})
+    if not strategy_id:
+        strategy_id = "default_c5"
+    if not strategy_name:
+        strategy_name = str((payload or {}).get("name") or strategy_registry.strategy_name(strategy_id) or strategy_id)
+    if not config:
+        config = dict(LONG_TERM_CONFIG)
+    return {
+        "id": strategy_id,
+        "name": strategy_name,
+        "config": config,
+    }
+
+
+def _matching_signal_snapshot() -> dict:
+    snapshot = load_agent_signal_snapshot()
+    if not snapshot:
+        return {}
+    active_account = _active_account_context()
+    active_strategy = _active_strategy_context()
+    if str(snapshot.get("account_id") or "") != str(active_account.get("id") or ""):
+        return {}
+    if str(snapshot.get("strategy_id") or "") != str(active_strategy.get("id") or ""):
+        return {}
+    if str(snapshot.get("context_date") or "") != _current_nst_session_date():
+        return {}
+    signals = list(snapshot.get("signals") or [])
+    if not signals:
+        return {}
+    return snapshot
 
 
 def _load_active_portfolio() -> tuple[list[dict], dict]:
@@ -1198,11 +1645,71 @@ def _fallback_stock_decision(
         f"NepalOSINT: {_clip_text(_summarize_symbol_intelligence(symbol, intel), 200)}. "
         f"Sector check: {_clip_text(_summarize_sector_intelligence(str(metrics.get('sector') or 'Unknown'), sector_payload), 180)}."
     )
+    summary = merged.get("summary") or (
+        f"{symbol} has a {'constructive' if verdict == 'APPROVE' else 'mixed' if verdict == 'HOLD' else 'fragile'} setup, "
+        f"but the case depends on {_clip_text(what_matters, 90)}."
+    )
+    key_facts = list(merged.get("key_facts") or [])
+    if not key_facts:
+        if metrics.get("profit_growth_qoq_pct") is not None:
+            key_facts.append(f"Profit growth QoQ is {float(metrics.get('profit_growth_qoq_pct') or 0.0):.1f}%")
+        if metrics.get("revenue_growth_qoq_pct") is not None:
+            key_facts.append(f"Revenue growth QoQ is {float(metrics.get('revenue_growth_qoq_pct') or 0.0):.1f}%")
+        if metrics.get("profit_margin_pct") is not None:
+            key_facts.append(f"Profit margin is {float(metrics.get('profit_margin_pct') or 0.0):.1f}%")
+        if lead_story:
+            key_facts.append(f"Lead NepalOSINT story: {lead_story}")
+    why_it_matters = merged.get("why_it_matters") or (
+        f"The observed setup matters because {_clip_text(what_matters, 110)} affects the near-term evidence needed to justify a position."
+    )
+    mechanism = merged.get("mechanism") or (
+        f"Observed setup -> investor focus shifts to {_clip_text(what_matters, 80).lower()} -> near-term pricing reflects whether that evidence confirms or weakens the thesis."
+    )
+    language_detected = str(merged.get("language_detected") or "en")
+    translation_quality_notes = list(merged.get("translation_quality_notes") or [])
+    if not translation_quality_notes:
+        translation_quality_notes = ["No material translation ambiguity flagged in the fallback path."]
+    likely_impact = merged.get("likely_impact") or (
+        f"{'Moderately positive' if verdict == 'APPROVE' else 'Neutral to mixed' if verdict == 'HOLD' else 'Negative'} for {symbol} over the next 1-4 weeks because "
+        f"{_clip_text(why_it_matters, 120).lower()}"
+    )
+    likely_relevance = merged.get("likely_relevance") or likely_impact
+    risks_counterpoints = list(merged.get("risks_counterpoints") or [])
+    if not risks_counterpoints:
+        risks_counterpoints = [bear_case]
+        if red_flags:
+            risks_counterpoints.extend(red_flags[:1])
+    confidence_note = merged.get("confidence_note") or (
+        f"{'High' if conviction >= 0.75 else 'Medium' if conviction >= 0.5 else 'Low'} because the setup has "
+        f"{'multiple aligned signals' if conviction >= 0.75 else 'some support but still open questions' if conviction >= 0.5 else 'thin or conflicting evidence'}."
+    )
+    uncertainty_notes = list(merged.get("uncertainty_notes") or [])
+    if not uncertainty_notes:
+        uncertainty_notes = ["Fallback path used because the model did not return a fully structured multilingual analysis."]
+    missing_information = list(merged.get("missing_information") or [])
+    if not missing_information:
+        missing_information.append("Fresh confirming evidence is limited if the model did not return explicit source-backed facts.")
+    cited_sources = list(merged.get("cited_sources") or [])
+    historical_pattern_class = str(merged.get("historical_pattern_class") or "no_clear_match")
 
     merged.update(
         {
             "verdict": verdict,
             "conviction": conviction,
+            "language_detected": language_detected,
+            "translation_quality_notes": translation_quality_notes[:3],
+            "summary": summary,
+            "key_facts": key_facts[:4],
+            "why_it_matters": why_it_matters,
+            "mechanism": mechanism,
+            "historical_pattern_class": historical_pattern_class,
+            "likely_impact": likely_impact,
+            "likely_relevance": likely_relevance,
+            "risks_counterpoints": risks_counterpoints[:3],
+            "confidence_note": confidence_note,
+            "uncertainty_notes": uncertainty_notes[:3],
+            "missing_information": missing_information[:3],
+            "cited_sources": cited_sources,
             "bull_case": bull_case,
             "bear_case": bear_case,
             "what_matters": what_matters,
@@ -1215,41 +1722,55 @@ def _fallback_stock_decision(
 
 # ── Context gathering ────────────────────────────────────────────────────────
 
-def _gather_context() -> dict:
+def _gather_context(*, preview_only: bool = False) -> dict:
     """Gather all context for the agent: signals, news, regime, portfolio."""
     context = {}
     fresh_market = _refresh_intraday_market_snapshot()
     if fresh_market:
         context["fresh_market"] = fresh_market
     context["macro_market"] = _fetch_macro_market_context()
+    active_strategy = _active_strategy_context()
+    strategy_config = dict(active_strategy.get("config") or {})
+    signal_types = list(strategy_config.get("signal_types") or list(LONG_TERM_CONFIG["signal_types"]))
+    use_regime_filter = bool(strategy_config.get("use_regime_filter", True))
+    context["strategy_id"] = str(active_strategy.get("id") or "default_c5")
+    context["strategy_name"] = str(active_strategy.get("name") or "Live C31")
+    context["strategy_signal_types"] = list(signal_types)
+    signal_snapshot = _matching_signal_snapshot()
 
     # 1. Algorithm signals + price data
     try:
-        from backend.backtesting.simple_backtest import load_all_prices
-        from apps.classic.dashboard import MD, _db
-        from backend.trading.live_trader import generate_signals
+        from apps.classic.dashboard import MD
         md = MD(top_n=10)
-        conn = _db()
-        prices_df = load_all_prices(conn)
-        conn.close()
-        sigs, regime = generate_signals(
-            prices_df,
-            list(LONG_TERM_CONFIG["signal_types"]),
-            use_regime_filter=True,
-        )
         regime_blocked = False
-        if not sigs and str(regime).lower() == "bear":
+        if signal_snapshot:
+            sigs = list(signal_snapshot.get("signals") or [])
+            regime = str(signal_snapshot.get("regime") or "unknown")
+        else:
+            from backend.backtesting.simple_backtest import load_all_prices
+            from apps.classic.dashboard import _db
+            from backend.trading.live_trader import generate_signals
+
+            conn = _db()
+            prices_df = load_all_prices(conn)
+            conn.close()
             sigs, regime = generate_signals(
                 prices_df,
-                list(LONG_TERM_CONFIG["signal_types"]),
-                use_regime_filter=False,
+                signal_types,
+                use_regime_filter=use_regime_filter,
             )
-            regime_blocked = True
+            if not sigs and str(regime).lower() == "bear":
+                sigs, regime = generate_signals(
+                    prices_df,
+                    signal_types,
+                    use_regime_filter=False,
+                )
+                regime_blocked = True
         sigs = list(sigs or [])[:AGENT_SHORTLIST_LIMIT]
 
         context["signals"] = [
             {
-                "symbol": str(s.get("symbol") or "").upper(),
+                "symbol": canonicalize_signal_symbol(s.get("symbol")),
                 "type": str(s.get("signal_type") or s.get("type") or ""),
                 "direction": "BUY",
                 "strength": round(float(s.get("strength") or 0.0), 3),
@@ -1264,6 +1785,7 @@ def _gather_context() -> dict:
         context["regime"] = regime
         context["session_date"] = str(_pick_context_value(fresh_market, "session_date", md.latest))
         context["shortlist_limit"] = AGENT_SHORTLIST_LIMIT
+        context["signals_source"] = "snapshot" if signal_snapshot else "generated"
 
         # NEPSE index
         if len(md.nepse) >= 2:
@@ -1280,9 +1802,9 @@ def _gather_context() -> dict:
         # Current prices for P/E, P/BV computation
         context["prices"] = md.ltps()
         context["signal_metrics"] = {
-            str(s.get("symbol") or "").upper(): _compute_stock_metrics(
-                str(s.get("symbol") or "").upper(),
-                float((context["prices"] or {}).get(str(s.get("symbol") or "").upper()) or 0.0),
+            canonicalize_signal_symbol(s.get("symbol")): _compute_stock_metrics(
+                canonicalize_signal_symbol(s.get("symbol")),
+                float((context["prices"] or {}).get(canonicalize_signal_symbol(s.get("symbol"))) or 0.0),
             )
             for s in context["signals"]
             if str(s.get("symbol") or "").strip()
@@ -1293,45 +1815,86 @@ def _gather_context() -> dict:
         context["signal_error"] = str(e)
         context["signal_metrics"] = {}
 
+    portfolio_rows, portfolio_meta = _load_active_portfolio()
+    context["portfolio"] = portfolio_rows
+    context["portfolio_account"] = portfolio_meta
+
+    if preview_only:
+        context["symbol_intelligence"] = {}
+        context["sector_intelligence"] = {}
+        context["embeddings"] = []
+        context["news"] = []
+        return context
+
     # 2. NepalOSINT semantic + unified + related-story search per shortlisted stock
     try:
         symbol_intel: dict[str, dict] = {}
         sector_intel: dict[str, dict] = {}
         embeddings_context = []
-        for s in context.get("signals", []):
-            sym = str(s.get("symbol") or "").upper()
-            if not sym or "::" in sym:
-                continue
-            intel = symbol_intelligence(
+        base_url = _agent_osint_base()
+        signal_metrics = dict(context.get("signal_metrics") or {})
+        symbols = [
+            str(s.get("symbol") or "").upper()
+            for s in context.get("signals", [])
+            if str(s.get("symbol") or "").strip() and "::" not in str(s.get("symbol") or "")
+        ]
+        symbols = list(dict.fromkeys(symbols))
+        sector_pairs: dict[str, str] = {}
+
+        def _fetch_symbol_intel(sym: str) -> tuple[str, dict]:
+            return (
                 sym,
-                hours=AGENT_OSINT_DECISION_HOURS,
-                top_k=6,
-                min_similarity=0.45,
-                base_url=OSINT_BASE,
-            )
-            symbol_intel[sym] = intel
-            sector_name = str(dict(context.get("signal_metrics") or {}).get(sym, {}).get("sector") or "").strip()
-            sector_key = _sector_key(sector_name)
-            if sector_name and sector_key and sector_key not in sector_intel:
-                sector_intel[sector_key] = symbol_intelligence(
-                    sector_name,
+                symbol_intelligence(
+                    sym,
                     hours=AGENT_OSINT_DECISION_HOURS,
                     top_k=4,
                     min_similarity=0.45,
-                    base_url=OSINT_BASE,
-                )
-            for item in list(dict(intel.get("semantic") or {}).get("results") or [])[:3]:
-                title = str(item.get("title") or "")
-                if title:
-                    embeddings_context.append(
-                        {
-                            "symbol": sym,
-                            "title": title[:150],
-                            "source": item.get("source_name", ""),
-                            "similarity": round(float(item.get("similarity") or 0.0), 3),
-                            "date": (item.get("published_at") or "")[:16],
-                        }
-                    )
+                    base_url=base_url,
+                ),
+            )
+
+        if symbols:
+            with ThreadPoolExecutor(max_workers=min(6, len(symbols))) as executor:
+                futures = {executor.submit(_fetch_symbol_intel, sym): sym for sym in symbols}
+                for future in as_completed(futures):
+                    sym, intel = future.result()
+                    symbol_intel[sym] = intel
+                    sector_name = str(dict(signal_metrics.get(sym) or {}).get("sector") or "").strip()
+                    sector_key = _sector_key(sector_name)
+                    if sector_name and sector_key and sector_key not in sector_pairs:
+                        sector_pairs[sector_key] = sector_name
+                    for item in list(dict(intel.get("semantic") or {}).get("results") or [])[:2]:
+                        title = str(item.get("title") or "")
+                        if title:
+                            embeddings_context.append(
+                                {
+                                    "symbol": sym,
+                                    "title": title[:150],
+                                    "source": item.get("source_name", ""),
+                                    "similarity": round(float(item.get("similarity") or 0.0), 3),
+                                    "date": (item.get("published_at") or "")[:16],
+                                }
+                            )
+
+        def _fetch_sector_intel(item: tuple[str, str]) -> tuple[str, dict]:
+            sector_key, sector_name = item
+            return (
+                sector_key,
+                symbol_intelligence(
+                    sector_name,
+                    hours=AGENT_OSINT_DECISION_HOURS,
+                    top_k=3,
+                    min_similarity=0.45,
+                    base_url=base_url,
+                ),
+            )
+
+        if sector_pairs:
+            with ThreadPoolExecutor(max_workers=min(4, len(sector_pairs))) as executor:
+                futures = {executor.submit(_fetch_sector_intel, item): item[0] for item in sector_pairs.items()}
+                for future in as_completed(futures):
+                    sector_key, intel = future.result()
+                    sector_intel[sector_key] = intel
         context["symbol_intelligence"] = symbol_intel
         context["sector_intelligence"] = sector_intel
         context["embeddings"] = embeddings_context
@@ -1343,17 +1906,12 @@ def _gather_context() -> dict:
 
     # 3. OSINT news feed (last 48h)
     try:
-        import requests
-        r = requests.get(
-            f"{OSINT_BASE}/analytics/consolidated-stories",
-            params={"limit": 30}, timeout=8)
-        r.raise_for_status()
-        stories = r.json()
+        stories = consolidated_stories(limit=30, base_url=_agent_osint_base(), timeout=8)
         context["news"] = []
         for s in stories:
-            headline = s.get("canonical_headline", "")
+            headline = _story_title(s)
             summary = s.get("summary", "") or ""
-            url = s.get("url", "") or ""
+            url = _story_url(s)
             text = ""
             if summary and not any(ord(c) > 127 for c in summary[:10]):
                 text = summary[:200]
@@ -1370,18 +1928,14 @@ def _gather_context() -> dict:
                 context["news"].append({
                     "type": s.get("story_type", ""),
                     "severity": s.get("severity", ""),
-                    "source": s.get("source_name", ""),
+                    "source": s.get("source_name", "") or s.get("source", ""),
                     "text": text[:200],
-                    "time": s.get("first_reported_at", "")[:16],
+                    "time": _story_time(s),
+                    "url": url,
                 })
     except Exception as e:
         context["news"] = []
         context["news_error"] = str(e)
-
-    # 4. Portfolio
-    portfolio_rows, portfolio_meta = _load_active_portfolio()
-    context["portfolio"] = portfolio_rows
-    context["portfolio_account"] = portfolio_meta
 
     return context
 
@@ -1407,35 +1961,31 @@ def _derive_action_label(stock: dict, *, is_held: bool) -> str:
 def _merge_agent_output_with_shortlist(parsed: dict, ctx: dict) -> dict:
     signal_rows = list(ctx.get("signals") or [])
     portfolio_symbols = {
-        str(item.get("symbol") or "").upper()
+        canonicalize_signal_symbol(item.get("symbol"))
         for item in list(ctx.get("portfolio") or [])
         if str(item.get("symbol") or "").strip()
     }
     metrics_map = {
-        str(key).upper(): dict(value or {})
+        canonicalize_signal_symbol(key): dict(value or {})
         for key, value in dict(ctx.get("signal_metrics") or {}).items()
     }
     intel_map = {
-        str(key).upper(): dict(value or {})
+        canonicalize_signal_symbol(key): dict(value or {})
         for key, value in dict(ctx.get("symbol_intelligence") or {}).items()
     }
     sector_intel_map = {
         str(key).upper(): dict(value or {})
         for key, value in dict(ctx.get("sector_intelligence") or {}).items()
     }
-    preview_mode = bool(parsed.get("_preview")) or (
-        parsed.get("trade_today") is None
-        and not str(parsed.get("market_view") or "").strip()
-        and not list(parsed.get("stocks") or [])
-    )
+    preview_mode = bool(parsed.get("_preview"))
     parsed_rows = {
-        str(item.get("symbol") or "").upper(): dict(item)
+        canonicalize_signal_symbol(item.get("symbol")): dict(item)
         for item in list(parsed.get("stocks") or [])
         if str(item.get("symbol") or "").strip()
     }
     merged_rows: list[dict] = []
     for rank, sig in enumerate(signal_rows, 1):
-        symbol = str(sig.get("symbol") or "").upper()
+        symbol = canonicalize_signal_symbol(sig.get("symbol"))
         is_held = symbol in portfolio_symbols
         row = _fallback_stock_decision(
             symbol,
@@ -1462,6 +2012,20 @@ def _merge_agent_output_with_shortlist(parsed: dict, ctx: dict) -> dict:
             "sector": str(row.get("sector") or ""),
             "verdict": normalized_verdict,
             "conviction": conviction,
+            "language_detected": str(row.get("language_detected") or "unknown"),
+            "translation_quality_notes": list(row.get("translation_quality_notes") or []),
+            "summary": str(row.get("summary") or ""),
+            "key_facts": list(row.get("key_facts") or []),
+            "why_it_matters": str(row.get("why_it_matters") or ""),
+            "mechanism": str(row.get("mechanism") or ""),
+            "historical_pattern_class": str(row.get("historical_pattern_class") or ""),
+            "likely_impact": str(row.get("likely_impact") or ""),
+            "likely_relevance": str(row.get("likely_relevance") or ""),
+            "risks_counterpoints": list(row.get("risks_counterpoints") or []),
+            "confidence_note": str(row.get("confidence_note") or ""),
+            "uncertainty_notes": list(row.get("uncertainty_notes") or []),
+            "missing_information": list(row.get("missing_information") or []),
+            "cited_sources": list(row.get("cited_sources") or []),
             "bull_case": str(row.get("bull_case") or ""),
             "bear_case": str(row.get("bear_case") or ""),
             "what_matters": str(row.get("what_matters") or sig.get("reasoning") or ""),
@@ -1487,6 +2051,20 @@ def _merge_agent_output_with_shortlist(parsed: dict, ctx: dict) -> dict:
     enriched = dict(parsed)
     enriched["shortlist"] = signal_rows
     enriched["stocks"] = merged_rows
+    if not preview_mode:
+        if parsed.get("trade_today") is None:
+            enriched["trade_today"] = any(
+                str(row.get("verdict") or "").upper() == "APPROVE"
+                for row in merged_rows
+            )
+        enriched.setdefault(
+            "trade_today_reason",
+            "Deterministic fallback used because the agent response was unavailable or unparsable.",
+        )
+        enriched.setdefault(
+            "market_view",
+            "Fallback decision path used. Shortlist and pre-computed metrics were analyzed without a usable model response.",
+        )
     enriched["super_signal_thresholds"] = {
         "score": SUPER_SIGNAL_MIN_SCORE,
         "strength": SUPER_SIGNAL_MIN_STRENGTH,
@@ -1496,9 +2074,67 @@ def _merge_agent_output_with_shortlist(parsed: dict, ctx: dict) -> dict:
     return enriched
 
 
+def _extract_agent_json_payload(raw: str) -> dict:
+    text = str(raw or "").strip()
+    if not text:
+        return {}
+    if "```" in text:
+        parts = text.split("```")
+        if len(parts) >= 2:
+            text = parts[1]
+            if text.startswith("json"):
+                text = text[4:]
+    start = text.find("{")
+    if start < 0:
+        return {}
+    candidate = text[start:]
+    end = candidate.rfind("}")
+    if end >= 0:
+        candidate = candidate[: end + 1]
+    try:
+        parsed = json.loads(candidate)
+        return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        pass
+
+    marker = '"stocks": ['
+    marker_idx = candidate.find(marker)
+    if marker_idx < 0:
+        return {}
+
+    header = candidate[:marker_idx] + '"stocks": []}'
+    try:
+        repaired = json.loads(header)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(repaired, dict):
+        return {}
+
+    decoder = json.JSONDecoder()
+    stocks_blob = candidate[marker_idx + len(marker):]
+    rows: list[dict] = []
+    idx = 0
+    while idx < len(stocks_blob):
+        while idx < len(stocks_blob) and stocks_blob[idx] in " \r\n\t,":
+            idx += 1
+        if idx >= len(stocks_blob) or stocks_blob[idx] == "]":
+            break
+        try:
+            item, next_idx = decoder.raw_decode(stocks_blob, idx)
+        except json.JSONDecodeError:
+            break
+        if isinstance(item, dict):
+            rows.append(item)
+        idx = next_idx
+    repaired["stocks"] = rows
+    repaired["_partial_parse"] = True
+    repaired["_partial_stock_count"] = len(rows)
+    return repaired
+
+
 def build_algo_shortlist_snapshot() -> dict:
     """Return the ranked algo shortlist without waiting for full agent analysis."""
-    ctx = _gather_context()
+    ctx = _gather_context(preview_only=True)
     preview = {
         "_preview": True,
         "timestamp": time.time(),
@@ -1523,7 +2159,7 @@ def analyze(force: bool = False) -> dict:
         if _analysis_cache_is_fresh(cached):
             return cached
 
-    ctx = _gather_context()
+    ctx = _gather_context(preview_only=False)
     nepal_clock = _nepal_market_clock()
     prices = ctx.get("prices", {})
     metrics_map = {
@@ -1610,6 +2246,7 @@ def analyze(force: bool = False) -> dict:
         str(key).upper(): dict(value or {})
         for key, value in dict(ctx.get("sector_intelligence") or {}).items()
     }
+    source_packets = _build_analysis_source_packets(ctx, metrics_map, intel_map, sector_intel_map)
     if sector_intel_map:
         lines = [f"SECTOR NEPALOSINT INTELLIGENCE (last {AGENT_OSINT_DECISION_HOURS}h):"]
         seen: set[str] = set()
@@ -1653,6 +2290,8 @@ MARKET STATE:
 {embeddings_text}
 {symbol_intelligence_text}
 {sector_intelligence_text}
+{source_packets.get('text', '')}
+{_analyst_pattern_taxonomy_text()}
 {macro_text}
 
 INSTRUCTIONS:
@@ -1666,9 +2305,21 @@ INSTRUCTIONS:
    - BULL vs BEAR: In 1 sentence each, the strongest argument for and against
    - VERDICT: APPROVE, REJECT, or HOLD with conviction 0-100%
    - WHAT MATTERS: One sentence — "What actually matters for this stock right now is..."
+   - SUMMARY: one thesis line that distinguishes fact from interpretation
+   - KEY FACTS: 2-4 bullets, each with explicit evidence and a cited source id when available
+   - TRANSLATION NOTES: if any cited source is Nepali or mixed-language, state the detected language and preserve financially important wording in English
+   - WHY IT MATTERS: explain the mechanism from observed fact to stock/sector impact
+   - MECHANISM: explicitly map event -> channel -> effect on earnings, margin, funding cost, execution, or valuation
+   - PATTERN MATCH: assign the best-fit class from ANALYST PATTERN TAXONOMY and justify it
+   - LIKELY IMPACT: direction, horizon, and why the move may be muted or strong
+   - RISKS / COUNTERPOINTS: at least 2 concrete invalidation paths or missing-evidence items
+   - CONFIDENCE NOTE: Low / Medium / High with one sentence explaining the evidence quality
+   - CITED SOURCES: list only source ids from CITABLE SOURCE PACKETS that you actually used
    - Review ALL shortlisted stocks in rank order. Do not skip any real stock.
    - HOLD is only valid for symbols already present in ACTIVE ACCOUNT HOLDINGS. If a stock is not currently held in the active account, the final stance must resolve to APPROVE or REJECT.
    - You must explicitly check the last {AGENT_OSINT_DECISION_HOURS}h of NepalOSINT symbol and sector news before deciding. If sector news is negative, that is a real headwind even when the stock-specific chart looks good.
+   - If a factual claim is not supported by the prompt context or source packets, say the evidence is missing rather than inventing support.
+   - Use the source packet ids for filing metrics, symbol news, and sector news whenever you state those facts.
 
 3. PORTFOLIO RISK CHECK: Are we overexposed to any sector? Should we trim anything?
 
@@ -1686,10 +2337,24 @@ Respond in this EXACT JSON format (no markdown, no code fences, just raw JSON):
       "sector": "sector name",
       "verdict": "APPROVE or REJECT or HOLD",
       "conviction": 0.0 to 1.0,
+      "language_detected": "en or ne or mixed or unknown",
+      "translation_quality_notes": ["translation nuance note", "or state no material translation ambiguity"],
+      "summary": "1 sentence thesis",
+      "key_facts": ["fact with citation [SOURCE_ID]", "fact with citation [SOURCE_ID]"],
+      "why_it_matters": "fact-to-mechanism explanation",
+      "mechanism": "event -> channel -> effect",
+      "historical_pattern_class": "best-fit taxonomy class or no_clear_match",
+      "likely_impact": "direction, horizon, and reason",
+      "likely_relevance": "concise stock, sector, or market relevance statement",
+      "risks_counterpoints": ["risk or counterpoint", "risk or missing evidence"],
+      "confidence_note": "Low or Medium or High: evidence quality explanation",
+      "uncertainty_notes": ["uncertainty or conflict", "uncertainty or conflict"],
+      "missing_information": ["what evidence is still missing", "what would change the view"],
+      "cited_sources": ["SOURCE_ID_1", "SOURCE_ID_2"],
       "bull_case": "strongest reason to buy",
       "bear_case": "strongest reason NOT to buy",
       "what_matters": "the one thing that actually matters for this stock right now",
-      "reasoning": "2-3 sentences with specific numbers and evidence"
+      "reasoning": "2-3 sentences with facts, mechanism, and uncertainty"
     }}
   ]
 }}
@@ -1698,6 +2363,7 @@ CRITICAL: Skip stocks with SECTOR:: prefix — those are index proxies, not trad
 Review every real stock in the top {ctx.get('shortlist_limit', AGENT_SHORTLIST_LIMIT)} shortlist. Use specific numbers from the metrics. Don't say "strong fundamentals" — say "P/E 8.2 on 42% margin with rising revenue."
 Use Nepal time only. Treat all session, market-hours, and date references as NPT unless the prompt explicitly says otherwise.
 REVIEW is forbidden in the final stock verdicts. Every real shortlisted stock must end as APPROVE, HOLD, or REJECT with conviction above 0.35.
+The Sources section is for machine-readable ids only. Never fabricate or guess a source id.
 """
 
     raw = _call_primary_agent(prompt)
@@ -1707,18 +2373,10 @@ REVIEW is forbidden in the final stock verdicts. Every real shortlisted stock mu
                 "context_date": ctx.get("session_date", ""),
                 "regime": ctx.get("regime", "unknown"),
                 "fresh_market": dict(ctx.get("fresh_market") or {})}
-    try:
-        text = raw
-        if "```" in text:
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-        start = text.find("{")
-        end = text.rfind("}") + 1
-        if start >= 0 and end > start:
-            parsed = json.loads(text[start:end])
-            analysis.update(parsed)
-    except (json.JSONDecodeError, IndexError):
+    parsed = _extract_agent_json_payload(raw)
+    if parsed:
+        analysis.update(parsed)
+    else:
         analysis["parse_error"] = True
 
     analysis = _merge_agent_output_with_shortlist(analysis, ctx)
@@ -1740,12 +2398,13 @@ def _vector_search_for_question(question: str) -> str:
         hours=720,
         top_k=5,
         min_similarity=0.45,
-        base_url=OSINT_BASE,
+        base_url=_agent_osint_base(),
     )
     for item in list(intel.get("story_items") or [])[:3]:
         results.append(
             f"  [story] [{item.get('source_name', ''):15s}] "
             f"{(item.get('published_at') or '')[:16]}  {_clip_text(item.get('title'), 150)}"
+            f"{'  ' + str(item.get('url') or '') if item.get('url') else ''}"
         )
     for item in list(intel.get("social_items") or [])[:2]:
         results.append(
@@ -1835,9 +2494,287 @@ def _question_focus_query(question: str) -> str:
     return text[:96].strip() or str(question or "").strip()[:96]
 
 
+def _expanded_political_query(question: str) -> str:
+    focus = _question_focus_query(question)
+    terms = [focus] if focus else []
+    text = str(question or "").lower()
+    political_expansions = [
+        "government",
+        "cabinet",
+        "parliament",
+        "coalition",
+        "prime minister",
+        "minister",
+        "resignation",
+        "protest",
+        "scandal",
+        "corruption",
+        "arrest",
+        "probe",
+        "policy decision",
+    ]
+    if "scandal" in text or "corruption" in text:
+        political_expansions.extend(["anti corruption", "investigation", "ciaa"])
+    if "government" in text or "cabinet" in text:
+        political_expansions.extend(["ordinance", "decision", "ministry"])
+    return " ".join(part for part in [*terms, *political_expansions] if part).strip()
+
+
+def _question_is_news_request(question: str) -> bool:
+    text = str(question or "").lower()
+    markers = (
+        "breaking news",
+        "latest news",
+        "recent news",
+        "top news",
+        "exact news",
+        "political news",
+        "politics news",
+        "headlines",
+        "headline",
+        "cite",
+        "cited",
+        "citation",
+        "source",
+        "sources",
+        "what is the news",
+        "what's the news",
+        "recent political development",
+        "political development",
+    )
+    return any(marker in text for marker in markers) or _question_is_political_news_request(question)
+
+
+def _question_is_political_news_request(question: str) -> bool:
+    text = str(question or "").lower()
+    markers = (
+        "political development",
+        "political news",
+        "politics",
+        "government",
+        "cabinet",
+        "parliament",
+        "prime minister",
+        "coalition",
+        "resignation",
+        "protest",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _question_requires_ranked_news_answer(question: str) -> bool:
+    text = str(question or "").lower()
+    if any(marker in text for marker in ("top news", "exact news", "top 5", "top five")):
+        return True
+    return bool(re.search(r"\b\d+\b\s+(?:top\s+)?news\b", text))
+
+
+def _requested_news_count(question: str, default: int = 5) -> int:
+    text = str(question or "").lower()
+    match = re.search(r"\btop\s+(\d+)\b", text) or re.search(r"\bgive me\s+(\d+)\b", text)
+    if match:
+        try:
+            return max(1, min(8, int(match.group(1))))
+        except ValueError:
+            pass
+    word_map = {
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+        "seven": 7,
+        "eight": 8,
+    }
+    for word, value in word_map.items():
+        if f"top {word}" in text or f"give me {word}" in text:
+            return value
+    return default
+
+
+def _news_relevance_score(item: dict, question: str) -> float:
+    text = _story_blob(item)
+    title = _story_title(item).lower()
+    category = str(item.get("category") or item.get("story_type") or "").lower()
+    question_text = str(question or "").lower()
+    score = 0.0
+
+    if _story_title(item):
+        score += 1.0
+    if _story_url(item):
+        score += 0.2
+
+    political_tokens = {
+        "politic", "government", "cabinet", "parliament", "prime minister",
+        "coalition", "ministry", "resignation", "protest", "election",
+        "minister", "ordinance", "opposition", "ruling party", "manifesto",
+        "policy decision", "corruption", "scandal", "probe", "investigation",
+        "arrest", "ciaa",
+    }
+    hard_political_tokens = {
+        "government", "cabinet", "parliament", "prime minister", "coalition",
+        "minister", "resignation", "protest", "corruption", "scandal",
+        "probe", "investigation", "arrest", "ciaa",
+    }
+    market_tokens = {
+        "nrb", "liquidity", "interest rate", "policy", "bank", "tax",
+        "budget", "regulation", "hydro", "nea", "power", "inflation",
+    }
+    market_recap_tokens = {
+        "nepse", "market", "share", "stock", "stocks", "index", "points", "trading",
+    }
+
+    if _question_is_political_news_request(question_text):
+        if any(token in text for token in political_tokens):
+            score += 2.5
+        else:
+            score -= 0.6
+        if any(token in title for token in hard_political_tokens):
+            score += 2.2
+        if any(token in category for token in ("politic", "government", "crime", "policy")):
+            score += 1.4
+        # Penalize market recap headlines that mention politics only indirectly.
+        if any(token in title for token in market_recap_tokens) and not any(token in title for token in hard_political_tokens):
+            score -= 2.8
+        if "nepse" in title and "government" not in title and "cabinet" not in title and "parliament" not in title:
+            score -= 1.6
+
+    if "nepse" in question_text or "market" in question_text or "open" in question_text:
+        if any(token in text for token in market_tokens):
+            score += 1.4
+
+    focus_query = _question_focus_query(question_text).lower()
+    for token in [part for part in focus_query.split() if len(part) >= 4][:6]:
+        if token in text:
+            score += 0.4
+
+    bias = abs(_osint_keyword_bias(text))
+    score += bias * 8.0
+
+    published_dt = _story_published_dt(item)
+    if published_dt is not None:
+        age_hours = max(0.0, (datetime.now(timezone.utc) - published_dt).total_seconds() / 3600.0)
+        if age_hours <= 12:
+            score += 1.2
+        elif age_hours <= 24:
+            score += 0.8
+        elif age_hours <= 48:
+            score += 0.4
+
+    return score
+
+
+def _rank_news_items_for_question(items: list[dict], question: str) -> list[dict]:
+    return sorted(
+        [dict(item or {}) for item in items if isinstance(item, dict) and (_story_title(item) or _story_url(item))],
+        key=lambda item: (_news_relevance_score(item, question), _story_time(item)),
+        reverse=True,
+    )
+
+
+def _story_has_direct_political_hit(item: dict) -> bool:
+    text = _story_blob(item)
+    return any(
+        token in text
+        for token in (
+            "politic", "government", "cabinet", "parliament", "prime minister",
+            "coalition", "resignation", "protest", "election",
+        )
+    )
+
+
+def _latest_news_context_for_question(question: str) -> dict:
+    if not _question_is_news_request(question):
+        return {"items": [], "context_text": ""}
+
+    base_url = _agent_osint_base()
+    items: list[dict] = []
+    seen_refs: set[tuple[str, str]] = set()
+    query = _expanded_political_query(question) if _question_is_political_news_request(question) else _question_focus_query(question)
+    date_window = _parse_news_date_window(question)
+
+    if _date_window_is_explicit(date_window):
+        start = date_window["start"].date().isoformat()
+        end = date_window["end"].date().isoformat()
+        history = consolidated_stories_history(
+            start_date=start,
+            end_date=end,
+            limit=100,
+            offset=0,
+            category="economic" if ("nepse" in str(question).lower() or "market" in str(question).lower()) else None,
+            base_url=base_url,
+            timeout=8,
+        )
+        for item in list(history.get("items") or [])[:100]:
+            ref = _story_ref(item)
+            if ref in seen_refs:
+                continue
+            seen_refs.add(ref)
+            items.append(dict(item or {}))
+
+    if query and len(query) >= 3:
+        unified = unified_search(query, limit=8, base_url=base_url, timeout=8)
+        categories = dict(unified.get("categories") or {})
+        for item in list(dict(categories.get("stories") or {}).get("items") or [])[:8]:
+            if not _story_in_date_window(item, date_window):
+                continue
+            ref = _story_ref(item)
+            if ref in seen_refs:
+                continue
+            seen_refs.add(ref)
+            items.append(dict(item or {}))
+
+        semantic = semantic_story_search(
+            query,
+            hours=int(date_window.get("hours") or 720),
+            top_k=10,
+            min_similarity=0.35,
+            base_url=base_url,
+            timeout=8,
+        )
+        for raw in list(semantic.get("results") or [])[:10]:
+            item = _normalize_semantic_story_item(dict(raw or {}))
+            if not _story_in_date_window(item, date_window):
+                continue
+            ref = _story_ref(item)
+            if ref in seen_refs:
+                continue
+            seen_refs.add(ref)
+            items.append(item)
+
+    if len(items) < 4:
+        for item in consolidated_stories(limit=8, base_url=base_url, timeout=8):
+            if not _story_in_date_window(item, date_window):
+                continue
+            ref = _story_ref(item)
+            if ref in seen_refs:
+                continue
+            seen_refs.add(ref)
+            items.append(dict(item or {}))
+            if len(items) >= 6:
+                break
+
+    if not items:
+        return {"items": [], "context_text": ""}
+
+    ranked_items = _rank_news_items_for_question(items, question)
+    lines = ["LATEST NEPALOSINT NEWS RESULTS:"]
+    if date_window.get("label"):
+        lines.append(f"  Date window: {date_window['label']}")
+    for item in ranked_items[:6]:
+        lines.append(f"  [story] {_format_citable_story(item)}")
+    return {
+        "items": ranked_items[:6],
+        "direct_political_hit": any(_story_has_direct_political_hit(item) for item in ranked_items[:6]),
+        "date_window": {"label": date_window.get("label") or "", "hours": int(date_window.get("hours") or 720)},
+        "context_text": "\n".join(lines) + "\n",
+    }
+
+
 def _event_market_context(question: str) -> dict:
     query = _question_focus_query(question)
-    unified = unified_search(query or question, limit=8, base_url=OSINT_BASE, timeout=8)
+    unified = unified_search(query or question, limit=8, base_url=_agent_osint_base(), timeout=8)
     categories = dict(unified.get("categories") or {})
     stories = list(dict(categories.get("stories") or {}).get("items") or [])
     social = list(dict(categories.get("social_signals") or {}).get("items") or [])
@@ -1894,6 +2831,94 @@ def _response_is_hedged_market_call(response: str) -> bool:
         "if the release is perceived",
     )
     return any(token in text for token in hedges)
+
+
+def _response_lacks_news_citations(response: str) -> bool:
+    text = " ".join(str(response or "").split()).lower()
+    if not text:
+        return True
+    if "http://" in text or "https://" in text:
+        return False
+    weak_markers = (
+        "no breaking news cited",
+        "no breaking news",
+        "no cited news",
+        "current data",
+        "purely technical",
+    )
+    return any(marker in text for marker in weak_markers)
+
+
+def _build_news_digest_answer(question: str, news_ctx: dict) -> str:
+    items = list(news_ctx.get("items") or [])
+    if not items:
+        return "I do not have any current NepalOSINT story hits I can cite from the retrieved feed right now, so I will not invent headlines."
+
+    cited = []
+    for item in items[:4]:
+        cited.append(_format_citable_story(item))
+
+    intro = "Latest NepalOSINT headlines:"
+    if "breaking" in str(question or "").lower():
+        intro = "Latest NepalOSINT breaking headlines:"
+    return f"{intro} " + "; ".join(cited) + "."
+
+
+def _story_market_impact_summary(item: dict) -> str:
+    text = _story_blob(item)
+    bias = _osint_keyword_bias(text)
+    if any(token in text for token in ("protest", "violence", "arrest", "coalition", "resignation", "politic")):
+        driver = "political risk usually moves broad NEPSE sentiment quickly"
+    elif any(token in text for token in ("nrb", "liquidity", "interest rate", "bank", "lending", "deposit")):
+        driver = "banks are index-heavy and liquidity headlines move the open"
+    elif any(token in text for token in ("cabinet", "government", "policy", "budget", "tax", "regulation")):
+        driver = "policy headlines reprice sector sentiment at the open"
+    elif any(token in text for token in ("hydro", "nea", "power")):
+        driver = "hydro names are highly policy-sensitive on NEPSE"
+    else:
+        driver = "it can shift opening risk appetite if traders treat it as macro-relevant"
+
+    if bias >= 0.04:
+        return f"likely positive for NEPSE because {driver}"
+    if bias <= -0.04:
+        return f"likely negative for NEPSE because {driver}"
+    return f"market-relevant but direction depends on follow-through because {driver}"
+
+
+def _build_ranked_news_answer(question: str, news_ctx: dict, nepal_clock: dict) -> str:
+    items = list(news_ctx.get("items") or [])
+    if not items:
+        return "I do not have any current NepalOSINT story hits I can cite from the retrieved feed right now, so I will not invent headlines."
+
+    count = min(len(items), _requested_news_count(question, default=5 if _question_requires_ranked_news_answer(question) else 3))
+    selected = items[:count]
+    lines: list[str] = []
+    date_label = str(dict(news_ctx.get("date_window") or {}).get("label") or "").strip()
+
+    if _question_is_political_news_request(question):
+        if news_ctx.get("direct_political_hit"):
+            lead = selected[0]
+            lines.append(
+                f"Most relevant political development: {_clip_text(_story_title(lead), 150)} [1]. "
+                f"NEPSE read-through: {_story_market_impact_summary(lead)}."
+            )
+        else:
+            lines.append(
+                "I do not see a direct political headline in the retrieved NepalOSINT feed right now. "
+                f"The market-moving items to watch before the next {nepal_clock.get('market_phase', 'NEPSE')} session are:"
+            )
+    else:
+        lines.append(f"Top {count} NepalOSINT items most likely to matter for the next NEPSE open:")
+    if date_label:
+        lines.append(f"Date window: {date_label}.")
+
+    for idx, item in enumerate(selected, start=1):
+        title = _clip_text(_story_title(item), 150)
+        lines.append(f"{idx}. {title} [{idx}] — {_story_market_impact_summary(item)}.")
+    lines.append("Sources:")
+    for idx, item in enumerate(selected, start=1):
+        lines.append(f"- {_format_story_source_ref(item, idx)}")
+    return "\n".join(lines)
 
 
 def _build_directional_market_answer(question: str, analysis: dict, nepal_clock: dict, event_ctx: dict) -> str:
@@ -1960,6 +2985,7 @@ def ask(question: str) -> str:
     """Ask the agent a follow-up question with full context injection."""
     question = _clip_text(question, 900)
     directional_market_call = _question_is_directional_market_call(question)
+    news_request = _question_is_news_request(question)
 
     # Load latest analysis
     ctx_text = ""
@@ -2008,8 +3034,14 @@ Stock verdicts:
 
     # Vector search for relevant OSINT context
     vector_ctx = _vector_search_for_question(question)
+    news_ctx = _latest_news_context_for_question(question)
+    latest_news_ctx = str(news_ctx.get("context_text") or "")
     event_ctx = _event_market_context(question) if directional_market_call else {}
     event_osint_ctx = str(event_ctx.get("context_text") or "")
+
+    deterministic_news_response = None
+    if news_request and (_question_requires_ranked_news_answer(question) or _question_is_political_news_request(question)):
+        deterministic_news_response = _build_ranked_news_answer(question, news_ctx, nepal_clock)
 
     macro_ctx = _format_macro_context(_fetch_macro_market_context(), max_fx=4, max_commodities=3, max_energy=2)
 
@@ -2053,16 +3085,29 @@ Stock verdicts:
 {portfolio_ctx}
 {stock_ctx}
 {vector_ctx}
+{latest_news_ctx}
 {event_osint_ctx}
+{_analyst_pattern_taxonomy_text()}
 {macro_ctx}
 {history_text}
 User question: {question}
 
 IMPORTANT:
-- Keep your answer SHORT — 2-4 sentences max.
+- Keep your answer concise.
+- For simple status questions, reply in 2-4 sentences max.
+- For stock, sector, market-impact, or cited-news analysis questions, you may use compact labeled lines:
+  Summary:
+  Key facts:
+  Translation notes:
+  Why it matters:
+  Mechanism:
+  Pattern match:
+  Likely relevance:
+  Risks or counterpoints:
+  Confidence:
+  Missing information:
+  Sources:
 - Be direct and conversational, like a quick terminal chat reply.
-- No headers, no bullet lists, no markdown formatting. Just plain text.
-- If you must list things, use commas inline.
 - Use specific numbers from the financial data, latest analysis, and vector search when relevant.
 - If asked about a stock, reference its valuation, margins, growth, or news — don't give a generic answer.
 - Use Nepal time only when talking about timing, session status, market hours, or "today".
@@ -2072,12 +3117,24 @@ IMPORTANT:
 - If a stock is not held, do not recommend HOLD; the stance should resolve to BUY or PASS/AVOID.
 - For political, policy, or NEPSE reaction questions, you must take a base-case directional stance: upward pressure, downward pressure, or flat-to-upward/downward bias.
 - Do not answer with "it could go either way", "depends entirely", or similar hedging for those event-driven market questions.
+- If the user asks for breaking news, headlines, citations, or sources, answer from the NepalOSINT stories in the prompt and cite each item inline with source, timestamp, and URL.
+- If the user explicitly asks for cited news, you may list 3-6 cited headlines in one compact paragraph instead of the normal 2-4 sentence cap.
+- Separate observed facts from inference. If you make a factual news claim, cite the source inline. If evidence is missing or conflicting, say so explicitly.
+- If the prompt evidence is Nepali or mixed-language, translate it into clean English and note any financially material nuance when relevant.
+- If the news fits a repeated pattern from ANALYST PATTERN TAXONOMY, you may name that pattern briefly.
+- If you say something is positive or negative, explain why it matters for the stock, sector, or market.
 - If OSINT evidence is thin, still give the most likely direction and say what would invalidate that call.
+- When source ids are present, each bullet under Key facts should cite the supporting id instead of relying on an uncited paragraph.
 - If evidence is missing, say it is missing rather than inventing facts."""
 
-    response = _call_primary_agent(prompt, max_tokens=DEFAULT_AGENT_CHAT_MAX_TOKENS)
-    if directional_market_call and _response_is_hedged_market_call(response):
-        response = _build_directional_market_answer(question, analysis, nepal_clock, event_ctx)
+    if deterministic_news_response is not None:
+        response = deterministic_news_response
+    else:
+        response = _call_primary_agent(prompt, max_tokens=DEFAULT_AGENT_CHAT_MAX_TOKENS)
+        if news_request and not directional_market_call and _response_lacks_news_citations(response):
+            response = _build_news_digest_answer(question, news_ctx)
+        if directional_market_call and _response_is_hedged_market_call(response):
+            response = _build_directional_market_answer(question, analysis, nepal_clock, event_ctx)
 
     if str(os.environ.get("NEPSE_AGENT_DISABLE_HISTORY", "0") or "0").strip().lower() not in {"1", "true", "yes", "on"}:
         history = _load_combined_chat_history()

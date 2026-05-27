@@ -469,10 +469,45 @@ def get_nrb_policy_regime(
         return no_data_result
 
 
+def get_gold_macro_regime(
+    db_path: str = DEFAULT_DB_PATH,
+    as_of_date: Optional[str] = None,
+) -> Dict:
+    """
+    Get the current gold price macro regime for use as a confidence multiplier.
+
+    This wraps ``backend.quant_pro.gold_hedge.get_gold_regime()`` and returns
+    the same structure as ``get_remittance_regime()`` / ``get_nrb_policy_regime()``
+    for consistent usage in signal pipelines.
+
+    Regime rules:
+        risk_off : gold 20d return > +3%  → equity confidence × 0.85
+        neutral  : gold within [-2%, +3%] → no adjustment
+        risk_on  : gold 20d return < -2%  → equity confidence × 1.05
+
+    Returns dict with keys: regime, momentum_20d, gold_price_usd,
+        regime_description, multiplier.
+    """
+    try:
+        from backend.quant_pro.gold_hedge import get_gold_regime
+        ref_date = as_of_date or datetime.now().strftime("%Y-%m-%d")
+        return get_gold_regime(db_path=db_path, as_of_date=ref_date)
+    except Exception as e:
+        logger.warning("get_gold_macro_regime failed: %s", e)
+        return {
+            "regime": "no_data",
+            "momentum_20d": 0.0,
+            "gold_price_usd": 0.0,
+            "regime_description": "Gold data unavailable",
+            "multiplier": 1.0,
+        }
+
+
 __all__ = [
     "get_remittance_regime",
     "get_remittance_trend",
     "generate_remittance_signals_at_date",
     "REMITTANCE_BENEFICIARY_TICKERS",
     "get_nrb_policy_regime",
+    "get_gold_macro_regime",
 ]

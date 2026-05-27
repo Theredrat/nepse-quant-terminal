@@ -40,27 +40,39 @@ def _growth_ratio(current: Optional[float], previous: Optional[float]) -> Option
     return (current - previous) / abs(previous)
 
 
+def _normalize_timestamp(raw: object) -> Optional[pd.Timestamp]:
+    if pd.isna(raw) or raw in ("", None):
+        return None
+    try:
+        ts = pd.Timestamp(raw)
+    except Exception:
+        return None
+    if ts.tzinfo is not None:
+        ts = ts.tz_convert(None) if hasattr(ts, "tz_convert") else ts.tz_localize(None)
+    return ts.tz_localize(None) if getattr(ts, "tzinfo", None) is not None else ts
+
+
+def _datetime64_ns(series: pd.Series) -> pd.Series:
+    """Normalize pandas 3 timestamp inference back to nanosecond precision."""
+    parsed = pd.to_datetime(series, errors="coerce")
+    return pd.Series(parsed.to_numpy(dtype="datetime64[ns]"), index=series.index)
+
+
 def _effective_announcement_date(row: pd.Series) -> Optional[pd.Timestamp]:
     raw = row.get("announcement_date")
-    if pd.notna(raw) and raw:
-        try:
-            return pd.Timestamp(raw)
-        except Exception:
-            pass
+    ts = _normalize_timestamp(raw)
+    if ts is not None:
+        return ts
 
     raw = row.get("report_date")
-    if pd.notna(raw) and raw:
-        try:
-            return pd.Timestamp(raw) + pd.Timedelta(days=30)
-        except Exception:
-            pass
+    ts = _normalize_timestamp(raw)
+    if ts is not None:
+        return ts + pd.Timedelta(days=30)
 
     raw = row.get("scraped_at_utc")
-    if pd.notna(raw) and raw:
-        try:
-            return pd.Timestamp(raw)
-        except Exception:
-            pass
+    ts = _normalize_timestamp(raw)
+    if ts is not None:
+        return ts
     return None
 
 
@@ -92,6 +104,7 @@ class QuarterlyFundamentalModel:
         quarterly = quarterly_earnings.copy() if quarterly_earnings is not None else pd.DataFrame()
         if not quarterly.empty:
             quarterly["effective_announcement_date"] = quarterly.apply(_effective_announcement_date, axis=1)
+            quarterly["effective_announcement_date"] = _datetime64_ns(quarterly["effective_announcement_date"])
             quarterly = quarterly[quarterly["effective_announcement_date"].notna()].copy()
             quarterly["quarter"] = pd.to_numeric(quarterly["quarter"], errors="coerce")
             quarterly = quarterly.sort_values(
@@ -100,7 +113,7 @@ class QuarterlyFundamentalModel:
 
         fund = fundamentals.copy() if fundamentals is not None else pd.DataFrame()
         if not fund.empty and "date" in fund.columns:
-            fund["date"] = pd.to_datetime(fund["date"], errors="coerce")
+            fund["date"] = _datetime64_ns(fund["date"])
             fund = fund[fund["date"].notna()].copy()
             fund = fund.sort_values(["symbol", "date"])
 

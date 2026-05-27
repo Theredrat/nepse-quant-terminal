@@ -1,4 +1,4 @@
-"""Portfolio construction module: HRP, CVaR, and shrinkage estimators.
+"""Portfolio construction module: HRP, CVaR, shrinkage, and gold/silver hedge overlay.
 
 Uses skfolio for Hierarchical Risk Parity and CVaR optimization.
 Replaces equal-weight allocation when PORTFOLIO_METHOD != 'equal_weight'.
@@ -7,10 +7,23 @@ Models implemented:
     6. HRP (Hierarchical Risk Parity) - Lopez de Prado 2016
     7. NL Shrinkage - Ledoit-Wolf via skfolio EmpiricalPrior
     8. CVaR Optimization - Rockafellar & Uryasev 2000
+    9. Gold/Silver Hedge Overlay - Ederington (1979) rolling MVHR
+
+Hedge overlay:
+    When `gold_hedge_db_path` is provided to `allocate_portfolio()`, the module
+    computes a Minimum Variance Hedge Ratio (h*) against gold prices and
+    withholds a proportional cash buffer from equity deployment.
+
+    Since NEPSE has no gold ETF, the hedge is implemented as a cash reserve:
+    capital × h* (capped at 20%) is held back, reducing NEPSE equity exposure
+    during risk-off regimes (gold rising > 3% over 20 days).
+
+    The returned dict includes a "_GOLD_HEDGE" entry with the withheld amount.
 
 Usage:
     from backend.quant_pro.portfolio_construction import allocate_portfolio
 
+    # Standard (no hedge)
     alloc = allocate_portfolio(
         method="hrp",
         prices_df=prices_df,
@@ -18,12 +31,23 @@ Usage:
         date=datetime(2025, 6, 1),
         capital=1_000_000.0,
     )
-    # alloc = {"NABIL": 400_000, "GBIME": 350_000, "PCBL": 250_000}
+
+    # With gold hedge overlay
+    alloc = allocate_portfolio(
+        method="hrp",
+        prices_df=prices_df,
+        symbols=["NABIL", "GBIME", "PCBL"],
+        date=datetime(2025, 6, 1),
+        capital=1_000_000.0,
+        gold_hedge_db_path="data/nepse_market_data.db",
+    )
+    # alloc["_GOLD_HEDGE"] → hedge buffer in NPR (cash reserve)
+    # alloc["_HEDGE_RESULT"] → HedgeResult object (for display/logging)
 """
 
 import logging
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -46,10 +70,16 @@ def _extract_return_matrix(
     Returns None if any symbol has insufficient history (< lookback rows)
     or if the resulting matrix contains NaN/Inf values.
     """
+    # Normalise date to string (prices_df["date"] is stored as TEXT)
+    if isinstance(date, datetime):
+        date_str = date.strftime("%Y-%m-%d")
+    else:
+        date_str = str(date)[:10]
+
     returns_dict: Dict[str, np.ndarray] = {}
     for sym in symbols:
         sym_data = prices_df[
-            (prices_df["symbol"] == sym) & (prices_df["date"] <= date)
+            (prices_df["symbol"] == sym) & (prices_df["date"] <= date_str)
         ].sort_values("date").tail(lookback + 1)
 
         if len(sym_data) < lookback + 1:
@@ -356,8 +386,10 @@ def allocate_portfolio(
     max_weight: float = 0.30,
     alpha: float = 0.05,
     hrp_cvar_blend: float = 0.6,
-) -> Dict[str, float]:
-    """Unified allocation dispatcher.
+    gold_hedge_db_path: Optional[str] = None,
+    gold_hedge_kwargs: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Unified allocation dispatcher with optional gold/silver hedge overlay.
 
     Parameters
     ----------
@@ -382,12 +414,27 @@ def allocate_portfolio(
         CVaR tail probability.
     hrp_cvar_blend : float
         HRP weight in the blended HRP+CVaR method (default 0.6 = 60% HRP).
+    gold_hedge_db_path : str, optional
+        Path to nepse_market_data.db with gold/silver data ingested.
+        When provided, activates the gold/silver hedge overlay:
+            - Computes rolling MVHR (Ederington 1979) vs XAU/USD
+            - In risk-off regimes, withholds hedge_pct × capital as cash buffer
+            - Returns ``"_GOLD_HEDGE"`` key with withheld NPR amount
+            - Returns ``"_HEDGE_RESULT"`` key with full HedgeResult object
+        When None (default), no hedge computation is performed.
+    gold_hedge_kwargs : dict, optional
+        Extra kwargs forwarded to GoldSilverHedgeOverlay.__init__().
+        E.g.: {"max_hedge_pct": 0.15, "risk_off_threshold": 0.025}
 
     Returns
     -------
-    dict[str, float]
+    dict[str, float | HedgeResult]
         symbol -> allocated capital (NPR).
+        "_GOLD_HEDGE" -> hedge buffer NPR (only when gold_hedge_db_path provided).
+        "_HEDGE_RESULT" -> HedgeResult object (only when gold_hedge_db_path provided).
     """
+    from backend.quant_pro.gold_hedge import GoldSilverHedgeOverlay
+
     # Defensive: deduplicate and validate
     symbols = list(dict.fromkeys(symbols))  # preserve order, remove dups
     if not symbols:
@@ -397,40 +444,75 @@ def allocate_portfolio(
 
     method = method.lower().strip()
 
+    # ---- Gold/Silver Hedge Overlay -----------------------------------------
+    # Compute BEFORE equity allocation so we use reduced deployable_capital.
+    hedge_result = None
+    deployable = capital
+
+    if gold_hedge_db_path is not None:
+        try:
+            overlay = GoldSilverHedgeOverlay(**(gold_hedge_kwargs or {}))
+            hedge_result = overlay.compute(
+                prices_df=prices_df,
+                symbols=symbols,
+                date=date,
+                capital=capital,
+                db_path=gold_hedge_db_path,
+            )
+            deployable = hedge_result.deployable_capital
+            if hedge_result.apply_hedge:
+                logger.info(
+                    "Gold hedge active: %.1f%% withheld (h*=%.3f, HE=%.1f%%, regime=%s)",
+                    hedge_result.hedge_pct * 100,
+                    hedge_result.h_star,
+                    hedge_result.hedge_effectiveness * 100,
+                    hedge_result.gold_regime,
+                )
+        except Exception as e:
+            logger.warning("Gold hedge overlay failed (%s), proceeding without hedge", e)
+            deployable = capital
+
+    # ---- Equity Allocation (on deployable_capital) -------------------------
     if method == "hrp":
-        return HRPAllocator(
+        alloc = HRPAllocator(
             lookback=lookback, risk_measure=risk_measure
-        ).allocate(prices_df, symbols, date, capital)
+        ).allocate(prices_df, symbols, date, deployable)
 
     elif method == "cvar":
-        return CVaROptimizer(
+        alloc = CVaROptimizer(
             alpha=alpha, max_weight=max_weight, lookback=lookback
-        ).optimize(prices_df, symbols, date, capital)
+        ).optimize(prices_df, symbols, date, deployable)
 
     elif method == "shrinkage_hrp":
-        return ShrinkageHRPAllocator(
+        alloc = ShrinkageHRPAllocator(
             lookback=lookback, risk_measure=risk_measure
-        ).allocate(prices_df, symbols, date, capital)
+        ).allocate(prices_df, symbols, date, deployable)
 
     elif method == "hrp_cvar":
         # Blend: hrp_cvar_blend * HRP + (1 - hrp_cvar_blend) * CVaR
         hrp_alloc = HRPAllocator(
             lookback=lookback, risk_measure=risk_measure
-        ).allocate(prices_df, symbols, date, capital)
+        ).allocate(prices_df, symbols, date, deployable)
         cvar_alloc = CVaROptimizer(
             alpha=alpha, max_weight=max_weight, lookback=lookback
-        ).optimize(prices_df, symbols, date, capital)
+        ).optimize(prices_df, symbols, date, deployable)
 
-        blended: Dict[str, float] = {}
+        alloc = {}
         for sym in symbols:
             h = hrp_alloc.get(sym, 0.0)
             c = cvar_alloc.get(sym, 0.0)
-            blended[sym] = hrp_cvar_blend * h + (1 - hrp_cvar_blend) * c
-        return blended
+            alloc[sym] = hrp_cvar_blend * h + (1 - hrp_cvar_blend) * c
 
     else:
         # equal_weight (default)
-        return _equal_weight(symbols, capital)
+        alloc = _equal_weight(symbols, deployable)
+
+    # ---- Attach hedge metadata to result -----------------------------------
+    if hedge_result is not None:
+        alloc["_GOLD_HEDGE"] = hedge_result.hedge_capital
+        alloc["_HEDGE_RESULT"] = hedge_result  # type: ignore[assignment]
+
+    return alloc
 
 
 __all__ = [
@@ -438,4 +520,16 @@ __all__ = [
     "CVaROptimizer",
     "ShrinkageHRPAllocator",
     "allocate_portfolio",
+    # Gold hedge — imported from gold_hedge.py but re-exported for convenience
+    "GoldSilverHedgeOverlay",
+    "HedgeResult",
+    "get_gold_regime",
 ]
+
+
+def __getattr__(name: str):
+    """Lazy re-export of gold hedge symbols."""
+    if name in ("GoldSilverHedgeOverlay", "HedgeResult", "get_gold_regime"):
+        from backend.quant_pro import gold_hedge as _gh
+        return getattr(_gh, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

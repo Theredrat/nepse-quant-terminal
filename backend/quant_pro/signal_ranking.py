@@ -2,10 +2,65 @@
 
 from __future__ import annotations
 
+import os
 from collections import defaultdict
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from .event_layer import EventAdjustmentContext
+
+SYMBOL_ALIASES: Dict[str, str] = {
+    "RHPC": "RIDI",
+}
+
+DEFAULT_BLOCKED_SIGNAL_SYMBOLS = frozenset({"KRBL", "UIC"})
+DEFAULT_PROMOTER_SHARE_SYMBOLS = frozenset(
+    {
+        "CYCLP",
+        "GBIMEP",
+        "HEIP",
+        "HIDCLP",
+        "NABILP",
+        "PROFLP",
+        "SRLIP",
+    }
+)
+BLOCKED_SYMBOLS_ENV = "NEPSE_BLOCKED_SYMBOLS"
+
+
+def canonicalize_signal_symbol(symbol: Any) -> str:
+    token = str(symbol or "").strip().upper()
+    if not token:
+        return ""
+    return SYMBOL_ALIASES.get(token, token)
+
+
+def blocked_signal_symbols() -> set[str]:
+    symbols = set(DEFAULT_BLOCKED_SIGNAL_SYMBOLS)
+    raw = str(os.environ.get(BLOCKED_SYMBOLS_ENV, "") or "")
+    for token in raw.replace(";", ",").split(","):
+        symbol = canonicalize_signal_symbol(token)
+        if symbol:
+            symbols.add(symbol)
+    return symbols
+
+
+def blocked_signal_symbol_reason(symbol: Any) -> Optional[str]:
+    token = canonicalize_signal_symbol(symbol)
+    if not token:
+        return "empty_symbol"
+    if token == "NEPSE":
+        return "market_index_not_tradeable"
+    if token.startswith("SECTOR::"):
+        return "sector_index_not_tradeable"
+    if token in blocked_signal_symbols():
+        return "suspended_or_non_tradeable_symbol"
+    if token.endswith("PO") or token in DEFAULT_PROMOTER_SHARE_SYMBOLS:
+        return "promoter_share_not_tradeable"
+    return None
+
+
+def is_tradeable_signal_symbol(symbol: Any) -> bool:
+    return blocked_signal_symbol_reason(symbol) is None
 
 
 def _base_signal_score(signal: Dict[str, Any]) -> float:
@@ -16,7 +71,7 @@ def _coerce_signal(signal: Dict[str, Any]) -> Dict[str, Any]:
     strength = float(signal.get("strength", 0.0) or 0.0)
     confidence = float(signal.get("confidence", 0.0) or 0.0)
     return {
-        "symbol": str(signal.get("symbol") or "").strip().upper(),
+        "symbol": canonicalize_signal_symbol(signal.get("symbol")),
         "signal_type": str(signal.get("signal_type") or "unknown").strip() or "unknown",
         "strength": strength,
         "confidence": confidence,
@@ -46,7 +101,7 @@ def merge_signal_candidates(signals: Iterable[Dict[str, Any]]) -> List[Dict[str,
     grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for raw in signals:
         signal = _coerce_signal(raw)
-        if not signal["symbol"]:
+        if not is_tradeable_signal_symbol(signal["symbol"]):
             continue
         grouped[signal["symbol"]].append(signal)
 
@@ -95,7 +150,7 @@ def rank_signal_candidates(
     sector_lookup: Optional[Callable[[str], Optional[str]]] = None,
     event_context: Optional[EventAdjustmentContext] = None,
 ) -> List[Dict[str, Any]]:
-    held = {str(symbol).strip().upper() for symbol in (held_symbols or []) if str(symbol).strip()}
+    held = {canonicalize_signal_symbol(symbol) for symbol in (held_symbols or []) if str(symbol).strip()}
     exposure = {str(k).strip().upper(): float(v) for k, v in (sector_exposure or {}).items()}
     lookup = sector_lookup or (lambda _symbol: None)
     context = event_context or EventAdjustmentContext()
