@@ -5295,16 +5295,29 @@ class NepseDashboard(App):
         self.call_from_thread(self._set_signals_table_loading, strategy_name)
         self.call_from_thread(self._set_status, f"Loading signals for {strategy_name}...")
         try:
-            from backend.backtesting.simple_backtest import load_all_prices
-            from backend.trading.live_trader import generate_signals
-            conn = _db()
-            prices_df = load_all_prices(conn)
-            conn.close()
-            sigs, _regime = generate_signals(
-                prices_df,
-                signal_types,
-                use_regime_filter=use_regime_filter,
-            )
+            import json as _json, os as _os
+            from datetime import datetime as _dt
+            _cache_file = f"signals_cache_{_dt.now().strftime('%Y-%m-%d')}.json"
+            _market_open = 11 <= _dt.now().hour < 15
+            if not _market_open and _os.path.exists(_cache_file):
+                _cached = _json.loads(open(_cache_file, encoding="utf-8").read())
+                sigs = _cached.get("sigs", [])
+                _regime = _cached.get("regime", "unknown")
+            else:
+                from backend.backtesting.simple_backtest import load_all_prices
+                from backend.trading.live_trader import generate_signals
+                conn = _db()
+                prices_df = load_all_prices(conn)
+                conn.close()
+                sigs, _regime = generate_signals(
+                    prices_df,
+                    signal_types,
+                    use_regime_filter=use_regime_filter,
+                )
+                try:
+                    open(_cache_file, "w", encoding="utf-8").write(_json.dumps({"sigs": sigs, "regime": str(_regime)}))
+                except:
+                    pass
             min_score = float(getattr(self, "_signal_min_score", 0.0))
             if min_score > 0:
                 sigs = [s for s in sigs if float(s.get("score") or 0.0) >= min_score]
