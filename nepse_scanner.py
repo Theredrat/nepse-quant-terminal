@@ -2008,6 +2008,46 @@ def analyze_corr():
     console.print("  [yellow]🟡 Yellow 0.60-0.85[/yellow] — Move together usually  → Partial diversification, acceptable")
     console.print("  [green]🟢 Green < 0.60[/green]  — Move independently    → Best diversification, hold both")
     console.print()
+    # Build recommendations from correlation data
+    console.print("  [bold white]Sector Pair Recommendations:[/bold white]")
+    pairs_red = []
+    pairs_yellow = []
+    pairs_green = []
+    # Normalize correlation matrix sector names
+    norm_map = {'Hotels And Tourism': 'Hotel & Tourism', 'Hydro Power': 'Hydropower', 'Manufacturing And Processing': 'Manufacturing & Processing', 'Non Life Insurance': 'Non-Life Insurance'}
+    corr.index = [norm_map.get(s, s) for s in corr.index]
+    corr.columns = [norm_map.get(s, s) for s in corr.columns]
+    sec_list2 = list(corr.columns)
+    for i in range(len(sec_list2)):
+        for j in range(i+1, len(sec_list2)):
+            a, b = sec_list2[i], sec_list2[j]
+            v = corr.loc[a, b]
+            if v != v:
+                continue
+            pair = f"{a} + {b}"
+            if v >= 0.85:
+                pairs_red.append((v, pair))
+            elif v >= 0.60:
+                pairs_yellow.append((v, pair))
+            else:
+                pairs_green.append((v, pair))
+    pairs_red.sort()
+    pairs_yellow.sort()
+    pairs_green.sort(reverse=True)
+    if pairs_green:
+        console.print("  [green]✅ Best pairs to hold together (independent):[/green]")
+        for v, p in pairs_green[:5]:
+            console.print(f"     {p}  ({v:.2f})")
+    else:
+        console.print("  [yellow]⚠️  No green pairs in NEPSE — all sectors are correlated[/yellow]")
+        console.print("  [yellow]   Best available pairs (lowest correlation):[/yellow]")
+        for v, p in pairs_yellow[:5]:
+            console.print(f"     [green]{p}  ({v:.2f})[/green]")
+    console.print()
+    console.print("  [red]❌ Avoid holding together (move in sync):[/red]")
+    for v, p in sorted(pairs_red, reverse=True)[:5]:
+        console.print(f"     [red]{p}  ({v:.2f})[/red]")
+    console.print()
 def analyze_size(symbol, capital):
     """--size SYM AMOUNT — volatility-adjusted position sizing."""
     import sqlite3, math
