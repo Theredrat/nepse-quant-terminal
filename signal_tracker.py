@@ -54,6 +54,42 @@ def get_entry_price(symbol, live_prices):
         return price
     return get_current_price(symbol) or 0
 
+
+def log_signals_raw(signals: list):
+    """Log signals from TUI - accepts list of dicts"""
+    if not signals:
+        return
+    log = load_log()
+    today = datetime.now().strftime("%Y-%m-%d")
+    new_count = 0
+    for s in signals:
+        sym = str(s.get("symbol") or "")
+        sig = str(s.get("signal") or "")
+        ltp = float(s.get("ltp") or 0)
+        reason = str(s.get("reason") or "")
+        score = float(s.get("score") or 0)
+        if not sym:
+            continue
+        key = f"{today}_{sym}_{sig}"
+        if key in log:
+            continue
+        log[key] = {
+            "symbol": sym,
+            "signal": sig,
+            "entry_price": ltp,
+            "score": score,
+            "reason": reason,
+            "date": today,
+            "result": None,
+            "exit_price": None,
+            "pct_change": None,
+        }
+        new_count += 1
+    if new_count:
+        save_log(log)
+        print(f"[signal_tracker] Logged {new_count} new signals.")
+
+
 def log_signals(candidates):
     """Call this after run_signals() to record signals"""
     if candidates is None or candidates.empty:
