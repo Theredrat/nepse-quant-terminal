@@ -24,49 +24,35 @@ def save_log(data):
 
 def get_current_price(symbol):
     try:
-        url = f"https://nepalstock.com.np/api/nots/security/{symbol}"
+        url = f'https://nepalstock.com.np/api/nots/security/{symbol}'
         r = requests.get(url, timeout=10)
         data = r.json()
-        return float(data.get("securityDailyTradeDto", {}).get("closingPrice", 0))
+        price = float(data.get('securityDailyTradeDto', {}).get('closingPrice', 0))
+        if price > 0:
+            return price
     except:
-        return None
+        pass
+    try:
+        import sqlite3
+        conn = sqlite3.connect('nepse_market_data')
+        for table in ['daily_prices', 'ohlcv', 'prices']:
+            try:
+                row = conn.execute(f'SELECT close FROM {table} WHERE symbol=? ORDER BY date DESC LIMIT 1', (symbol,)).fetchone()
+                if row and row[0]:
+                    conn.close()
+                    return float(row[0])
+            except:
+                continue
+        conn.close()
+    except:
+        pass
+    return None
 
-def log_signals_raw(signals: list):
-    """Log signals from TUI (list of dicts with symbol, signal, ltp, score)"""
-    if not signals:
-        return
-    log = load_log()
-    today = datetime.now().strftime("%Y-%m-%d")
-    new_count = 0
-    for s in signals:
-        sym = s.get("symbol", "")
-        sig = s.get("signal", "unknown")
-        ltp = float(s.get("ltp", 0))
-        if not sym or not ltp:
-            continue
-        already = any(
-            e["symbol"] == sym and e["signal"] == sig and e["date"] == today
-            for e in log
-        )
-        if not already:
-            log.append({
-                "symbol": sym,
-                "signal": sig,
-                "date": today,
-                "entry_price": ltp,
-                "score": float(s.get("score", 0)),
-                "reason": s.get("reason", ""),
-                "result_3d": None,
-                "result_5d": None,
-                "result_10d": None,
-                "checked_3d": False,
-                "checked_5d": False,
-                "checked_10d": False,
-            })
-            new_count += 1
-    save_log(log)
-    if new_count:
-        console.print(f"  [dim]📝 TUI logged {new_count} new signals[/dim]")
+def get_entry_price(symbol, live_prices):
+    price = live_prices.get(symbol, 0)
+    if price > 0:
+        return price
+    return get_current_price(symbol) or 0
 
 def log_signals(candidates):
     """Call this after run_signals() to record signals"""

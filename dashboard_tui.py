@@ -5334,10 +5334,11 @@ class NepseDashboard(App):
             try:
                 from signal_tracker import log_signals_raw
                 live_prices = {r.get("symbol",""):float(r.get("ltp",0)) for r in (self.md.live or [])}
+                from signal_tracker import get_entry_price
                 log_signals_raw([{
                     "symbol": str(s.get("symbol") or ""),
                     "signal": str(s.get("signal_type") or "unknown"),
-                    "ltp": live_prices.get(str(s.get("symbol") or ""), 0),
+                    "ltp": get_entry_price(str(s.get("symbol") or ""), live_prices),
                     "score": float(s.get("score") or 0),
                     "reason": str(s.get("reasoning") or s.get("signal_type") or ""),
                 } for s in sigs if s.get("symbol")])
