@@ -2269,6 +2269,12 @@ def main():
                 candidates = run_signals(live_df, args.signals)
             print_signals_table(candidates, args.top)
             console.print()
+            # Auto-log signals for performance tracking
+            try:
+                from signal_tracker import log_signals
+                log_signals(candidates)
+            except Exception as e:
+                pass
 
     if args.report:
         save_daily_report(summary, live_df, candidates, power_sell_results)
