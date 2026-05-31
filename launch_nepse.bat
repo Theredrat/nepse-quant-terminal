@@ -1,7 +1,23 @@
 @echo off
+set PYTHONIOENCODING=utf-8
+set PYTHONUTF8=1
 chcp 437 >nul
 cd /d "C:\Users\HP User\nepse-quant-terminal"
 call .venv\Scripts\activate
+python _backup.py >nul 2>&1
+:: SYNC - pull latest JSON from GitHub
+echo Syncing data...
+python _sync_data.py
+echo.
+:: AUTO FULL SCAN - skips on holidays/weekends
+echo Checking market status...
+python _marketcheck.py
+if errorlevel neq 0 goto SKIPSCAN
+echo Running daily full scan...
+python nepse_scanner.py
+:SKIPSCAN
+echo Daily scan complete.
+echo.
 
 :: ── AUTO-REFRESH SECTORS (weekly, silent) ────────────────────────────────────
 python auto_refresh_sectors.py
@@ -30,7 +46,9 @@ echo   7.  Sector Rotation
 echo   7t. Sector Trend  (5/10/20d momentum)
 echo   7h. Sector Heatmap
 echo   7r. Relative Strength  (RS vs sector)
+echo   7rw. RS + Why  (RS with full reasoning)
 echo   7w. 52-Week High/Low Alerts
+echo   7ww. 52W + Why  (52W with full reasoning)
 echo   7b. Broker + RS Accumulation
 echo   8.  Whale Tracker
 echo   9.  Broker Leaderboard
@@ -41,6 +59,11 @@ echo   13. Track Any Broker
 echo.
 echo   --- STOCK ANALYSIS ---
 echo   17. Floorsheet - Any Stock
+echo   17b. Top Broker Holders - Any Stock
+echo   17c. Broker Activity - Specific Date
+echo   17d. Broker Trend  (7-day smart money)
+echo   17e. Broker Impact  (institutional ranking)
+echo   17f. Momentum Hunter (early accumulation)
 echo   18. Support/Resistance - Any Stock
 echo.
 echo   --- PORTFOLIO INTELLIGENCE ---
@@ -71,22 +94,30 @@ echo   21. Signal Legend / Help
 echo   0.  Exit
 echo.
 set /p choice=  Pick a number and press Enter:
-if "%choice%"=="1"  python nepse_scanner.py & goto AGAIN
-if "%choice%"=="2"  python nepse_scanner.py --movers-only & goto AGAIN
-if "%choice%"=="3"  python nepse_scanner.py --watchlist & goto AGAIN
+if "%choice%"=="1" goto RUN_FULLSCAN
+if "%choice%"=="2" goto RUN_MOVERS
+if "%choice%"=="3" goto RUN_WATCHLIST
 if "%choice%"=="4"  python nepse_scanner.py --quickpick & goto AGAIN
 if "%choice%"=="5"  python nepse_scanner.py --smartpick & goto AGAIN
 if "%choice%"=="6"  python nepse_scanner.py --powersell & goto AGAIN
 if "%choice%"=="7"  python nepse_scanner.py --sector & goto AGAIN
 if "%choice%"=="7t" python nepse_scanner.py --sector-trend & goto AGAIN
 if "%choice%"=="7h" python nepse_scanner.py --heatmap & goto AGAIN
-if "%choice%"=="7r" python nepse_scanner.py --rs & goto AGAIN
-if "%choice%"=="7w" python nepse_scanner.py --week52 & goto AGAIN
+if "%choice%"=="7r"  python nepse_scanner.py --rs & goto AGAIN
+if "%choice%"=="7rw" python nepse_scanner.py --rs --why & goto AGAIN
+if "%choice%"=="7w"  python nepse_scanner.py --week52 & goto AGAIN
+if "%choice%"=="7ww" python nepse_scanner.py --week52 --why & goto AGAIN
 if "%choice%"=="7b" python nepse_scanner.py --broker-rs & goto AGAIN
 if "%choice%"=="8"  python nepse_scanner.py --whale & goto AGAIN
 if "%choice%"=="9"  python nepse_scanner.py --brokers & goto AGAIN
 if "%choice%"=="10" python nepse_scanner.py --broker 58 & goto AGAIN
 if "%choice%"=="13" goto CUSTOM_BROKER
+if "%choice%"=="17b" goto CUSTOM_HOLDERS
+if "%choice%"=="17c" goto CUSTOM_BROKERDATE
+if "%choice%"=="17d" goto BROKER_TREND
+if "%choice%"=="17e" goto BROKER_IMPAAT
+if "%choice%"=="17f" goto MOMENTUM_HUNTER
+if "%choice%"=="34" goto CUSTOM_HOLDERS
 if "%choice%"=="17" goto CUSTOM_FLOOR
 if "%choice%"=="18" goto CUSTOM_SR
 if "%choice%"=="19" python nepse_scanner.py --report & goto AGAIN
@@ -115,6 +146,34 @@ set /p broker=  Enter broker ID (e.g. 34):
 python nepse_scanner.py --broker %broker%
 goto AGAIN
 
+:CUSTOM_DATE
+set /p dt_sym=  Enter stock symbol (e.g. CHCL):
+python nepse_scanner.py --broker-date %dt_sym% prompt
+goto AGAIN
+
+:CUSTOM_HOLDERS
+set /p symbol=  Enter stock symbol (e.g. BUNGAL):
+python nepse_scanner.py --broker-holders %symbol%
+goto AGAIN
+
+
+:CUSTOM_BROKERDATE
+set /p symbol=  Enter stock symbol (e.g. CHCL):
+python nepse_scanner.py --broker-date %symbol% prompt
+goto AGAIN
+
+:BROKER_TREND
+set /p btsym=  Enter stock symbol (e.g. JBBL): 
+python nepse_scanner.py --broker-trend %btsym%
+goto AGAIN
+
+:BROKER_IMPAAT
+python nepse_scanner.py --broker-impact
+goto AGAIN
+ 
+:MOMENTUM_HUNTER
+python nepse_scanner.py --momentum-hunter
+goto AGAIN
 :CUSTOM_FLOOR
 set /p symbol=  Enter stock symbol (e.g. NABIL):
 python nepse_scanner.py --floor %symbol%
@@ -178,6 +237,28 @@ goto AGAIN
 :CUSTOM_FLOAT
 set /p symbol=  Enter stock symbol (e.g. NABIL):
 python nepse_scanner.py --float %symbol%
+goto AGAIN
+:RUN_FULLSCAN
+python _marketcheck.py
+if errorlevel neq 0 goto AGAIN
+python nepse_scanner.py
+goto AGAIN
+ 
+:RUN_FULLSCAN
+python _marketcheck.py
+if errorlevel neq 0 goto AGAIN
+python nepse_scanner.py
+goto AGAIN
+ 
+:RUN_MOVERS
+python _marketcheck.py
+if errorlevel neq 0 goto AGAIN
+python nepse_scanner.py --movers-only
+goto AGAIN
+:RUN_WATCHLIST
+python _marketcheck.py
+if errorlevel neq 0 goto AGAIN
+python nepse_scanner.py --watchlist
 goto AGAIN
 :AGAIN
 echo.
