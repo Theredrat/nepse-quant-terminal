@@ -1,1 +1,0 @@
-print(open(chr(46)+chr(103)+chr(105)+chr(116)+chr(104)+chr(117)+chr(98)+chr(47)+chr(119)+chr(111)+chr(114)+chr(107)+chr(102)+chr(108)+chr(111)+chr(119)+chr(115)+chr(47)+chr(110)+chr(101)+chr(112)+chr(115)+chr(101)+chr(95)+chr(97)+chr(108)+chr(101)+chr(114)+chr(116)+chr(115)+chr(46)+chr(121)+chr(109)+chr(108),encoding=chr(117)+chr(116)+chr(102)+chr(45)+chr(56)).read())
