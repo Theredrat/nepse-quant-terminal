@@ -1,4 +1,4 @@
-"""
+﻿"""
 nepse_alerts.py
 NEPSE Telegram Alert System — DB + API hybrid
 Runs during market hours (Mon-Fri), sends alerts for:
@@ -430,6 +430,25 @@ def check_alerts(live_df, rs_map, vol_avg, w52_data):
             if send_telegram(msg):
                 log.info(f"POWER SELL alert: {sym}")
                 alerts_sent += 1
+
+
+        # -- Alert 5: WHALE ALERT --
+        if avg_vol > 0:
+            vol_mult = vol / avg_vol
+            if vol_mult >= 5.0 and turnover >= 5_000_000 and can_alert(f"{sym}_whale"):
+                wl_tag = " | IN YOUR WATCHLIST" if in_wl else ""
+                direction = "BUYING" if chg >= 0 else "SELLING"
+                msg = (
+                    f"<b>NEPSE ALERT - {now_str}</b>\n\n"
+                    f"<b>WHALE ALERT: {sym}</b>{wl_tag}\n"
+                    f"Volume <b>{vol_mult:.1f}x</b> above 20D avg\n"
+                    f"Turnover: Rs {turnover/1e6:.1f}M | Direction: {direction}\n"
+                    f"LTP: Rs {ltp:,.1f} | Change: {chg:+.2f}%\n"
+                    f"<i>Institutional activity detected</i>"
+                )
+                if send_telegram(msg):
+                    log.info(f"WHALE alert: {sym}")
+                    alerts_sent += 1
 
     log.info(f"Alert check complete — {alerts_sent} alerts sent")
     return alerts_sent
