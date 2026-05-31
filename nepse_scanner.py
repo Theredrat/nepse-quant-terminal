@@ -274,6 +274,90 @@ def fmt_rs(val):
 
 # ── POWER SELL ────────────────────────────────────────────────────────────────
 
+def auto_update_watchlist(rs_data, full_fs, db_path, top_n=15):
+    """Score every stock on RS + broker accumulation + volume spike, keep top N."""
+    import json, sqlite3
+    from pathlib import Path
+
+    WATCHLIST_PATH = Path("data/runtime/accounts/account_1/watchlist.json")
+    if not WATCHLIST_PATH.exists():
+        return
+
+    scores = {}
+
+    # ── Score 1: RS score (normalised 0-40) ──────────────────────────────────
+    if rs_data:
+        rs_sorted = sorted(rs_data, key=lambda x: x.get("rs_score", 0) or 0, reverse=True)
+        total = len(rs_sorted)
+        for rank, row in enumerate(rs_sorted, 1):
+            sym = row.get("symbol", "")
+            if not sym:
+                continue
+            # top rank = 40 pts, bottom = 0
+            scores.setdefault(sym, 0)
+            scores[sym] += int((1 - (rank - 1) / max(total, 1)) * 40)
+
+    # ── Score 2: Broker accumulation from today floorsheet (0-40) ────────────
+    if full_fs is not None and not full_fs.empty:
+        try:
+            for sym, grp in full_fs.groupby("symbol"):
+                buy_val  = grp[grp["buyerMemberId"].notna()]["contractAmount"].sum()
+                sell_val = grp[grp["sellerMemberId"].notna()]["contractAmount"].sum()
+                total_val = buy_val + sell_val
+                if total_val > 0:
+                    net_ratio = (buy_val - sell_val) / total_val  # -1 to +1
+                    scores.setdefault(sym, 0)
+                    if net_ratio > 0:
+                        scores[sym] += int(net_ratio * 40)
+        except Exception:
+            pass
+
+    # ── Score 3: Volume spike vs DB average (0-20) ───────────────────────────
+    if full_fs is not None and not full_fs.empty and db_path and Path(db_path).exists():
+        try:
+            import sqlite3
+            conn = sqlite3.connect(db_path)
+            cur  = conn.cursor()
+            # today volume per symbol from floorsheet
+            today_vol = full_fs.groupby("symbol")["contractQuantity"].sum().to_dict()
+            for sym, vol in today_vol.items():
+                try:
+                    cur.execute(
+                        "SELECT AVG(v) FROM (SELECT SUM(quantity) as v FROM broker_activity "
+                        "WHERE symbol=? GROUP BY date ORDER BY date DESC LIMIT 20)",
+                        (sym,)
+                    )
+                    row = cur.fetchone()
+                    avg_vol = row[0] if row and row[0] else 0
+                    if avg_vol > 0 and vol > avg_vol * 1.5:
+                        spike_score = min(int(((vol / avg_vol) - 1) * 10), 20)
+                        scores.setdefault(sym, 0)
+                        scores[sym] += spike_score
+                except Exception:
+                    pass
+            conn.close()
+        except Exception:
+            pass
+
+    # ── Pick top N ────────────────────────────────────────────────────────────
+    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    top    = [sym for sym, sc in ranked if sc > 0][:top_n]
+
+    if not top:
+        return
+
+    # ── Write watchlist ───────────────────────────────────────────────────────
+    watchlist = [
+        {"kind": "stock", "key": f"stock:{sym}", "label": sym, "symbol": sym}
+        for sym in top
+    ]
+    WATCHLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    json.dump(watchlist, open(WATCHLIST_PATH, "w", encoding="utf-8"), indent=2)
+    print(f"Watchlist auto-updated — top {len(top)} stocks by RS + accumulation + volume")
+    if top:
+        print(f"  Top picks: {', '.join(top[:5])}{'...' if len(top) > 5 else ''}")
+
+
 def analyze_power_sell(full_df, live_df):
     console.print()
     console.print(Rule("[bold red]Power Sell Scanner[/bold red]", style="red"))
@@ -359,7 +443,7 @@ def _load_sector_prices(db_path="nepse_market_data.db", days=35):
     import sqlite3
     conn = sqlite3.connect(db_path)
     df = pd.read_sql_query(f"""
-        SELECT sp.symbol, sp.date, sp.close
+        SELECT sp.symbol, c.sector, sp.date, sp.close
         FROM stock_prices sp
         JOIN companies c ON sp.symbol = c.symbol
         WHERE sp.date >= date('now', '-{days} days')
@@ -413,6 +497,7 @@ def _sector_returns(prices_df, periods=(5, 10, 20)):
     for sector in prices_df["sector"].unique():
         syms     = prices_df[prices_df["sector"] == sector]["symbol"].unique()
         sec_piv  = pivot[[s for s in syms if s in pivot.columns]].dropna(how="all")
+        sec_piv  = sec_piv.ffill().bfill()  # fill gaps so more stocks contribute
         if sec_piv.empty:
             continue
 
@@ -482,9 +567,10 @@ def analyze_sector_trend(db_path="nepse_market_data.db"):
 
     t = Table(
         title="Sector Momentum (Equal-Weighted)",
-        box=box.ROUNDED, border_style="cyan", header_style="bold cyan",
+        box=box.SIMPLE_HEAVY, border_style="cyan", header_style="bold cyan",
+        show_header=True,
     )
-    t.add_column("Sector",   min_width=22, style="bold white")
+    t.add_column("Sector",   min_width=22, no_wrap=True, style="bold white")
     t.add_column("5D",       width=10, justify="right")
     t.add_column("10D",      width=10, justify="right")
     t.add_column("20D",      width=10, justify="right")
@@ -583,6 +669,9 @@ def analyze_sector_heatmap(db_path="nepse_market_data.db"):
     console.print(t)
     console.print()
 
+
+
+# ── SECTOR MOMENTUM ───────────────────────────────────────────────────────────
 
 def analyze_sector_rotation(full_df, live_df):
     """Show sector money flow with Traded/Listed counts."""
@@ -1698,11 +1787,17 @@ def parse_args():
     p.add_argument('--broker-rs',   action='store_true', help='Broker accumulation on RS leaders')
     p.add_argument('--week52',       action='store_true', help='52-week high/low alerts + RS cross-check')
     p.add_argument('--rs',           action='store_true', help='Relative strength vs sector')
+    p.add_argument('--why',          action='store_true', help='Show Why block — broker+RS+52W+unlock reasoning')
     p.add_argument('--fundamental', metavar='SYMBOL', help='Fundamental snapshot e.g. --fundamental NABIL')
     p.add_argument('--earnings',    metavar='SYMBOL', help='Quarterly earnings e.g. --earnings AKJCL')
     p.add_argument('--value',       nargs='?', const='ALL', metavar='SECTOR', help='Peer value screen e.g. --value or --value Hydropower')
     p.add_argument('--float',       metavar='SYMBOL', dest='float_sym', help='Float vs promoter e.g. --float NABIL')
     p.add_argument('--unlock',      nargs='+', metavar='ARG', help='Unlock dates: list/upcoming/add')
+    p.add_argument('--broker-date', nargs=2, metavar=('SYMBOL', 'DATE'), default=None, help='Broker activity for a stock on a specific date')
+    p.add_argument('--broker-trend', metavar='SYMBOL', default=None, help='7-day broker trend analysis')
+    p.add_argument('--broker-impact', action='store_true', default=False, help='Broker impact ranking')
+    p.add_argument('--momentum-hunter',action='store_true',default=False,help='Momentum hunter')
+    p.add_argument('--broker-holders', metavar='SYMBOL', default=None, help='Top 15 broker holders for a stock')
     return p.parse_args()
 
 
@@ -2145,6 +2240,21 @@ def main():
     if getattr(args, "earnings", None):
         analyze_earnings(args.earnings)
         return
+    if getattr(args, 'momentum_hunter', False):
+        analyze_momentum_hunter()
+        return
+    if getattr(args, 'broker_impact', False):
+        analyze_broker_impact()
+        return
+    if getattr(args, 'broker_trend', None):
+        analyze_broker_trend(args.broker_trend)
+        return
+    if getattr(args, 'broker_date', None):
+        analyze_broker_date(args.broker_date[0],args.broker_date[1])
+        return
+    if getattr(args, 'broker_holders', None):
+        analyze_broker_holders(args.broker_holders)
+        return
 
     console.print()
     console.print("[bold green]NEPSE Scanner Starting...[/bold green]")
@@ -2169,7 +2279,7 @@ def main():
 
     # Decide what to fetch
     need_live  = not (args.floor or args.brokers) or any([args.watchlist, args.powersell, args.sector, args.report, args.sr, args.quickpick, args.smartpick])
-    need_floor = any([args.floor, args.brokers, args.powersell, args.sector, args.whale, args.sr, args.broker, args.smartpick])
+    need_floor = any([args.floor, args.brokers, args.powersell, args.sector, args.whale, args.sr, args.broker, args.smartpick, getattr(args, 'why', False)])
 
     live_df = None
     if need_live:
@@ -2181,6 +2291,10 @@ def main():
     full_fs = None
     if need_floor:
         full_fs = get_full_floorsheet(n)
+        try:
+            log_broker_activity(full_fs)
+        except Exception:
+            pass
 
     # Run requested features
     if args.watchlist:
@@ -2192,14 +2306,10 @@ def main():
         power_sell_results = analyze_power_sell(full_fs, live_df)
         console.print()
 
-    if args.sector_trend:
-        analyze_sector_trend()
-    if args.heatmap:
-        analyze_sector_heatmap()
     elif args.week52:
         analyze_week52()
-    elif args.rs:
-        analyze_relative_strength()
+        if getattr(args, "why", False):
+            analyze_why(live_df, full_fs)
     elif args.portfolio is not None:
         analyze_portfolio(args.portfolio)
     elif args.corr:
@@ -2225,6 +2335,37 @@ def main():
     if args.unlock:
         analyze_unlock(args.unlock)
         console.print()
+    if args.sector_trend:
+        analyze_sector_trend()
+        console.print()
+    if args.heatmap:
+        analyze_sector_heatmap()
+        console.print()
+    if getattr(args, 'broker_date', None):
+        _bd = args.broker_date
+        _date = None if (len(_bd) < 2 or _bd[1].lower() == 'prompt') else _bd[1]
+        analyze_broker_date(_bd[0], _date)
+        return
+    if getattr(args, 'broker_trend', None):
+        analyze_broker_trend(symbol=args.broker_trend)
+        return
+    if getattr(args, "broker_impact", False):
+        analyze_broker_impact()
+        return
+    if getattr(args, "momentum_hunter", False):
+        analyze_momentum_hunter()
+        return
+    if getattr(args, 'broker_holders', None):
+        analyze_broker_holders(args.broker_holders)
+        return
+    if getattr(args, 'broker_holders', None):
+        analyze_broker_holders(args.broker_holders)
+        return
+    if args.rs:
+        analyze_relative_strength()
+        console.print()
+        if getattr(args, "why", False):
+            analyze_why(live_df, full_fs)
     if args.sector:
         analyze_sector_rotation(full_fs, live_df)
         console.print()
@@ -2348,6 +2489,8 @@ def _calc_relative_strength(db_path="nepse_market_data.db"):
 
     # Composite RS score: weighted 50/30/20
     rdf["rs_score"] = rdf["rs5"]*0.50 + rdf["rs10"].fillna(0)*0.30 + rdf["rs20"].fillna(0)*0.20
+
+    return rdf.sort_values("rs_score", ascending=False).to_dict("records")
 
 
 def analyze_relative_strength():
@@ -3568,6 +3711,1171 @@ def analyze_unlock(args_unlock):
         console.print(t2)
 
     console.print('[dim]Delete: python nepse_scanner.py --unlock delete ID[/]')
+
+
+# ── RELATIVE STRENGTH ─────────────────────────────────────────────────────────
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WHY ENGINE — Broker Activity Logger + Story Generator + Why Block
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _init_broker_activity_table(db_path="nepse_market_data.db"):
+    """Create broker_activity table if it does not exist."""
+    import sqlite3
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS broker_activity (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol       TEXT    NOT NULL,
+            date         TEXT    NOT NULL,
+            broker_id    TEXT    NOT NULL,
+            broker_name  TEXT,
+            buy_qty      REAL    DEFAULT 0,
+            sell_qty     REAL    DEFAULT 0,
+            net_qty      REAL    DEFAULT 0,
+            buy_val      REAL    DEFAULT 0,
+            sell_val     REAL    DEFAULT 0,
+            net_val      REAL    DEFAULT 0,
+            UNIQUE(symbol, date, broker_id)
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def get_broker_story(symbol, fs_df, db_path="nepse_market_data.db"):
+    import sqlite3
+    empty = dict(
+        dominant_broker_id=None, dominant_broker_name=None, dominant_pct=0,
+        dominant_action="neutral", dominant_net_val=0, concentration="low",
+        total_brokers=0, buy_brokers=0, sell_brokers=0,
+        history_days=0, history_summary="", history_action="unknown",
+        five_day_verdict="", ten_day_verdict="", twenty_day_verdict="",
+    )
+    try:
+        if fs_df is None or fs_df.empty:
+            return empty
+        sym_fs = fs_df[fs_df["symbol"] == symbol] if "symbol" in fs_df.columns else fs_df
+        if sym_fs.empty:
+            return empty
+        total_vol = sym_fs["quantity"].sum()
+        if total_vol == 0:
+            return empty
+        buy_grp = sym_fs.groupby("buyer_broker").agg(
+            bq=("quantity", "sum"), bv=("amount", "sum"), bname=("buyerBrokerName", "first")
+        )
+        sell_grp = sym_fs.groupby("seller_broker").agg(
+            sq=("quantity", "sum"), sv=("amount", "sum"), sname=("sellerBrokerName", "first")
+        )
+        all_ids = set(buy_grp.index) | set(sell_grp.index)
+        rows = []
+        for bid in all_ids:
+            bq = int(buy_grp.loc[bid, "bq"]) if bid in buy_grp.index else 0
+            bv = float(buy_grp.loc[bid, "bv"]) if bid in buy_grp.index else 0.0
+            sq = int(sell_grp.loc[bid, "sq"]) if bid in sell_grp.index else 0
+            sv = float(sell_grp.loc[bid, "sv"]) if bid in sell_grp.index else 0.0
+            name = str(buy_grp.loc[bid, "bname"] if bid in buy_grp.index else sell_grp.loc[bid, "sname"])
+            vol = bq + sq
+            rows.append(dict(bid=str(bid), name=name, bq=bq, bv=bv, sq=sq, sv=sv,
+                net_val=bv-sv, net_qty=bq-sq, vol=vol))
+        if not rows:
+            return empty
+        dom = max(rows, key=lambda r: r["vol"])
+        dom_pct = dom["vol"] / (total_vol * 2) * 100
+        conc = "high" if dom_pct >= 30 else ("medium" if dom_pct >= 15 else "low")
+        action = "buying" if dom["net_val"] > 0 else ("selling" if dom["net_val"] < 0 else "neutral")
+        buy_brokers = sum(1 for r in rows if r["net_val"] > 0)
+        sell_brokers = sum(1 for r in rows if r["net_val"] < 0)
+        history_days = 0
+        history_summary = ""
+        history_action = "unknown"
+        five_day_verdict = ""
+        ten_day_verdict = ""
+        twenty_day_verdict = ""
+        try:
+            conn = sqlite3.connect(db_path)
+            hist = conn.execute(
+                "SELECT date, net_val FROM broker_activity WHERE symbol=? AND broker_id=?"
+                " ORDER BY date DESC LIMIT 20",
+                (symbol, dom["bid"])
+            ).fetchall()
+            conn.close()
+            if len(hist) >= 2:
+                history_days = len(hist)
+                def _ws(days_slice):
+                    if not days_slice: return None
+                    n = len(days_slice)
+                    b = sum(1 for _, nv in days_slice if nv > 0)
+                    s = sum(1 for _, nv in days_slice if nv < 0)
+                    net = sum(nv for _, nv in days_slice)
+                    amt = ("Rs " + str(round(abs(net)/1e6, 1)) + "M") if abs(net) >= 1e6 else ("Rs " + str(round(abs(net)/1e3)) + "K")
+                    if b > s: return str(b) + "/" + str(n) + "d bought (" + amt + " in)"
+                    elif s > b: return str(s) + "/" + str(n) + "d sold (" + amt + " out)"
+                    else: return str(n) + "d mixed"
+                w5  = _ws(hist[:5])  if len(hist) >= 5  else None
+                w10 = _ws(hist[:10]) if len(hist) >= 10 else None
+                w20 = _ws(hist[:20]) if len(hist) >= 20 else None
+                parts = []
+                if w5:  parts.append("5d: " + w5)
+                if w10: parts.append("10d: " + w10)
+                if w20: parts.append("20d: " + w20)
+                history_summary = "  |  ".join(parts) if parts else ""
+                all_b = sum(1 for _, nv in hist if nv > 0)
+                all_s = sum(1 for _, nv in hist if nv < 0)
+                history_action = "accumulating" if all_b > all_s else ("distributing" if all_s > all_b else "mixed")
+                # 5d verdict
+                if len(hist) >= 5:
+                    h5 = hist[:5]
+                    b5 = sum(1 for _, nv in h5 if nv > 0)
+                    s5 = sum(1 for _, nv in h5 if nv < 0)
+                    n5 = sum(nv for _, nv in h5)
+                    a5 = ("Rs " + str(round(abs(n5)/1e6, 1)) + "M") if abs(n5) >= 1e6 else ("Rs " + str(round(abs(n5)/1e3)) + "K")
+                    if b5 >= 4:
+                        five_day_verdict = "EARLY BUY SIGNAL — broker bought " + str(b5) + "/5 days (" + a5 + " in) — watch closely"
+                    elif b5 == 3:
+                        five_day_verdict = "MILD INTEREST — broker bought 3/5 days (" + a5 + " in) — not confirmed yet"
+                    elif s5 >= 4:
+                        five_day_verdict = "EARLY SELL SIGNAL — broker sold " + str(s5) + "/5 days (" + a5 + " out) — caution"
+                    elif s5 == 3:
+                        five_day_verdict = "MILD EXIT — broker sold 3/5 days (" + a5 + " out) — monitor"
+                    else:
+                        five_day_verdict = "NO SIGNAL — broker direction unclear over 5 days"
+                # 10d verdict
+                if len(hist) >= 10:
+                    h10 = hist[:10]
+                    b10 = sum(1 for _, nv in h10 if nv > 0)
+                    s10 = sum(1 for _, nv in h10 if nv < 0)
+                    n10 = sum(nv for _, nv in h10)
+                    a10 = ("Rs " + str(round(abs(n10)/1e6, 1)) + "M") if abs(n10) >= 1e6 else ("Rs " + str(round(abs(n10)/1e3)) + "K")
+                    if b10 >= 8:
+                        ten_day_verdict = "STRONG BUY — broker bought " + str(b10) + "/10 days (" + a10 + " accumulated) — high conviction"
+                    elif b10 >= 6:
+                        ten_day_verdict = "MODERATE BUY — broker bought " + str(b10) + "/10 days (" + a10 + " in) — building position"
+                    elif s10 >= 8:
+                        ten_day_verdict = "STRONG AVOID — broker sold " + str(s10) + "/10 days (" + a10 + " distributed) — consistent exit"
+                    elif s10 >= 6:
+                        ten_day_verdict = "CAUTION — broker sold " + str(s10) + "/10 days (" + a10 + " out) — distribution ongoing"
+                    else:
+                        ten_day_verdict = "NO CONVICTION — broker mixed over 10 days (bought " + str(b10) + ", sold " + str(s10) + ")"
+                # 20d verdict
+                if len(hist) >= 20:
+                    h20 = hist[:20]
+                    b20 = sum(1 for _, nv in h20 if nv > 0)
+                    s20 = sum(1 for _, nv in h20 if nv < 0)
+                    n20 = sum(nv for _, nv in h20)
+                    a20 = ("Rs " + str(round(abs(n20)/1e6, 1)) + "M") if abs(n20) >= 1e6 else ("Rs " + str(round(abs(n20)/1e3)) + "K")
+                    if b20 >= 16:
+                        twenty_day_verdict = "INSTITUTIONAL ACCUMULATION — broker bought " + str(b20) + "/20 days (" + a20 + " in) — very high conviction"
+                    elif b20 >= 12:
+                        twenty_day_verdict = "STRONG ACCUMULATION — broker bought " + str(b20) + "/20 days (" + a20 + " in) — sustained buying"
+                    elif b20 >= 8:
+                        twenty_day_verdict = "MODERATE ACCUMULATION — broker bought " + str(b20) + "/20 days (" + a20 + " in) — mild interest"
+                    elif s20 >= 16:
+                        twenty_day_verdict = "INSTITUTIONAL DISTRIBUTION — broker sold " + str(s20) + "/20 days (" + a20 + " out) — major exit"
+                    elif s20 >= 12:
+                        twenty_day_verdict = "STRONG DISTRIBUTION — broker sold " + str(s20) + "/20 days (" + a20 + " out) — sustained selling"
+                    elif s20 >= 8:
+                        twenty_day_verdict = "MODERATE DISTRIBUTION — broker sold " + str(s20) + "/20 days (" + a20 + " out) — mild exit"
+                    else:
+                        twenty_day_verdict = "NO TREND — no clear direction over 20 days (bought " + str(b20) + ", sold " + str(s20) + ")"
+        except Exception:
+            pass
+        return dict(
+            dominant_broker_id=dom["bid"],
+            dominant_broker_name=dom["name"],
+            dominant_pct=dom_pct,
+            dominant_action=action,
+            dominant_net_val=dom["net_val"],
+            concentration=conc,
+            total_brokers=len(rows),
+            buy_brokers=buy_brokers,
+            sell_brokers=sell_brokers,
+            history_days=history_days,
+            history_summary=history_summary,
+            history_action=history_action,
+            five_day_verdict=five_day_verdict,
+            ten_day_verdict=ten_day_verdict,
+            twenty_day_verdict=twenty_day_verdict,
+        )
+    except Exception:
+        return empty
+
+
+def _fmt_rs_val(val):
+    """Format Rs value compactly."""
+    if val is None:
+        return ''
+    a = abs(val)
+    if a >= 1_000_000:
+        return f"Rs {val/1_000_000:.1f}M"
+    if a >= 1_000:
+        return f"Rs {val/1_000:.0f}K"
+    return f"Rs {val:.0f}"
+
+
+def analyze_why(live_df, full_fs, rs_data=None, db_path="nepse_market_data.db"):
+    """
+    Print Why blocks for top bullish + bearish + neutral stocks.
+    Add --why flag to any scan to trigger this.
+    """
+    from rich.rule import Rule
+
+    console.print()
+    console.rule("[bold yellow]Why These Stocks Were Flagged[/bold yellow]", style="yellow")
+    console.print("[dim]Broker behavior + RS vs sector + 52W position + unlock dates[/dim]\n")
+
+    # RS data
+    if rs_data is None:
+        rs_data = _calc_relative_strength(db_path)
+    if not rs_data:
+        console.print("[red]No RS data available.[/red]")
+        return
+
+    rdf = pd.DataFrame(rs_data)
+
+    # Select stocks to explain
+    bullish = rdf[rdf['rs5'] > 2].head(3).to_dict('records')
+    bearish = rdf[rdf['rs5'] < -2].sort_values('rs5' if 'rs5' in rdf.columns else 'rs_score').head(3).to_dict('records')
+
+    # Neutral = high turnover stocks with -2 < rs5 < 2
+    neutral_syms = []
+    if live_df is not None and not live_df.empty:
+        try:
+            vcols = [c for c in live_df.columns if any(x in c.lower() for x in ['turnover','volume','amount'])]
+            if vcols:
+                top_syms = live_df.nlargest(20, vcols[0])['symbol'].tolist()
+                neutral_syms = [r for r in rs_data if r['symbol'] in top_syms and -2 <= r.get('rs5', 0) <= 2][:2]
+        except Exception:
+            pass
+
+    # Unlock map
+    unlock_map = {}
+    try:
+        import sqlite3
+        _init_broker_activity_table(db_path)
+        conn = sqlite3.connect(db_path)
+        udf = pd.read_sql("""
+            SELECT symbol, MIN(unlock_date) as next_unlock
+            FROM unlock_dates WHERE unlock_date >= date('now')
+            GROUP BY symbol
+        """, conn)
+        conn.close()
+        unlock_map = dict(zip(udf['symbol'], udf['next_unlock']))
+    except Exception:
+        pass
+
+    # ── WHY BLOCK ─────────────────────────────────────────────────────────────
+    def _print_why(stock, tag):
+        symbol = stock['symbol']
+        sector = stock.get('sector', '')
+        rs5    = stock.get('rs5', 0) or 0
+        sec5   = stock.get('sec5', 0) or 0
+        ret5   = stock.get('ret5', 0) or 0
+
+        rs_rank  = sorted(rs_data, key=lambda x: x.get('rs_score', 0), reverse=True)
+        rank     = next((i+1 for i, r in enumerate(rs_rank) if r['symbol'] == symbol), '?')
+        total    = len(rs_rank)
+
+        bstory   = get_broker_story(symbol, full_fs, db_path)
+        unlock   = unlock_map.get(symbol)
+
+        # 52W note from live_df
+        w52_note = ''
+        if live_df is not None and not live_df.empty:
+            try:
+                row = live_df[live_df['symbol'] == symbol]
+                if not row.empty:
+                    r    = row.iloc[0]
+                    hcol = next((c for c in live_df.columns if '52' in c and 'high' in c.lower()), None)
+                    lcol = next((c for c in live_df.columns if '52' in c and 'low'  in c.lower()), None)
+                    pcol = next((c for c in live_df.columns if c.lower() in ('ltp','last_traded_price','close','lastTradedPrice')), None)
+                    if hcol and pcol:
+                        ltp  = float(r[pcol])
+                        high = float(r[hcol])
+                        pct_from_high = (ltp - high) / high * 100
+                        if pct_from_high >= -5:
+                            w52_note = f"Only {abs(pct_from_high):.1f}% from 52W high — breakout zone"
+                        elif lcol:
+                            low = float(r[lcol])
+                            if low > 0:
+                                pct_from_low = (ltp - low) / low * 100
+                                if pct_from_low <= 5:
+                                    w52_note = f"Only {pct_from_low:.1f}% above 52W low — danger zone"
+                        if not w52_note:
+                            w52_note = f"{abs(pct_from_high):.1f}% below 52W high"
+            except Exception:
+                pass
+
+        # ── Build bullets ──────────────────────────────────────────────────
+        # Bullet 1 — Broker
+        bid   = bstory['dominant_broker_id']
+        bname = bstory['dominant_broker_name'] or (f"Broker {bid}" if bid else None)
+        if bid:
+            conc  = {'high': f"dominant — {bstory['dominant_pct']:.0f}% of today's volume",
+                     'medium': f"active — {bstory['dominant_pct']:.0f}% of today's volume",
+                     'low':  f"present — {bstory['dominant_pct']:.0f}% of today's volume"}.get(bstory['concentration'], '')
+            act   = {'buying': 'net BUYING', 'selling': 'net SELLING', 'neutral': 'market making'}.get(bstory['dominant_action'], '')
+            nval  = _fmt_rs_val(abs(bstory['dominant_net_val'])) if bstory['dominant_net_val'] else ''
+            nval_str = f" ({nval})" if nval else ""
+
+            hist_note = ''
+            if bstory['history_days'] > 1:
+                hist_note = f"  [{bstory['history_summary']}]"
+                if bstory['history_action'] == 'accumulating' and bstory['dominant_action'] == 'selling':
+                    hist_note += " ← FIRST SELL after accumulation (exit alert)"
+                elif bstory['history_action'] == 'distributing' and bstory['dominant_action'] == 'buying':
+                    hist_note += " ← FIRST BUY after distribution (reversal alert)"
+            if bstory.get('five_day_verdict'):
+                hist_note += "\n      📊 5D:  " + bstory['five_day_verdict']
+            if bstory.get('ten_day_verdict'):
+                hist_note += "\n      ⭐ 10D: " + bstory['ten_day_verdict']
+            if bstory.get('twenty_day_verdict'):
+                hist_note += "\n      🏆 20D: " + bstory['twenty_day_verdict']
+
+            broad = ''
+            if bstory['total_brokers'] > 0:
+                bp = bstory['buy_brokers'] / bstory['total_brokers'] * 100
+                if bp > 65:
+                    broad = f"  |  {bstory['buy_brokers']}/{bstory['total_brokers']} brokers net buying (broad accumulation)"
+                elif bp < 35:
+                    broad = f"  |  {bstory['sell_brokers']}/{bstory['total_brokers']} brokers net selling (broad distribution)"
+
+            b1 = f"Broker {bid} ({bname}) — {conc}, {act}{nval_str}{hist_note}{broad}"
+        else:
+            b1 = "Floorsheet not available (run with a scan that fetches floorsheet)"
+
+        # Bullet 2 — Sector context
+        if sec5 != 0:
+            if rs5 > 0 and sec5 > 0:
+                b2 = f"Sector ({sector}) also rising +{sec5:.1f}% 5D — stock outperforming by +{rs5:.1f}% (momentum confirmed)"
+            elif rs5 < 0 and sec5 > 0:
+                if rs5 >= -2:
+                    b2 = f"Sector ({sector}) up +{sec5:.1f}% 5D — stock inline with sector ({rs5:+.1f}% RS)"
+                else:
+                    b2 = f"Sector ({sector}) up +{sec5:.1f}% but stock {ret5:+.1f}% — STOCK-SPECIFIC weakness, not sector"
+            elif rs5 < 0 and sec5 < 0:
+                b2 = f"Sector ({sector}) also weak {sec5:.1f}% — broad sector selling, not just this stock"
+            else:
+                b2 = f"Sector ({sector}) {sec5:+.1f}% / Stock {ret5:+.1f}% — RS {rs5:+.1f}%"
+        else:
+            b2 = f"Sector ({sector}) data unavailable for comparison"
+
+        # Bullet 3 — RS rank
+        if rs5 > 5:
+            b3 = f"RS +{rs5:.2f}% vs sector — Rank #{rank}/{total} (top performer in market)"
+        elif rs5 > 2:
+            b3 = f"RS +{rs5:.2f}% vs sector — Rank #{rank}/{total} (outperforming sector)"
+        elif rs5 >= -2:
+            b3 = f"RS {rs5:+.2f}% vs sector — Rank #{rank}/{total} (inline with sector)"
+        elif rs5 > -5:
+            b3 = f"RS {rs5:.2f}% vs sector — Rank #{rank}/{total} (underperforming sector)"
+        else:
+            b3 = f"RS {rs5:.2f}% vs sector — Rank #{rank}/{total} (worst performers in market)"
+
+        # Bullet 4 — 52W + unlock
+        parts = []
+        if w52_note:
+            parts.append(w52_note)
+        if unlock:
+            from datetime import datetime, date
+            try:
+                unlock_dt = datetime.strptime(unlock, '%Y-%m-%d').date()
+                days_away = (unlock_dt - date.today()).days
+                if days_away <= 180:
+                    parts.append(f"Lock-in expiry: {unlock} ({days_away} days away) — supply overhang risk")
+                else:
+                    parts.append(f"No near-term lock-in expiry (next: {unlock})")
+            except Exception:
+                parts.append(f"Lock-in expiry: {unlock} — supply overhang risk")
+        else:
+            parts.append("No lock-in expiry found")
+        b4 = "  |  ".join(parts)
+
+        # Verdict
+        ha = bstory.get('history_action')
+        da = bstory.get('dominant_action')
+        if tag == 'bull':
+            # Conflict: strong RS but dominant broker selling
+            if da == 'selling' and bstory.get('concentration') in ('high', 'medium') and rs5 > 0:
+                verdict = ('Strong RS but dominant broker net SELLING — '
+                           'possible distribution at highs. '
+                           'Wait for broker to stop selling before entry.')
+            elif ha == 'accumulating' and rs5 > 5:
+                verdict = "Sustained institutional accumulation + top RS. High conviction — buy on dips."
+            elif da == 'buying' and bstory['concentration'] == 'high' and rs5 > 3:
+                verdict = "Whale accumulating aggressively + strong RS. Watch for 52W high breakout."
+            elif rs5 > 5:
+                verdict = "Strongest momentum in market. Sector tailwind confirmed. Buy pullbacks."
+            else:
+                verdict = "Outperforming sector. Positive momentum — monitor for continuation."
+
+        elif tag == 'bear':
+            if ha == 'distributing' and rs5 < -5:
+                verdict = "Sustained distribution + worst RS. No floor visible. Avoid entirely."
+            elif da == 'selling' and sec5 > 0:
+                buy_pct = (bstory.get('buy_brokers', 0) / bstory.get('total_brokers', 1)) * 100
+                if buy_pct > 60:
+                    verdict = ('One whale selling while 60%+ brokers buying — '
+                               'possible shakeout before move up. Watch closely.')
+                else:
+                    verdict = 'Promoter/whale exit while sector rises. Stock-specific. Avoid until selling stops.'
+            elif unlock:
+                verdict = f"Lock-in expiry {unlock} creating supply. Wait for expiry to pass before entry."
+            elif sec5 < 0:
+                verdict = "Sector-wide weakness — not stock-specific. Wait for sector to stabilize first."
+            else:
+                verdict = "Underperforming sector. No catalyst visible. Avoid or cut losses."
+
+        else:  # neutral
+            if da == 'buying' and rs5 < 0:
+                verdict = "Broker accumulating but RS still negative — early/risky entry. Wait for RS to turn positive."
+            elif da == 'selling' and rs5 > 0:
+                verdict = "RS positive but broker distributing — topping risk. Tighten stops if holding."
+            elif unlock:
+                verdict = f"Mixed signals + unlock on {unlock}. Wait for post-expiry clarity."
+            else:
+                verdict = "No strong signal. High turnover stock — monitor for breakout direction."
+
+        # Print
+        colors = {'bull': 'green', 'bear': 'red', 'neutral': 'yellow'}
+        labels = {'bull': 'BULLISH', 'bear': 'BEARISH', 'neutral': 'NEUTRAL'}
+        c = colors.get(tag, 'white')
+        l = labels.get(tag, '')
+
+        console.print(f"  [bold {c}]📌 {symbol}[/bold {c}] [{c}]— {l}[/{c}]")
+        console.print(f"    [cyan]•[/cyan] {b1}")
+        console.print(f"    [cyan]•[/cyan] {b2}")
+        console.print(f"    [cyan]•[/cyan] {b3}")
+        console.print(f"    [cyan]•[/cyan] {b4}")
+        console.print(f"    [bold white]→ Verdict:[/bold white] {verdict}")
+        # Top 4 broker holders from history
+        holders = get_top_broker_holders(symbol, db_path, top_n=4)
+        if holders:
+            console.print(f"    \u2022 Top holders (cumulative net position):", style="dim")
+            for h in holders:
+                net = h['total_net']
+                direction = 'NET LONG' if net >= 0 else 'NET SHORT'
+                amt = ('Rs ' + str(round(abs(net)/1e6, 1)) + 'M') if abs(net) >= 1e6 else ('Rs ' + str(round(abs(net)/1e3)) + 'K')
+                col = 'green' if net >= 0 else 'red'
+                console.print(f"      Broker {h['broker_id']} ({h['broker_name']}) [{h['days_active']}d] — [{col}]{direction} {amt}[/{col}]", style="dim")
+        console.print()
+
+    # Print all sections
+    if bullish:
+        console.print("[bold green]── BULLISH — Accumulation Signals ──────────────────────────────[/bold green]")
+        for s in bullish:
+            _print_why(s, 'bull')
+
+    if bearish:
+        console.print("[bold red]── BEARISH — Distribution Signals ──────────────────────────────[/bold red]")
+        for s in bearish:
+            _print_why(s, 'bear')
+
+    if neutral_syms:
+        console.print("[bold yellow]── NEUTRAL — Watch for Direction ────────────────────────────────[/bold yellow]")
+        for s in neutral_syms:
+            _print_why(s, 'neutral')
+
+    console.print(Rule(style="dim"))
+
+def _ensure_broker_activity_table(db_path='nepse_market_data.db'):
+    import sqlite3
+    conn = sqlite3.connect(db_path)
+    sql = (
+        "CREATE TABLE IF NOT EXISTS broker_activity ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "symbol TEXT NOT NULL, date TEXT NOT NULL, broker_id TEXT NOT NULL, "
+        "broker_name TEXT, buy_qty INTEGER DEFAULT 0, sell_qty INTEGER DEFAULT 0, "
+        "net_qty INTEGER DEFAULT 0, buy_val REAL DEFAULT 0.0, sell_val REAL DEFAULT 0.0, "
+        "net_val REAL DEFAULT 0.0, UNIQUE(symbol, date, broker_id))"
+    )
+    conn.execute(sql)
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_ba_symbol_date ON broker_activity(symbol, date)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_ba_date ON broker_activity(date)')
+    conn.commit()
+    conn.close()
+
+
+def log_broker_activity(fs_df, db_path='nepse_market_data.db'):
+    try:
+        import sqlite3, pandas as pd
+        from datetime import date, timedelta
+        if fs_df is None or fs_df.empty:
+            return
+        _ensure_broker_activity_table(db_path)
+        buy = (
+            fs_df.groupby(['symbol', 'buyer_broker'])
+            .agg(buy_qty=('quantity', 'sum'), buy_val=('amount', 'sum'), broker_name=('buyerBrokerName', 'first'))
+            .reset_index().rename(columns={'buyer_broker': 'broker_id'})
+        )
+        sell = (
+            fs_df.groupby(['symbol', 'seller_broker'])
+            .agg(sell_qty=('quantity', 'sum'), sell_val=('amount', 'sum'), broker_name_s=('sellerBrokerName', 'first'))
+            .reset_index().rename(columns={'seller_broker': 'broker_id'})
+        )
+        merged = pd.merge(buy, sell, on=['symbol', 'broker_id'], how='outer').fillna(0)
+        if 'broker_name_s' in merged.columns:
+            merged['broker_name'] = merged.apply(
+                lambda r: r['broker_name'] if r['broker_name'] not in (0, '', None) else r['broker_name_s'], axis=1
+            )
+        trade_date = str(fs_df['businessDate'].iloc[0])[:10]
+        records = []
+        for _, row in merged.iterrows():
+            bid_raw = str(row['broker_id']).replace('.0', '')
+            bid = bid_raw if bid_raw.isdigit() else str(row['broker_id'])
+            bq = int(row.get('buy_qty', 0) or 0)
+            sq = int(row.get('sell_qty', 0) or 0)
+            bv = float(row.get('buy_val', 0) or 0)
+            sv = float(row.get('sell_val', 0) or 0)
+            records.append((str(row['symbol']), trade_date, bid,
+                str(row.get('broker_name', '') or ''), bq, sq, bq-sq, bv, sv, bv-sv))
+        if not records:
+            return
+        conn = sqlite3.connect(db_path)
+        upsert = (
+            "INSERT INTO broker_activity "
+            "(symbol,date,broker_id,broker_name,buy_qty,sell_qty,net_qty,buy_val,sell_val,net_val) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(symbol,date,broker_id) DO UPDATE SET "
+            "broker_name=excluded.broker_name, buy_qty=excluded.buy_qty, sell_qty=excluded.sell_qty, "
+            "net_qty=excluded.net_qty, buy_val=excluded.buy_val, sell_val=excluded.sell_val, "
+            "net_val=excluded.net_val"
+        )
+        conn.executemany(upsert, records)
+        cutoff = (date.today() - timedelta(days=3*365)).strftime('%Y-%m-%d')
+        deleted = conn.execute('DELETE FROM broker_activity WHERE date < ?', (cutoff,)).rowcount
+        conn.commit()
+        total_rows = conn.execute('SELECT COUNT(*) FROM broker_activity').fetchone()[0]
+        distinct_dates = conn.execute('SELECT COUNT(DISTINCT date) FROM broker_activity').fetchone()[0]
+        conn.close()
+        stocks_logged = len(merged['symbol'].unique())
+        clean_msg = f'  (cleaned {deleted} old records)' if deleted > 0 else ''
+        print(
+            f'  Broker activity saved — {stocks_logged} stocks, {len(records)} broker rows '
+            f'logged for {trade_date}{clean_msg}  '
+            f'[{total_rows:,} total rows, {distinct_dates} trading days in history]'
+        )
+    except Exception as e:
+        print(f'  [broker logger] Warning: {e}')
+
+
+def get_top_broker_holders(symbol, db_path='nepse_market_data.db', top_n=15):
+    """Return top broker holders for a symbol based on cumulative net buying from DB."""
+    try:
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        rows = conn.execute(
+            'SELECT broker_id, broker_name, '
+            'SUM(buy_val) as total_buy, SUM(sell_val) as total_sell, '
+            'SUM(net_val) as total_net, COUNT(DISTINCT date) as days_active, '
+            'SUM(buy_qty) as total_buy_qty, SUM(sell_qty) as total_sell_qty '
+            'FROM broker_activity WHERE symbol=? '
+            'GROUP BY broker_id, broker_name '
+            'ORDER BY total_net DESC',
+            (symbol,)
+        ).fetchall()
+        conn.close()
+        results = []
+        for bid, bname, tbuy, tsell, tnet, days, bqty, sqty in rows:
+            tbuy = float(tbuy or 0)
+            tsell = float(tsell or 0)
+            bqty = int(bqty or 0)
+            sqty = int(sqty or 0)
+            avg_buy = round(tbuy / bqty, 2) if bqty > 0 else 0
+            avg_sell = round(tsell / sqty, 2) if sqty > 0 else 0
+            results.append(dict(
+                broker_id=str(bid),
+                broker_name=str(bname or ''),
+                total_buy=tbuy,
+                total_sell=tsell,
+                total_net=float(tnet or 0),
+                days_active=int(days or 0),
+                total_buy_qty=bqty,
+                total_sell_qty=sqty,
+                net_qty=bqty-sqty,
+                avg_buy_price=avg_buy,
+                avg_sell_price=avg_sell,
+            ))
+        return results[:top_n]
+    except Exception as e:
+        return []
+
+
+def analyze_broker_holders(symbol=None, db_path='nepse_market_data.db'):
+    """Menu option — show top 15 broker holders for any stock."""
+    from rich.table import Table
+    from rich.rule import Rule
+    if not symbol:
+        console.print()
+        symbol = input('  Enter stock symbol (e.g. BUNGAL): ').strip().upper()
+    if not symbol:
+        console.print('  No symbol entered.', style='yellow')
+        return
+    holders = get_top_broker_holders(symbol, db_path, top_n=15)
+    console.print()
+    console.print(Rule(f'Top Broker Holders — {symbol}', style='cyan'))
+    if not holders:
+        console.print(f'  No broker history found for {symbol}.', style='yellow')
+        console.print('  History builds automatically each trading day you run any scan.', style='dim')
+        return
+    t = Table(show_header=True, header_style='bold cyan', box=None, padding=(0, 2))
+    t.add_column('#', style='dim', width=4)
+    t.add_column('Broker ID', width=10)
+    t.add_column('Broker Name', width=32)
+    t.add_column('Net Position', width=14, justify='right')
+    t.add_column('Net Shares', width=12, justify='right')
+    t.add_column('Avg Buy', width=10, justify='right')
+    t.add_column('Avg Sell', width=10, justify='right')
+    t.add_column('Total Bought', width=14, justify='right')
+    t.add_column('Total Sold', width=14, justify='right')
+    t.add_column('Days', width=6, justify='right')
+    def _fmt(val):
+        if abs(val) >= 1e6:
+            return ('Rs ' + str(round(abs(val)/1e6, 1)) + 'M')
+        return ('Rs ' + str(round(abs(val)/1e3)) + 'K')
+    for i, h in enumerate(holders, 1):
+        net = h['total_net']
+        net_str = ('+' if net >= 0 else '-') + _fmt(net)
+        net_style = 'green' if net >= 0 else 'red'
+        net_qty = h.get('net_qty', 0)
+        nq_str = ('+' if net_qty >= 0 else '') + f'{net_qty:,}'
+        nq_style = 'green' if net_qty >= 0 else 'red'
+        avg_b = f"Rs {h.get('avg_buy_price',0):,.1f}" if h.get('avg_buy_price') else '-'
+        avg_s = f"Rs {h.get('avg_sell_price',0):,.1f}" if h.get('avg_sell_price') else '-'
+        t.add_row(
+            str(i),
+            h['broker_id'],
+            h['broker_name'],
+            f'[{net_style}]{net_str}[/{net_style}]',
+            f'[{nq_style}]{nq_str}[/{nq_style}]',
+            avg_b,
+            avg_s,
+            _fmt(h['total_buy']),
+            _fmt(h['total_sell']),
+            str(h['days_active']),
+        )
+    console.print(t)
+    console.print()
+    if holders:
+        top = holders[0]
+        console.print(f"  Top holder: Broker {top['broker_id']} ({top['broker_name']}) — net {'+' if top['total_net']>=0 else ''}{round(top['total_net']/1e6,1)}M over {top['days_active']} days", style='bold')
+        console.print()
+        # Smart summary for top 3 holders
+        console.print("  [bold cyan]── Smart Summary ──[/bold cyan]")
+        for h in holders[:3]:
+            net = h['total_net']
+            net_qty = h.get('net_qty', 0)
+            avg_b = h.get('avg_buy_price', 0)
+            avg_s = h.get('avg_sell_price', 0)
+            days = h['days_active']
+            name = h['broker_name']
+            bid = h['broker_id']
+            amt = ('Rs ' + str(round(abs(net)/1e6, 1)) + 'M') if abs(net) >= 1e6 else ('Rs ' + str(round(abs(net)/1e3)) + 'K')
+            qty_str = f'{abs(net_qty):,}'
+            if net > 0 and avg_b > 0 and avg_s > 0:
+                if avg_b > avg_s:
+                    msg = f"Broker {bid} ({name}) bought avg Rs {avg_b:,.1f} and sold avg Rs {avg_s:,.1f} — buying HIGHER than selling, net accumulating {qty_str} shares worth {amt}"
+                else:
+                    msg = f"Broker {bid} ({name}) bought avg Rs {avg_b:,.1f} and sold avg Rs {avg_s:,.1f} — selling HIGHER than buying, collecting profit while accumulating {qty_str} net shares ({amt})"
+            elif net > 0 and avg_b > 0 and avg_s == 0:
+                msg = f"Broker {bid} ({name}) only BUYING — no sells, accumulating {qty_str} shares at avg Rs {avg_b:,.1f} ({amt} invested)"
+            elif net < 0 and avg_b > 0 and avg_s > 0:
+                if avg_s > avg_b:
+                    msg = f"Broker {bid} ({name}) bought avg Rs {avg_b:,.1f} and sold avg Rs {avg_s:,.1f} — selling HIGHER than buying, distributing {qty_str} shares at profit"
+                else:
+                    msg = f"Broker {bid} ({name}) bought avg Rs {avg_b:,.1f} and sold avg Rs {avg_s:,.1f} — selling LOWER than buying, exiting position at loss ({amt} distributed)"
+            elif net < 0 and avg_s > 0 and avg_b == 0:
+                msg = f"Broker {bid} ({name}) only SELLING — no buys, distributing {qty_str} shares at avg Rs {avg_s:,.1f} ({amt} out)"
+            else:
+                msg = f"Broker {bid} ({name}) — net {'+' if net>=0 else ''}{amt} over {days} days"
+            col = 'green' if net >= 0 else 'red'
+            console.print(f"  [{col}]• {msg}[/{col}]")
+    console.print()
+
+
+
+def _get_dynamic_whales(days=30, top_n=10, db_path="nepse_market_data.db"):
+    try:
+        import sqlite3 as _sq3
+        conn = _sq3.connect(db_path)
+        dates = [d[0] for d in conn.execute("SELECT DISTINCT date FROM broker_activity ORDER BY date DESC LIMIT ?", (days,)).fetchall()]
+        if not dates:
+            conn.close(); return set(), set()
+        ph = ",".join(["?"]*len(dates))
+        rows = conn.execute(f"SELECT broker_id, SUM(CASE WHEN net_val>0 THEN net_val ELSE 0 END), SUM(CASE WHEN net_val<0 THEN ABS(net_val) ELSE 0 END), AVG(ABS(net_val)), COUNT(DISTINCT symbol) FROM broker_activity WHERE date IN ({ph}) GROUP BY broker_id", dates).fetchall()
+        conn.close()
+        scored = [(r[0], (r[3]/1000000)*(r[4]**0.5), r[1], r[2]) for r in rows]
+        buyers = sorted([r for r in scored if r[2] > r[3]*1.2], key=lambda x: x[1], reverse=True)
+        sellers = sorted([r for r in scored if r[3] > r[2]*1.2], key=lambda x: x[1], reverse=True)
+        return set(r[0] for r in buyers[:top_n]), set(r[0] for r in sellers[:top_n])
+    except:
+        return set(), set()
+
+def analyze_broker_trend(symbol=None, days=7, db_path="nepse_market_data.db"):
+    import sqlite3
+    from rich.table import Table
+    if symbol: symbol = symbol.upper()
+    if not symbol:
+        console.print()
+        symbol = input("  Enter stock symbol: ").strip().upper()
+    if not symbol:
+        console.print("  Missing symbol.", style="yellow"); return
+    try:
+        conn = sqlite3.connect(db_path)
+        dates = conn.execute(
+            "SELECT DISTINCT date FROM broker_activity WHERE symbol=? ORDER BY date DESC LIMIT ?",
+            (symbol, days)
+        ).fetchall()
+        dates = [d[0] for d in dates]
+        dates.reverse()
+        if not dates:
+            console.print(f"  No data for {symbol}.", style="yellow"); conn.close(); return
+        console.print()
+        console.rule(f"[bold cyan]Broker Trend — {symbol} (last {len(dates)} days)[/bold cyan]")
+        console.print()
+        t = Table(show_header=True, header_style="bold cyan", box=None, padding=(0, 2))
+        t.add_column("Date", width=12)
+        t.add_column("Score", width=12, justify="center")
+        t.add_column("Dominant Buyer", width=30)
+        t.add_column("Dominant Seller", width=30)
+        t.add_column("Net Flow", width=14, justify="center")
+        score_history = []
+        for date_str in dates:
+            rows = conn.execute(
+                "SELECT broker_id, broker_name, net_val FROM broker_activity WHERE symbol=? AND date=? ORDER BY net_val DESC",
+                (symbol, date_str)
+            ).fetchall()
+            if not rows: continue
+            smb = [r for r in rows if r[2] > 0]
+            sms = [r for r in rows if r[2] < 0]
+            ssn = len(rows); snb = len(smb)
+            sbp = snb / ssn * 100 if ssn else 0
+            whale_buyers, whale_sellers = _get_dynamic_whales()
+            ss = 50
+            if sbp > 65: ss += 20
+            elif sbp > 50: ss += 10
+            else: ss -= 10
+            for r2 in rows:
+                if r2[0] in whale_buyers: ss = min(100, ss + 8)
+                elif r2[0] in whale_sellers: ss = max(0, ss - 8)
+            buyer_name = f"{smb[0][0]} {smb[0][1][:18]} {_fmt_rs_val(abs(smb[0][2]))}" if smb else "—"
+            seller_name = f"{sms[0][0]} {sms[0][1][:18]} {_fmt_rs_val(abs(sms[0][2]))}" if sms else "—"
+            ssv = "BULL" if ss >= 70 else "BEAR" if ss <= 30 else "MIX"
+            ssc = "green" if ss >= 70 else "red" if ss <= 30 else "yellow"
+            net_flow = sum(r[2] for r in rows if r[2] > 0)
+
+
+            if net_flow > 100000: flow_str = f"[green]IN {_fmt_rs_val(abs(net_flow))}[/green]"
+            elif net_flow < -100000: flow_str = f"[red]OUT {_fmt_rs_val(abs(net_flow))}[/red]"
+            else: flow_str = f"[yellow]NEUTRAL {_fmt_rs_val(abs(net_flow))}[/yellow]"
+            score_str = f"[{ssc}]{ss}  {ssv}[/{ssc}]"
+            t.add_row(date_str, score_str, buyer_name, seller_name, flow_str)
+            score_history.append(ss)
+        console.print(t)
+        console.print()
+        if len(score_history) >= 2:
+            console.print("[bold]Trend Insights:[/bold]")
+            if score_history[-1] > score_history[0]:
+                console.print("  ↗ Smart money sentiment improving", style="green")
+            elif score_history[-1] < score_history[0]:
+                console.print("  ↘ Smart money sentiment deteriorating", style="red")
+            else:
+                console.print("  → Sentiment flat over period", style="yellow")
+            avg = sum(score_history) / len(score_history)
+            console.print(f"  Avg score over {len(score_history)} days: {avg:.0f}/100")
+        conn.close()
+        console.print()
+    except Exception as e:
+        console.print(f"  Error: {e}", style="red")
+
+
+def analyze_broker_impact(days=30, top_n=20, db_path="nepse_market_data.db"):
+    import sqlite3
+    from rich.table import Table
+    console.print()
+    console.rule("[bold cyan]Broker Impact Analysis[/bold cyan]")
+    console.print()
+    try:
+        conn = sqlite3.connect(db_path)
+        # Get date range
+        dates = conn.execute("SELECT DISTINCT date FROM broker_activity ORDER BY date DESC LIMIT ?", (days,)).fetchall()
+        dates = [d[0] for d in dates]
+        if not dates:
+            console.print("  No data found.", style="yellow"); conn.close(); return
+        console.print(f"  Analysing {len(dates)} trading days ({dates[-1]} to {dates[0]})")
+        console.print()
+        # Aggregate per broker
+        rows = conn.execute("""
+            SELECT broker_id, broker_name,
+                COUNT(DISTINCT symbol) as stocks_traded,
+                COUNT(*) as total_appearances,
+                SUM(CASE WHEN net_val > 0 THEN 1 ELSE 0 END) as buy_days,
+                SUM(CASE WHEN net_val < 0 THEN 1 ELSE 0 END) as sell_days,
+                SUM(CASE WHEN net_val > 0 THEN net_val ELSE 0 END) as total_bought,
+                SUM(CASE WHEN net_val < 0 THEN ABS(net_val) ELSE 0 END) as total_sold,
+                AVG(ABS(net_val)) as avg_trade_size
+            FROM broker_activity
+            WHERE date IN ({})
+            GROUP BY broker_id, broker_name
+            ORDER BY avg_trade_size DESC
+        """.format(",".join(["?"]*len(dates))), dates).fetchall()
+        conn.close()
+        if not rows:
+            console.print("  No broker data found.", style="yellow"); return
+        # Score each broker: avg_trade_size * stocks_traded * appearances
+        scored = []
+        for r in rows:
+            bid, bname, stocks, apps, bdays, sdays, tbought, tsold, avg_size = r
+            impact = (avg_size / 1000000) * (stocks ** 0.5) * (apps ** 0.3)
+            net = tbought - tsold
+            bias = "BUYER" if tbought > tsold * 1.2 else "SELLER" if tsold > tbought * 1.2 else "NEUTRAL"
+            scored.append((bid, bname, stocks, apps, bdays, sdays, tbought, tsold, avg_size, impact, bias, net))
+        scored.sort(key=lambda x: x[9], reverse=True)
+        scored = scored[:top_n]
+        t = Table(show_header=True, header_style="bold cyan", box=None, padding=(0,2))
+        t.add_column("#", width=3, justify="right")
+        t.add_column("Broker", width=6, justify="right")
+        t.add_column("Name", width=28)
+        t.add_column("Stocks", width=7, justify="right")
+        t.add_column("Appear", width=7, justify="right")
+        t.add_column("Avg Size", width=12, justify="right")
+        t.add_column("Total Bought", width=14, justify="right")
+        t.add_column("Total Sold", width=14, justify="right")
+        t.add_column("Bias", width=10, justify="center")
+        for rank, r in enumerate(scored, 1):
+            bid, bname, stocks, apps, bdays, sdays, tbought, tsold, avg_size, impact, bias, net = r
+            bc = "green" if bias == "BUYER" else "red" if bias == "SELLER" else "yellow"
+            t.add_row(
+                str(rank), str(bid), bname[:28],
+                str(stocks), str(apps),
+                _fmt_rs_val(avg_size),
+                _fmt_rs_val(tbought),
+                _fmt_rs_val(tsold),
+                f"[{bc}]{bias}[/{bc}]"
+            )
+        console.print(t)
+        console.print()
+        console.print("[bold]Top 5 Institutional Buyers:[/bold]")
+        buyers = [r for r in scored if r[10] == "BUYER"][:5]
+        for r in buyers:
+            console.print(f"  [green]Broker {r[0]} ({r[1][:25]}) - avg {_fmt_rs_val(r[8])} per trade, {r[2]} stocks[/green]")
+        console.print()
+        console.print("[bold]Top 5 Institutional Sellers:[/bold]")
+        sellers = [r for r in scored if r[10] == "SELLER"][:5]
+        for r in sellers:
+            console.print(f"  [red]Broker {r[0]} ({r[1][:25]}) - avg {_fmt_rs_val(r[8])} per trade, {r[2]} stocks[/red]")
+        console.print()
+    except Exception as e:
+        console.print(f"  Error: {e}", style="red")
+
+
+def analyze_momentum_hunter(days=7, top_n=15, min_days=2, db_path='nepse_market_data.db'):
+    import sqlite3
+    from rich.table import Table
+    console.print()
+    console.rule('[bold cyan]Momentum Hunter -- Early Accumulation Detector[/bold cyan]')
+    console.print()
+    try:
+        conn = sqlite3.connect(db_path)
+        dates = [d[0] for d in conn.execute('SELECT DISTINCT date FROM broker_activity ORDER BY date DESC LIMIT ?', (days,)).fetchall()]
+        if len(dates) < 2:
+            console.print('  Need at least 2 days of data. Run Full Scan daily.', style='yellow')
+            conn.close()
+            return
+        dates_sorted = sorted(dates)
+        console.print('  Scanning ' + str(len(dates)) + ' days (' + dates_sorted[0] + ' to ' + dates_sorted[-1] + ')')
+        console.print()
+        ph = ','.join(['?']*len(dates))
+        symbols = [r[0] for r in conn.execute('SELECT DISTINCT symbol FROM broker_activity WHERE date IN (' + ph + ') ORDER BY symbol', dates).fetchall()]
+        console.print('  Analysing ' + str(len(symbols)) + ' stocks...', style='dim')
+        whale_buyers, whale_sellers = _get_dynamic_whales(days=days)
+        candidates = []
+        for symbol in symbols:
+            daily = []
+            for date_str in dates_sorted:
+                rows = conn.execute('SELECT broker_id, net_val FROM broker_activity WHERE symbol=? AND date=?', (symbol, date_str)).fetchall()
+                if not rows:
+                    continue
+                total_buy = sum(r[1] for r in rows if r[1] > 0)
+                n_buyers = len([r for r in rows if r[1] > 0])
+                n_total = len(rows)
+                buyer_pct = n_buyers / n_total * 100 if n_total else 0
+                whale_buy = sum(1 for r in rows if r[0] in whale_buyers and r[1] > 0)
+                whale_sell = sum(1 for r in rows if r[0] in whale_sellers and r[1] < 0)
+                ds = 50
+                if buyer_pct > 65:
+                    ds += 20
+                elif buyer_pct > 50:
+                    ds += 10
+                else:
+                    ds -= 10
+                ds += whale_buy * 8
+                ds -= whale_sell * 8
+                ds = max(0, min(100, ds))
+                daily.append({'date': date_str, 'score': ds, 'net': total_buy, 'buyers': n_buyers, 'total': n_total, 'wb': whale_buy})
+            if len(daily) < min_days:
+                continue
+            consec = 0
+            for d in reversed(daily):
+                if d['score'] >= 55:
+                    consec += 1
+                else:
+                    break
+            if consec < min_days:
+                continue
+            recent = daily[-min_days:]
+            avg_score = sum(d['score'] for d in recent) / len(recent)
+            total_net = sum(d['net'] for d in recent)
+            trend = daily[-1]['score'] - daily[0]['score'] if len(daily) > 1 else 0
+            total_whale = sum(d['wb'] for d in recent)
+            momentum = (avg_score * 0.4) + (min(consec, 5) * 8) + (min(total_whale, 5) * 4) + (min(trend, 30) * 0.3)
+            momentum = max(0, min(100, momentum))
+            candidates.append({'symbol': symbol, 'consec': consec, 'avg_score': avg_score, 'momentum': momentum, 'total_net': total_net, 'total_whale': total_whale, 'trend': trend, 'daily': daily})
+        conn.close()
+        if not candidates:
+            console.print('  No momentum candidates found. Need more data days.', style='yellow')
+            return
+        candidates.sort(key=lambda x: x['momentum'], reverse=True)
+        candidates = candidates[:top_n]
+        t = Table(show_header=True, header_style='bold cyan', box=None, padding=(0, 2))
+        t.add_column('Rank', width=5, justify='right')
+        t.add_column('Symbol', width=10)
+        t.add_column('Days', width=5, justify='center')
+        t.add_column('Score', width=12, justify='center')
+        t.add_column('Trend', width=10, justify='center')
+        t.add_column('Net Flow', width=14, justify='right')
+        t.add_column('Whales', width=7, justify='center')
+        t.add_column('Signal', width=14, justify='center')
+        for rank, c in enumerate(candidates, 1):
+            sc = c['momentum']
+            sc_col = 'green' if sc >= 70 else 'yellow' if sc >= 55 else 'white'
+            tr = c['trend']
+            if tr > 5:
+                tr_str = '[green]+' + str(round(tr)) + '[/green]'
+            elif tr < -5:
+                tr_str = '[red]' + str(round(tr)) + '[/red]'
+            else:
+                tr_str = '[yellow]' + str(round(tr)) + '[/yellow]'
+            if sc >= 75:
+                sig = '[green]STRONG BUY[/green]'
+            elif sc >= 60:
+                sig = '[cyan]WATCH[/cyan]'
+            else:
+                sig = '[yellow]WEAK[/yellow]'
+            t.add_row(str(rank), c['symbol'], str(c['consec']), '[' + sc_col + ']' + str(round(sc)) + '/100[/' + sc_col + ']', tr_str, _fmt_rs_val(c['total_net']), str(c['total_whale']), sig)
+        console.print(t)
+        console.print()
+        console.print('[bold]Top 3 Detailed Breakdown:[/bold]')
+        for c in candidates[:3]:
+            sc = c['momentum']
+            sc_col = 'green' if sc >= 70 else 'yellow'
+            console.print('  [' + sc_col + ']' + c['symbol'] + '[/' + sc_col + '] - ' + str(c['consec']) + ' consecutive buy days, momentum ' + str(round(sc)) + '/100')
+            for d in c['daily'][-3:]:
+                dc = 'green' if d['score'] >= 60 else 'red' if d['score'] < 45 else 'yellow'
+                console.print('    ' + d['date'] + ': [' + dc + ']' + str(d['score']) + '[/' + dc + '] | buyers ' + str(d['buyers']) + '/' + str(d['total']) + ' | net ' + _fmt_rs_val(d['net']))
+        console.print()
+        console.print('[dim]Best entries: STRONG BUY stocks near support (option 18). Confirm with 17c.[/dim]')
+        console.print()
+    except Exception as e:
+        console.print('  Error: ' + str(e), style='red')
+        import traceback
+        traceback.print_exc()
+
+def analyze_broker_date(symbol=None, date_str=None, db_path='nepse_market_data.db'):
+    """Show broker activity for a specific stock on a specific date."""
+    from rich.table import Table
+    from rich.rule import Rule
+    if not symbol:
+        console.print()
+        symbol = input('  Enter stock symbol (e.g. CHCL): ').strip().upper()
+    symbol = symbol.upper()
+    # Show available dates first, then ask for date
+    try:
+        import sqlite3 as _sq
+        _conn = _sq.connect(db_path)
+        _avail = _conn.execute(
+            'SELECT DISTINCT date FROM broker_activity WHERE symbol=? ORDER BY date DESC LIMIT 30',
+            (symbol,)
+        ).fetchall()
+        _conn.close()
+        if _avail:
+            console.print()
+            console.print(f'  Available dates for [bold]{symbol}[/bold] in DB:')
+            for _i, (_d,) in enumerate(_avail, 1):
+                console.print(f'    {_i:>2}. {_d}')
+            console.print()
+        else:
+            console.print(f'  No data found for {symbol} yet — run a scan first on a trading day.', style='yellow')
+    except Exception:
+        pass
+    if not date_str or date_str.lower() == 'prompt':
+        date_str = input('  Enter date from above (YYYY-MM-DD): ').strip()
+    # Normalize date format
+    try:
+        if '/' in date_str:
+            parts = date_str.split('/')
+            if len(parts[2]) == 4:  # DD/MM/YYYY
+                date_str = f"{parts[2]}-{parts[1].zfill(2)}-{parts[0].zfill(2)}"
+            else:  # MM/DD/YYYY
+                date_str = f"{parts[2]}-{parts[0].zfill(2)}-{parts[1].zfill(2)}"
+    except Exception:
+        pass
+    if not symbol:
+        console.print('  Missing symbol.', style='yellow')
+        return
+    try:
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        # Normalize date format
+        try:
+            if '/' in date_str:
+                parts = date_str.split('/')
+                if len(parts[2]) == 4:
+                    date_str = f"{parts[2]}-{parts[1].zfill(2)}-{parts[0].zfill(2)}"
+                else:
+                    date_str = f"{parts[2]}-{parts[0].zfill(2)}-{parts[1].zfill(2)}"
+        except Exception:
+            pass
+        if not date_str:
+            console.print('  No date entered.', style='yellow')
+            conn.close()
+            return
+        rows = conn.execute(
+            'SELECT broker_id, broker_name, buy_qty, sell_qty, net_qty, buy_val, sell_val, net_val '
+            'FROM broker_activity WHERE symbol=? AND date=? '
+            'ORDER BY net_val DESC',
+            (symbol, date_str)
+        ).fetchall()
+        conn.close()
+    except Exception as e:
+        console.print(f'  DB error: {e}', style='red')
+        return
+    console.print()
+    console.print(Rule(f'Broker Activity — {symbol} on {date_str}', style='cyan'))
+    if not rows:
+        console.print(f'  No data found for {symbol} on {date_str}.', style='yellow')
+        console.print('  Note: Only dates after you started running scans will have data.', style='dim')
+        return
+    def _fmt(val):
+        if abs(val) >= 1e6:
+            return ('Rs ' + str(round(abs(val)/1e6, 1)) + 'M')
+        return ('Rs ' + str(round(abs(val)/1e3)) + 'K')
+    t = Table(show_header=True, header_style='bold cyan', box=None, padding=(0, 2))
+    t.add_column('#', style='dim', width=4)
+    t.add_column('Broker ID', width=10)
+    t.add_column('Broker Name', width=35)
+    t.add_column('Net Position', width=14, justify='right')
+    t.add_column('Net Shares', width=12, justify='right')
+    t.add_column('Avg Price', width=12, justify='right')
+    t.add_column('Total Bought', width=14, justify='right')
+    t.add_column('Total Sold', width=14, justify='right')
+    total_buy_val = 0
+    total_sell_val = 0
+    buyers = 0
+    sellers = 0
+    for i, (bid, bname, bq, sq, nq, bv, sv, nv) in enumerate(rows, 1):
+        net_style = 'green' if nv >= 0 else 'red'
+        net_str = ('+' if nv >= 0 else '-') + _fmt(nv)
+        nq_str = ('+' if nq >= 0 else '') + f'{nq:,}'
+        total_vol = bq + sq
+        avg_price = round((bv + sv) / total_vol, 1) if total_vol > 0 else 0
+        avg_str = f'Rs {avg_price:,.1f}' if avg_price > 0 else '-'
+        t.add_row(str(i), str(bid), str(bname or ''),
+            f'[{net_style}]{net_str}[/{net_style}]',
+            f'[{net_style}]{nq_str}[/{net_style}]',
+            avg_str, _fmt(bv), _fmt(sv))
+        total_buy_val += bv
+        total_sell_val += sv
+        if nv > 0: buyers += 1
+        elif nv < 0: sellers += 1
+    console.print(t)
+    console.print()
+    # Summary
+    console.print(f'  Total brokers: {len(rows)}  |  Net buyers: [green]{buyers}[/green]  |  Net sellers: [red]{sellers}[/red]')
+    console.print(f'  Total volume bought: {_fmt(total_buy_val)}  |  Total volume sold: {_fmt(total_sell_val)}')
+    net_flow = total_buy_val - total_sell_val
+    flow_col = 'green' if net_flow >= 0 else 'red'
+    flow_dir = 'NET INFLOW' if net_flow >= 0 else 'NET OUTFLOW'
+
+    # Smart Money Analysis
+    console.print()
+    console.rule('[bold cyan]Smart Money Analysis[/bold cyan]')
+    lw = {'34':'Vision Sec','41':'Linch Stock','52':'Sundhara Sec','58':'Naasa Sec'}
+    smb = [r for r in rows if r[7] > 0]
+    sms = [r for r in rows if r[7] < 0]
+    smtb = max(smb, key=lambda x: x[7]) if smb else None
+    smts = min(sms, key=lambda x: x[7]) if sms else None
+    smst = sum(abs(r[7]) for r in sms)
+    ssn = len(rows); snb = len(smb); sns = len(sms)
+    sbp = snb / ssn * 100 if ssn else 0
+    console.print()
+    console.print('  [bold yellow]Whale Activity:[/bold yellow]')
+    swf = False
+    for r in rows:
+        bid = str(r[0])
+        if bid in lw:
+            swf = True
+            sa = 'BUYING' if r[7] > 0 else 'SELLING'
+            sc2 = 'green' if r[7] > 0 else 'red'
+            sv = _fmt_rs_val(abs(r[7]))
+            sd = ' <- DOMINANT SELLER' if smts and r[0] == smts[0] and r[7] < 0 else ''
+            console.print(f'     [{sc2}]Broker {bid} ({lw[bid]}) - {sa} {sv}{sd}[/{sc2}]')
+    if smts and str(smts[0]) not in lw:
+        sv2 = _fmt_rs_val(abs(smts[7]))
+        bid2 = str(smts[0]); bnm2 = smts[1]
+        console.print(f'     [red]Broker {bid2} ({bnm2}) - SELLING {sv2} <- DOMINANT SELLER[/red]')
+    if smtb and str(smtb[0]) not in lw:
+        sv3 = _fmt_rs_val(smtb[7])
+        bid3 = str(smtb[0]); bnm3 = smtb[1]
+        console.print(f'     [green]Broker {bid3} ({bnm3}) - BUYING {sv3} <- DOMINANT BUYER[/green]')
+    if not swf: console.print('     [dim]No tracked whales active today[/dim]')
+    ss = 50
+    if sbp > 65: ss += 20
+    elif sbp > 50: ss += 10
+    else: ss -= 10
+    if smts:
+        sp2 = abs(smts[7]) / smst * 100 if smst else 0
+        if sp2 > 60: ss -= 20
+        elif sp2 > 40: ss -= 10
+    for r in rows:
+        if str(r[0]) in lw:
+            ss += 10 if r[7] > 0 else -10
+    ss = max(0, min(100, ss))
+    ssv,ssc = ('BULLISH','green') if ss>=70 else ('MIXED','yellow') if ss>=50 else ('BEARISH','red')
+    console.print()
+    console.print(f'  [bold]Smart Money Score: [{ssc}]{ss}/100 ({ssv})[/{ssc}][/bold]')
+    console.print(f'     + {snb} brokers buying ({sbp:.0f}% of participants)')
+    console.print(f'     - {sns} brokers selling')
+    if smts:
+        sp2 = abs(smts[7]) / smst * 100 if smst else 0
+        if sp2 > 40:
+            sv4 = _fmt_rs_val(abs(smts[7]))
+            bid4 = str(smts[0])
+            console.print(f'     - 1 dominant seller (Broker {bid4}) - {sv4} ({sp2:.0f}% of all selling)')
+    if net_flow > 10000: console.print(f'     + Net flow: [green]INFLOW {_fmt_rs_val(abs(net_flow))}[/green]')
+    elif net_flow < -10000: console.print(f'     - Net flow: [red]OUTFLOW {_fmt_rs_val(abs(net_flow))}[/red]')
+    else: console.print('     ~ Net flow: [yellow]NEUTRAL[/yellow]')
+    console.print()
+    if smts:
+        sp2 = abs(smts[7]) / smst * 100 if smst else 0
+        if sp2 > 50 and sbp > 60:
+            bid5 = str(smts[0])
+            console.print(f'  [bold yellow]WARNING:[/bold yellow] Large single seller (Broker {bid5}) offsetting all buying - possible distribution')
+    if ss >= 70: console.print('  [bold green]SIGNAL:[/bold green] Strong smart money accumulation - watch for breakout')
+    elif ss <= 30: console.print('  [bold red]SIGNAL:[/bold red] Smart money distributing - consider reducing exposure')
+    console.print()
+    if smts:
+        sp2 = abs(smts[7]) / smst * 100 if smst else 0
+        if sp2 > 50 and sbp > 60:
+            bid5 = str(smts[0])
+            console.print(f'  [bold yellow]WARNING:[/bold yellow] Large single seller (Broker {bid5}) offsetting all buying - possible distribution')
+    if ss >= 70: console.print('  [bold green]SIGNAL:[/bold green] Strong smart money accumulation - watch for breakout')
+    elif ss <= 30: console.print('  [bold red]SIGNAL:[/bold red] Smart money distributing - consider reducing exposure')
+    console.print()
+    console.print(f'  [{flow_col}]{flow_dir}: {_fmt(abs(net_flow))}[/{flow_col}]')
+    console.print()
+
 
 if __name__ == "__main__":
     main()
