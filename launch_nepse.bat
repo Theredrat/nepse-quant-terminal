@@ -12,9 +12,9 @@ echo.
 :: AUTO FULL SCAN - skips on holidays/weekends
 echo Checking market status...
 python _marketcheck.py
-if errorlevel neq 0 goto SKIPSCAN
+if errorlevel 1 goto SKIPSCAN
 echo Running daily full scan...
-python nepse_scanner.py
+python nepse_scanner.py --report
 :SKIPSCAN
 echo Daily scan complete.
 echo.
@@ -240,24 +240,24 @@ python nepse_scanner.py --float %symbol%
 goto AGAIN
 :RUN_FULLSCAN
 python _marketcheck.py
-if errorlevel neq 0 goto AGAIN
+if errorlevel 1 goto AGAIN
 python nepse_scanner.py
 goto AGAIN
  
 :RUN_FULLSCAN
 python _marketcheck.py
-if errorlevel neq 0 goto AGAIN
+if errorlevel 1 goto AGAIN
 python nepse_scanner.py
 goto AGAIN
  
 :RUN_MOVERS
 python _marketcheck.py
-if errorlevel neq 0 goto AGAIN
+if errorlevel 1 goto AGAIN
 python nepse_scanner.py --movers-only
 goto AGAIN
 :RUN_WATCHLIST
 python _marketcheck.py
-if errorlevel neq 0 goto AGAIN
+if errorlevel 1 goto AGAIN
 python nepse_scanner.py --watchlist
 goto AGAIN
 :AGAIN
