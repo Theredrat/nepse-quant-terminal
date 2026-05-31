@@ -323,7 +323,7 @@ def eod_summary(live_df):
 
     lines = ["<b>End of Day Summary — Watchlist</b>\n"]
     found = 0
-    for sym in watchlist[:10]:
+    for sym in watchlist:
         row = live_df[live_df["symbol"] == sym]
         if row.empty:
             continue
@@ -514,18 +514,24 @@ def run_loop():
 def send_test():
     log.info("Sending test alert...")
     watchlist = get_watchlist_with_scores()
-    wl_str = ", ".join([s for s, _ in watchlist[:5]]) if watchlist else "None loaded"
+    wl_lines = []
+    for i, (sym, score) in enumerate(watchlist, 1):
+        if score >= 35:   reason = "Strong RS + Volume + Fundamentals"
+        elif score >= 25: reason = "Good RS + Fundamentals"
+        elif score >= 15: reason = "Moderate signal"
+        else:             reason = "Watchlist - monitor"
+        wl_lines.append(f"  {i}. <b>{sym}</b> - Score {score} | {reason}")
+    wl_str = chr(10).join(wl_lines) if wl_lines else "None loaded"
     msg = (
-        "<b>NEPSE Alert Bot — TEST</b>\n\n"
+        "<b>NEPSE Alert Bot - TEST</b>\n\n"
         "<b>BREAKOUT: BUNGAL</b> | IN YOUR WATCHLIST\n"
         "Near 52W High (-1.0%) + RS +10.6%\n"
-        "LTP: Rs 841 | Change: +14.88%\n"
-        "Turnover: Rs 147M\n\n"
-        f"<b>Current watchlist:</b> {wl_str}\n\n"
-        "<i>Test message — real alerts will look like this!</i>"
+        "LTP: Rs 841 | Change: +14.88%\n\n"
+        f"<b>Watchlist ({len(watchlist)} stocks):</b>\n{wl_str}\n\n"
+        "<i>Test message - real alerts will look like this!</i>"
     )
     ok = send_telegram(msg)
-    print("Test alert sent!" if ok else "FAILED — check token/chat ID")
+    print("Test alert sent!" if ok else "FAILED - check token/chat ID")
 
 
 if __name__ == "__main__":
