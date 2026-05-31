@@ -274,89 +274,140 @@ def fmt_rs(val):
 
 # ── POWER SELL ────────────────────────────────────────────────────────────────
 
-def auto_update_watchlist(rs_data, full_fs, db_path, top_n=15):
-    """Score every stock on RS + broker accumulation + volume spike, keep top N."""
-    import json, sqlite3
+def auto_update_watchlist(rs_data, full_fs, db_path, top_n=15, silent=False):
+    import sqlite3, json
     from pathlib import Path
+    from collections import defaultdict
 
-    WATCHLIST_PATH = Path("data/runtime/accounts/account_1/watchlist.json")
-    if not WATCHLIST_PATH.exists():
+    try:
+        conn = sqlite3.connect(db_path)
+    except Exception as e:
+        if not silent: print('Watchlist: DB error', e)
         return
 
+    # RS scores
+    if not rs_data:
+        try: rs_data = _calc_relative_strength(db_path)
+        except: rs_data = []
+    rs_map = {r['symbol']: r for r in (rs_data or [])}
+
+    # Fundamentals
+    fund_map = {}
+    try:
+        for row in conn.execute('SELECT symbol, pe_ratio, pb_ratio, roe FROM fundamentals').fetchall():
+            fund_map[row[0]] = {'pe': row[1] or 0, 'pb': row[2] or 0, 'roe': row[3] or 0}
+    except: pass
+
+    # EPS growth QoQ
+    eps_growth_map = {}
+    try:
+        fy = conn.execute('SELECT MAX(fiscal_year) FROM quarterly_earnings').fetchone()[0]
+        if fy:
+            rows = conn.execute(
+                'SELECT symbol, quarter, eps FROM quarterly_earnings WHERE fiscal_year=? ORDER BY symbol, quarter',
+                (fy,)
+            ).fetchall()
+            eq = defaultdict(list)
+            for sym, q, eps in rows:
+                eq[sym].append(eps or 0)
+            for sym, eps_list in eq.items():
+                if len(eps_list) >= 2 and eps_list[-2] != 0:
+                    eps_growth_map[sym] = (eps_list[-1] - eps_list[-2]) / abs(eps_list[-2]) * 100
+    except: pass
+
+    # Broker net activity
+    broker_map = {}
+    try:
+        latest = conn.execute('SELECT MAX(date) FROM broker_activity').fetchone()[0]
+        if latest:
+            rows = conn.execute(
+                'SELECT symbol, SUM(net_qty), SUM(net_val) FROM broker_activity WHERE date=? GROUP BY symbol',
+                (latest,)
+            ).fetchall()
+            all_vals = sorted([abs(r[2] or 0) for r in rows], reverse=True)
+            threshold = all_vals[int(len(all_vals) * 0.2)] if len(all_vals) > 5 else 0
+            for sym, net_qty, net_val in rows:
+                nq = net_qty or 0
+                nv = net_val or 0
+                broker_map[sym] = {'net_qty': nq, 'net_val': nv, 'top20': abs(nv) >= threshold and nv > 0}
+    except: pass
+
+    # Volume spike vs 20d avg
+    vol_map = {}
+    try:
+        latest_price = conn.execute('SELECT MAX(date) FROM stock_prices').fetchone()[0]
+        if latest_price:
+            cur_vol = {r[0]: r[1] for r in conn.execute(
+                'SELECT symbol, volume FROM stock_prices WHERE date=?', (latest_price,)
+            ).fetchall()}
+            avg_vol = {r[0]: r[1] for r in conn.execute(
+                'SELECT symbol, AVG(volume) FROM stock_prices WHERE date >= date(?, "-20 days") GROUP BY symbol',
+                (latest_price,)
+            ).fetchall()}
+            for sym, avg in avg_vol.items():
+                vol = cur_vol.get(sym) or 0
+                vol_map[sym] = {'spike': vol > avg * 1.5 if avg > 0 else False, 'avg': avg}
+    except: pass
+
+    conn.close()
+
+    # Score every symbol
+    all_syms = set(list(rs_map.keys()) + list(fund_map.keys()) + list(broker_map.keys()))
     scores = {}
+    for sym in all_syms:
+        sc = 0
+        rs = rs_map.get(sym, {})
+        rs5  = rs.get('rs5',  0) or 0
+        rs10 = rs.get('rs10', 0) or 0
+        rs20 = rs.get('rs20', 0) or 0
+        if rs5  > 5:  sc += 20
+        elif rs5 > 2: sc += 10
+        if rs10 > 3:  sc += 10
+        elif rs10 > 1: sc += 5
+        if rs20 > 2:  sc += 5
 
-    # ── Score 1: RS score (normalised 0-40) ──────────────────────────────────
-    if rs_data:
-        rs_sorted = sorted(rs_data, key=lambda x: x.get("rs_score", 0) or 0, reverse=True)
-        total = len(rs_sorted)
-        for rank, row in enumerate(rs_sorted, 1):
-            sym = row.get("symbol", "")
-            if not sym:
-                continue
-            # top rank = 40 pts, bottom = 0
-            scores.setdefault(sym, 0)
-            scores[sym] += int((1 - (rank - 1) / max(total, 1)) * 40)
+        bk = broker_map.get(sym, {})
+        if bk.get('net_qty', 0) > 0: sc += 10
+        if bk.get('top20', False):   sc += 5
 
-    # ── Score 2: Broker accumulation from today floorsheet (0-40) ────────────
-    if full_fs is not None and not full_fs.empty:
-        try:
-            for sym, grp in full_fs.groupby("symbol"):
-                buy_val  = grp[grp["buyerMemberId"].notna()]["contractAmount"].sum()
-                sell_val = grp[grp["sellerMemberId"].notna()]["contractAmount"].sum()
-                total_val = buy_val + sell_val
-                if total_val > 0:
-                    net_ratio = (buy_val - sell_val) / total_val  # -1 to +1
-                    scores.setdefault(sym, 0)
-                    if net_ratio > 0:
-                        scores[sym] += int(net_ratio * 40)
-        except Exception:
-            pass
+        if vol_map.get(sym, {}).get('spike', False): sc += 10
 
-    # ── Score 3: Volume spike vs DB average (0-20) ───────────────────────────
-    if full_fs is not None and not full_fs.empty and db_path and Path(db_path).exists():
-        try:
-            import sqlite3
-            conn = sqlite3.connect(db_path)
-            cur  = conn.cursor()
-            # today volume per symbol from floorsheet
-            today_vol = full_fs.groupby("symbol")["contractQuantity"].sum().to_dict()
-            for sym, vol in today_vol.items():
-                try:
-                    cur.execute(
-                        "SELECT AVG(v) FROM (SELECT SUM(quantity) as v FROM broker_activity "
-                        "WHERE symbol=? GROUP BY date ORDER BY date DESC LIMIT 20)",
-                        (sym,)
-                    )
-                    row = cur.fetchone()
-                    avg_vol = row[0] if row and row[0] else 0
-                    if avg_vol > 0 and vol > avg_vol * 1.5:
-                        spike_score = min(int(((vol / avg_vol) - 1) * 10), 20)
-                        scores.setdefault(sym, 0)
-                        scores[sym] += spike_score
-                except Exception:
-                    pass
-            conn.close()
-        except Exception:
-            pass
+        fn = fund_map.get(sym, {})
+        roe = fn.get('roe', 0) or 0
+        pe  = fn.get('pe',  0) or 0
+        pb  = fn.get('pb',  0) or 0
+        if roe > 15:  sc += 10
+        elif roe > 8: sc += 5
+        if 0 < pe < 15:   sc += 8
+        elif 0 < pe < 30: sc += 4
+        if 0 < pb < 3:    sc += 5
 
-    # ── Pick top N ────────────────────────────────────────────────────────────
+        eg = eps_growth_map.get(sym)
+        if eg is not None:
+            if eg > 20:   sc += 12
+            elif eg > 10: sc += 7
+            elif eg > 0:  sc += 3
+
+        if sc > 0:
+            scores[sym] = sc
+
     ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-    top    = [sym for sym, sc in ranked if sc > 0][:top_n]
+    top = [sym for sym, sc in ranked if vol_map.get(sym, {}).get('avg', 0) >= 2000 and rs_map.get(sym, {}).get('rs5', 0) > -2][:top_n]
 
     if not top:
+        if not silent: print('Watchlist: no candidates found')
         return
 
-    # ── Write watchlist ───────────────────────────────────────────────────────
+    WL_PATH = Path('data/runtime/accounts/account_1/watchlist.json')
     watchlist = [
-        {"kind": "stock", "key": f"stock:{sym}", "label": sym, "symbol": sym}
+        {'kind': 'stock', 'key': 'stock:' + sym, 'label': sym, 'symbol': sym, 'score': scores.get(sym, 0)}
         for sym in top
     ]
-    WATCHLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
-    json.dump(watchlist, open(WATCHLIST_PATH, "w", encoding="utf-8"), indent=2)
-    print(f"Watchlist auto-updated — top {len(top)} stocks by RS + accumulation + volume")
-    if top:
-        print(f"  Top picks: {', '.join(top[:5])}{'...' if len(top) > 5 else ''}")
-
+    WL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    json.dump(watchlist, open(str(WL_PATH), 'w', encoding='utf-8'), indent=2)
+    if not silent:
+        print('Watchlist auto-updated ? top ' + str(len(top)) + ' by RS+Broker+Vol+ROE+EPS')
+        if top: print('  Top: ' + ', '.join(top[:5]) + ('...' if len(top) > 5 else ''))
 
 def analyze_power_sell(full_df, live_df):
     console.print()
@@ -1044,7 +1095,7 @@ def analyze_watchlist(live_df):
             elif chg>=5: parts.append(chr(91)+chr(103)+chr(114)+chr(101)+chr(101)+chr(110)+chr(93)+chr(83)+chr(84)+chr(82)+chr(79)+chr(78)+chr(71)+chr(91)+chr(47)+chr(103)+chr(114)+chr(101)+chr(101)+chr(110)+chr(93))
             elif chg<=-3: parts.append(chr(91)+chr(114)+chr(101)+chr(100)+chr(93)+chr(68)+chr(82)+chr(79)+chr(80)+chr(80)+chr(73)+chr(78)+chr(71)+chr(91)+chr(47)+chr(114)+chr(101)+chr(100)+chr(93))
         status=chr(32).join(parts) if parts else chr(91)+chr(100)+chr(105)+chr(109)+chr(93)+chr(78)+chr(111)+chr(114)+chr(109)+chr(97)+chr(108)+chr(91)+chr(47)+chr(100)+chr(105)+chr(109)+chr(93)
-        score_str=(chr(91)+chr(98)+chr(111)+chr(108)+chr(100)+chr(32)+chr(99)+chr(121)+chr(97)+chr(110)+chr(93)+str(score)+chr(91)+chr(47)+chr(98)+chr(111)+chr(108)+chr(100)+chr(93)) if score>0 else chr(45)
+        score_str=(chr(91)+chr(98)+chr(111)+chr(108)+chr(100)+chr(32)+chr(99)+chr(121)+chr(97)+chr(110)+chr(93)+str(score)+chr(91)+chr(47)+chr(98)+chr(111)+chr(108)+chr(100)+chr(32)+chr(99)+chr(121)+chr(97)+chr(110)+chr(93)) if score>0 else chr(45)
         ltp_str=(chr(82)+chr(115)+chr(32)+str(round(ltp,2))) if pd.notna(ltp) else chr(78)+chr(47)+chr(65)
         t.add_row(str(rank),sym,score_str,ltp_str,color_change(chg),fmt_vol(r.get(chr(118)+chr(111)+chr(108)+chr(117)+chr(109)+chr(101),0)),fmt_rs(r.get(chr(116)+chr(117)+chr(114)+chr(110)+chr(111)+chr(118)+chr(101)+chr(114),0)),status)
     console.print(t)
@@ -2292,7 +2343,7 @@ def main():
 
     # Run requested features
     if args.watchlist:
-        auto_update_watchlist(rs_data=None,full_fs=full_fs,db_path='nepse_market_data.db',top_n=15)
+        auto_update_watchlist(rs_data=None,full_fs=full_fs,db_path='nepse_market_data.db',top_n=15,silent=True)
         analyze_watchlist(live_df)
         console.print()
 
