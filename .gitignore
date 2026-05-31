@@ -60,3 +60,12 @@ Thumbs.db
 node_modules/
 
 _import_log.json
+
+# Archive and backup folders
+_archive/
+_backups/
+_data/
+add_whale.py
+check_alerts.py
+__pycache__/
+*.pyc
