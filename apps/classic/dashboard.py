@@ -12,13 +12,24 @@ import os
 import re
 import sqlite3
 import sys
-import termios
 import threading
 import time
-import tty
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
+
+# ── Windows / Unix keyboard compatibility ─────────────────────────────────────
+if sys.platform == "win32":
+    import msvcrt
+    termios = None
+    tty = None
+else:
+    try:
+        import termios
+        import tty
+    except ImportError:
+        termios = None
+        tty = None
 
 import pandas as pd
 from rich import box
@@ -518,18 +529,33 @@ def _render_frame(tw: int, d: MD, tab: int, lk: str, msg: str) -> str:
 # ── keyboard ──────────────────────────────────────────────────────────────────
 
 def _read_key() -> str:
-    fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
-    try:
-        tty.setraw(fd)
-        ch = sys.stdin.read(1)
-        if ch == "\x1b":
-            ch += sys.stdin.read(2)
-    except Exception:
-        ch = ""
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
-    return ch
+    """Read a single keypress — works on both Windows and Unix."""
+    if sys.platform == "win32":
+        # Windows: use msvcrt
+        ch = msvcrt.getwch()
+        if ch in ("\x00", "\xe0"):
+            # Special/arrow key — read and discard the second byte
+            msvcrt.getwch()
+            return ""
+        if ch == "\x03":
+            return "\x03"   # Ctrl-C
+        return ch
+    else:
+        # Unix: use termios/tty
+        if termios is None or tty is None:
+            return ""
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            ch = sys.stdin.read(1)
+            if ch == "\x1b":
+                ch += sys.stdin.read(2)
+        except Exception:
+            ch = ""
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        return ch
 
 def _prompt_input(label: str) -> str:
     sys.stdout.write(f"  \033[38;5;214m{label}:\033[0m ")
