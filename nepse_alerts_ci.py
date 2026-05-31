@@ -1,44 +1,28 @@
-﻿"""
-nepse_alerts_ci.py
-Single-pass version for GitHub Actions - runs once and exits
-Reads credentials from environment variables
-"""
-import os, sys, time, logging
+﻿import os, time, logging, collections
 from datetime import datetime
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8926979126:AAFRdgGNAFDf_AouyqFOeXmc0FYC6ReE5GI")
 TELEGRAM_CHAT  = os.environ.get("TELEGRAM_CHAT",  "1923100963")
-
 RS_THRESHOLD   = 2.0
 NEAR_HIGH_PCT  = 5.0
-VOL_SPIKE_MULT = 5.0
-COOLDOWN_MIN   = 60
+VOL_SPIKE_MULT = 3.0
+POWER_SELL_PCT = -3.0
+WATCHLIST = ["BHCL","BUNGAL","ALBSL","CREST","AKJCL","GRDBL","DHEL","GCIL","GBLBS","AVYAN","JBBL","BANDIPUR","HIDCL","GUFL","BHL"]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
-
-_alert_history = {}
 
 def send_telegram(msg):
     try:
         import requests
         r = requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            "https://api.telegram.org/bot" + TELEGRAM_TOKEN + "/sendMessage",
             json={"chat_id": TELEGRAM_CHAT, "text": msg, "parse_mode": "HTML"},
-            timeout=10,
-        )
+            timeout=10)
         return r.status_code == 200
     except Exception as e:
-        log.error(f"Telegram error: {e}")
+        log.error("Telegram error: " + str(e))
         return False
-
-def can_alert(key):
-    now = datetime.now()
-    last = _alert_history.get(key)
-    if last and (now - last).seconds < COOLDOWN_MIN * 60:
-        return False
-    _alert_history[key] = now
-    return True
 
 def get_nepse():
     from nepse import Nepse
@@ -46,110 +30,162 @@ def get_nepse():
     n.setTLSVerification(False)
     return n
 
-def get_live_data():
+def get_live_data(n):
     try:
         import pandas as pd
-        n = get_nepse()
         data = n.getLiveMarket()
         if data is None:
             return None
         df = data if isinstance(data, pd.DataFrame) else pd.DataFrame(data)
-        df = df.rename(columns={
-            'lastTradedPrice': 'ltp',
-            'percentageChange': 'change_pct',
-            'totalTradeQuantity': 'volume',
-            'totalTradeValue': 'turnover',
-            'highPrice': 'high',
-            'lowPrice': 'low',
-            'previousClose': 'prev_close',
-        })
-        for col in ['ltp', 'change_pct', 'volume', 'turnover', 'high', 'low']:
+        df = df.rename(columns={"lastTradedPrice":"ltp","percentageChange":"change_pct","totalTradeQuantity":"volume","totalTradeValue":"turnover"})
+        for col in ["ltp","change_pct","volume","turnover"]:
             if col in df.columns:
-                df[col] = df[col].apply(lambda x: float(x) if x else 0)
+                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
         return df
     except Exception as e:
-        log.error(f"Live data error: {e}")
+        log.error("Live data error: " + str(e))
         return None
 
-def get_sector_map():
+def get_sector_map(n):
     try:
         import pandas as pd
-        n = get_nepse()
         data = n.getCompanyList()
         df = data if isinstance(data, pd.DataFrame) else pd.DataFrame(data)
-        if 'symbol' in df.columns and 'sectorName' in df.columns:
-            return dict(zip(df['symbol'], df['sectorName']))
+        if "symbol" in df.columns and "sectorName" in df.columns:
+            return dict(zip(df["symbol"], df["sectorName"]))
         return {}
-    except Exception as e:
-        log.error(f"Sector map error: {e}")
+    except:
         return {}
 
-def get_price_history(sym, days=40):
+def get_price_history(n, sym, days=365):
     try:
         import pandas as pd
-        n = get_nepse()
         data = n.getCompanyPriceVolumeHistory(sym)
         if data is None:
             return None
         df = data if isinstance(data, pd.DataFrame) else pd.DataFrame(data)
         if df.empty:
             return None
-        for col in ['closePrice', 'close', 'lastTradedPrice']:
+        for col in ["closePrice","close","lastTradedPrice"]:
             if col in df.columns:
-                df = df.rename(columns={col: 'close'}); break
-        for col in ['businessDate', 'date', 'transactionDate']:
-            if col in df.columns:
-                df = df.rename(columns={col: 'date'}); break
-        if 'close' not in df.columns:
+                df = df.rename(columns={col:"close"})
+                break
+        if "close" not in df.columns:
             return None
-        df['close'] = df['close'].apply(lambda x: float(x) if x else 0)
-        return df[df['close'] > 0].sort_values('date').tail(days)
-    except Exception as e:
-        log.warning(f"History error {sym}: {e}")
+        df["close"] = pd.to_numeric(df["close"], errors="coerce").fillna(0)
+        return df[df["close"] > 0].tail(days)
+    except:
         return None
 
-def run():
-    log.info("GitHub Actions alert check starting...")
-    live = get_live_data()
-    if live is None or live.empty:
-        log.warning("No live data - market may be closed")
-        return
-
-    sector_map = get_sector_map()
-    top = live.nlargest(80, 'turnover') if 'turnover' in live.columns else live.head(80)
-    symbols = list(top['symbol'].dropna().unique())
-
-    rs_score = {}
-    week52_data = {}
-    vol_median = {}
+def compute_rs(live, sector_map, n):
     import collections
+    symbols = list(live.nlargest(80,"turnover")["symbol"].dropna().unique()) if "turnover" in live.columns else list(live["symbol"].dropna().unique())[:80]
+    for sym in WATCHLIST:
+        if sym not in symbols:
+            symbols.append(sym)
     ret5_by_sector = collections.defaultdict(list)
-
-    log.info(f"Fetching history for {len(symbols)} stocks...")
+    rs_score, week52, vol_med = {}, {}, {}
+    log.info("Fetching history for " + str(len(symbols)) + " stocks...")
     for sym in symbols:
         try:
-            hist = get_price_history(sym, days=365)
+            hist = get_price_history(n, sym)
             if hist is None or len(hist) < 6:
                 continue
-            closes = hist['close'].values
-            week52_data[sym] = {'high52': float(hist['close'].max()), 'low52': float(hist['close'].min()), 'sector': sector_map.get(sym,'')}
-            ret5 = (closes[-1] / closes[-6] - 1) * 100 if len(closes) >= 6 else 0
-            rs_score[sym] = {'ret5': ret5, 'sector': sector_map.get(sym,'')}
-            if 'totalTradeQuantity' in hist.columns:
-                vol_median[sym] = float(hist['totalTradeQuantity'].median())
-            elif 'volume' in hist.columns:
-                vol_median[sym] = float(hist['volume'].median())
-            ret5_by_sector[sector_map.get(sym,'')].append(ret5)
-            time.sleep(0.15)
-        except Exception as e:
-            log.warning(f"Skip {sym}: {e}")
+            closes = hist["close"].values
+            ret5 = (closes[-1] / closes[-6] - 1) * 100
+            sector = sector_map.get(sym, "")
+            rs_score[sym] = {"ret5": ret5, "sector": sector}
+            week52[sym] = {"high52": float(hist["close"].max()), "sector": sector}
+            if "volume" in hist.columns:
+                vol_med[sym] = float(hist["volume"].median())
+            ret5_by_sector[sector].append(ret5)
+            time.sleep(0.1)
+        except:
+            pass
+    sector_avg = {s: sum(v)/len(v) for s,v in ret5_by_sector.items() if v}
+    rs_final = {sym: d["ret5"] - sector_avg.get(d["sector"],0) for sym,d in rs_score.items()}
+    return rs_final, week52, vol_med
 
-    sector_avg = {s: sum(v)/len(v) for s, v in ret5_by_sector.items() if v}
-    rs_final = {sym: d['ret5'] - sector_avg.get(d['sector'], 0) for sym, d in rs_score.items()}
+def morning_briefing(live, rs_final, sector_map):
+    log.info("Sending morning briefing...")
+    wl_count = str(len(WATCHLIST))
+    lines = ["<b>NEPSE Morning Briefing</b>", "", "<b>Watchlist (" + wl_count + " stocks):</b>"]
+    for sym in WATCHLIST:
+        row = live[live["symbol"] == sym]
+        if row.empty:
+            lines.append("  " + sym + " - no data")
+            continue
+        ltp = float(row.iloc[0].get("ltp", 0))
+        chg = float(row.iloc[0].get("change_pct", 0))
+        rs5 = rs_final.get(sym, 0)
+        score = 0
+        if rs5 >= 5:
+            score += 30
+        elif rs5 >= 2:
+            score += 20
+        elif rs5 >= 0:
+            score += 10
+        if float(row.iloc[0].get("volume", 0)) > 0:
+            score += 10
+        if chg > 0:
+            score += 5
+        if score >= 35:
+            reason = "Strong RS + Momentum"
+        elif score >= 25:
+            reason = "Good RS"
+        elif score >= 15:
+            reason = "Moderate signal"
+        else:
+            reason = "Monitor"
+        arrow = "+" if chg >= 0 else ""
+        chg_str = arrow + str(round(chg, 1)) + "%"
+        ltp_str = str(int(ltp))
+        lines.append("  <b>" + sym + "</b> Rs " + ltp_str + " (" + chg_str + ") Score " + str(score) + " | " + reason)
+    lines.append("")
+    lines.append("<i>Alerts active. Good trading!</i>")
+    send_telegram("\n".join(lines))
 
+def eod_summary(live, sector_map):
+    log.info("Sending EOD summary...")
+    lines = ["<b>NEPSE EOD Summary</b>", ""]
+    gainers, losers, flat = [], [], []
+    for sym in WATCHLIST:
+        row = live[live["symbol"] == sym]
+        if row.empty:
+            continue
+        ltp = float(row.iloc[0].get("ltp", 0))
+        chg = float(row.iloc[0].get("change_pct", 0))
+        vol = float(row.iloc[0].get("volume", 0))
+        if chg > 0.1:
+            gainers.append((sym, ltp, chg, vol))
+        elif chg < -0.1:
+            losers.append((sym, ltp, chg, vol))
+        else:
+            flat.append((sym, ltp, chg, vol))
+    gainers.sort(key=lambda x: -x[2])
+    losers.sort(key=lambda x: x[2])
+    lines.append("<b>Gainers:</b>")
+    for sym, ltp, chg, vol in gainers:
+        lines.append("  " + sym + " +" + str(round(chg,1)) + "% | Rs " + str(int(ltp)) + " | Vol " + str(int(vol)))
+    if not gainers:
+        lines.append("  None")
+    lines.append("")
+    lines.append("<b>Losers:</b>")
+    for sym, ltp, chg, vol in losers:
+        lines.append("  " + sym + " " + str(round(chg,1)) + "% | Rs " + str(int(ltp)) + " | Vol " + str(int(vol)))
+    if not losers:
+        lines.append("  None")
+    if flat:
+        lines.append("")
+        lines.append("<b>Flat:</b>")
+        for sym, ltp, chg, vol in flat:
+            lines.append("  " + sym + " " + str(round(chg,1)) + "% | Rs " + str(int(ltp)))
+    send_telegram("\n".join(lines))
+
+def check_alerts(live, rs_final, week52, vol_med, sector_map):
     alerts_sent = 0
     now_str = datetime.now().strftime("%H:%M")
-
+    wl_set = set(WATCHLIST)
     for _, row in live.iterrows():
         sym = str(row.get("symbol", ""))
         ltp = float(row.get("ltp", 0))
@@ -158,54 +194,67 @@ def run():
         turnover = float(row.get("turnover", 0))
         if not sym or ltp <= 0:
             continue
-
-        rs5    = rs_final.get(sym, 0)
-        w52    = week52_data.get(sym, {})
-        high52 = w52.get("high52", 0)
-        sector = w52.get("sector", sector_map.get(sym, ""))
-        med_vol = vol_median.get(sym, 0)
-
-        # Breakout
+        rs5 = rs_final.get(sym, 0)
+        high52 = week52.get(sym, {}).get("high52", 0)
+        sector = sector_map.get(sym, "")
+        med_vol = vol_med.get(sym, 0)
+        in_wl = " | IN YOUR WATCHLIST" if sym in wl_set else ""
         if high52 > 0 and rs5 >= RS_THRESHOLD:
             pct_from_high = (ltp - high52) / high52 * 100
-            if pct_from_high >= -NEAR_HIGH_PCT and can_alert(f"{sym}_breakout"):
-                stars = "★★★" if pct_from_high >= -1 else "★★"
-                send_telegram(
-                    f"🚨 <b>NEPSE ALERT — {now_str}</b>\n\n"
-                    f"{stars} <b>BREAKOUT: {sym}</b>\n"
-                    f"Near 52W High ({pct_from_high:+.1f}%) + RS <b>+{rs5:.1f}%</b>\n"
-                    f"LTP: Rs {ltp:,.1f} | Change: {chg:+.2f}%\n"
-                    f"Turnover: Rs {turnover/1e6:.1f}M | Sector: {sector}"
-                )
-                log.info(f"BREAKOUT: {sym}")
+            if pct_from_high >= -NEAR_HIGH_PCT:
+                stars = "***" if pct_from_high >= -1 else "**"
+                msg = ("NEPSE ALERT - " + now_str + "\n\n" + stars + " BREAKOUT: " + sym + in_wl + "\n"
+                    + "Near 52W High (" + str(round(pct_from_high,1)) + "%) + RS +" + str(round(rs5,1)) + "%\n"
+                    + "LTP: Rs " + str(int(ltp)) + " | Change: " + str(round(chg,1)) + "%\n"
+                    + "Turnover: Rs " + str(round(turnover/1e6,1)) + "M | Sector: " + sector)
+                send_telegram(msg)
+                log.info("BREAKOUT: " + sym)
                 alerts_sent += 1
-
-        # Volume spike
         if rs5 >= RS_THRESHOLD and med_vol > 0:
             vol_mult = vol / med_vol
-            if vol_mult >= VOL_SPIKE_MULT and can_alert(f"{sym}_volspike"):
-                send_telegram(
-                    f"📈 <b>NEPSE ALERT — {now_str}</b>\n\n"
-                    f"⚡ <b>VOLUME SPIKE: {sym}</b>\n"
-                    f"Volume <b>{vol_mult:.1f}x</b> above average\n"
-                    f"RS: +{rs5:.1f}% | LTP: Rs {ltp:,.1f} | Change: {chg:+.2f}%\n"
-                    f"Sector: {sector}"
-                )
-                log.info(f"VOL SPIKE: {sym}")
+            if vol_mult >= VOL_SPIKE_MULT:
+                msg = ("NEPSE ALERT - " + now_str + "\n\nVOLUME SPIKE: " + sym + in_wl + "\n"
+                    + "Volume " + str(round(vol_mult,1)) + "x above average\n"
+                    + "RS: +" + str(round(rs5,1)) + "% | LTP: Rs " + str(int(ltp)) + " | Change: " + str(round(chg,1)) + "%\n"
+                    + "Sector: " + sector)
+                send_telegram(msg)
+                log.info("VOL SPIKE: " + sym)
                 alerts_sent += 1
-
-        # RS Reversal
-        if rs5 >= RS_THRESHOLD and chg <= -3.0 and can_alert(f"{sym}_reversal"):
-            send_telegram(
-                f"⚠️ <b>NEPSE ALERT — {now_str}</b>\n\n"
-                f"🔻 <b>RS REVERSAL: {sym}</b>\n"
-                f"Was outperforming (RS +{rs5:.1f}%) but dropping {chg:.2f}% today\n"
-                f"LTP: Rs {ltp:,.1f} | Sector: {sector}"
-            )
-            log.info(f"REVERSAL: {sym}")
+        if rs5 >= RS_THRESHOLD and chg <= -3.0:
+            msg = ("NEPSE ALERT - " + now_str + "\n\nRS REVERSAL: " + sym + in_wl + "\n"
+                + "Was outperforming (RS +" + str(round(rs5,1)) + "%) but dropping " + str(round(chg,1)) + "% today\n"
+                + "LTP: Rs " + str(int(ltp)) + " | Sector: " + sector)
+            send_telegram(msg)
+            log.info("REVERSAL: " + sym)
             alerts_sent += 1
+        if sym in wl_set and chg <= POWER_SELL_PCT:
+            msg = ("NEPSE ALERT - " + now_str + "\n\nPOWER SELL WARNING: " + sym + "\n"
+                + "Your watchlist stock dropping " + str(round(chg,1)) + "% today\n"
+                + "LTP: Rs " + str(int(ltp)) + " | Vol: " + str(int(vol)))
+            send_telegram(msg)
+            log.info("POWER SELL: " + sym)
+            alerts_sent += 1
+    return alerts_sent
 
-    log.info(f"Done — {alerts_sent} alerts sent")
+def run():
+    now = datetime.utcnow()
+    hour = now.hour
+    minute = now.minute
+    log.info("CI alert check - UTC " + str(hour).zfill(2) + ":" + str(minute).zfill(2))
+    n = get_nepse()
+    live = get_live_data(n)
+    if live is None or live.empty:
+        log.warning("No live data - market may be closed")
+        return
+    sector_map = get_sector_map(n)
+    rs_final, week52, vol_med = compute_rs(live, sector_map, n)
+    if hour == 5 and minute <= 20:
+        morning_briefing(live, rs_final, sector_map)
+    elif hour == 9 and minute >= 25:
+        eod_summary(live, sector_map)
+    else:
+        alerts = check_alerts(live, rs_final, week52, vol_med, sector_map)
+        log.info("Done - " + str(alerts) + " alerts sent")
 
 if __name__ == "__main__":
     run()
