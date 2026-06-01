@@ -1,4 +1,4 @@
-import sys, os
+﻿import sys, os
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -7,7 +7,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 import os
 #!/usr/bin/env python3
 """
-NEPSE Personal Scanner — Full Edition
+NEPSE Personal Scanner â€” Full Edition
 ======================================
 Signals + Floorsheet + Broker Analysis + Power Sell + Sector Rotation
 + Whale Tracker + Support/Resistance + Watchlist + Daily Report
@@ -50,14 +50,14 @@ except ImportError as e:
 
 console = Console()
 
-# ── YOUR WATCHLIST — edit these ───────────────────────────────────────────────
+# â”€â”€ YOUR WATCHLIST â€” edit these â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 WATCHLIST = [
     "NABIL", "ADBL", "NICA", "SBI", "EBL",
     "NIFRA", "UPPER", "NHPC", "RIDI", "AKJCL",
     "NLIC", "LICN", "NTC", "CHCL", "HIDCL",
 ]
 
-# ── SECTOR MAP (auto-generated from nepse_market_data.db) ───────────────────
+# â”€â”€ SECTOR MAP (auto-generated from nepse_market_data.db) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 SECTOR_MAP = {
     "Commercial Banks": [
         "ADBL", "CZBIL", "EBL", "GBIME", "HBL", "KBL", "LSL", "MBL",
@@ -169,7 +169,7 @@ def get_sector(symbol):
 
 
 
-# ── NEPSE CLIENT ──────────────────────────────────────────────────────────────
+# â”€â”€ NEPSE CLIENT â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def init_nepse():
     n = Nepse()
@@ -188,7 +188,7 @@ def fetch_with_retry(fn, label="data", retries=3, delay=2):
                 console.print(f"  [red]Failed to fetch {label}: {e}[/red]")
                 return None
 
-# ── DATA FETCHERS ─────────────────────────────────────────────────────────────
+# â”€â”€ DATA FETCHERS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def get_live_market(n):
     data = fetch_with_retry(n.getLiveMarket, "live market")
@@ -241,7 +241,7 @@ def _normalize_fs(data):
     return df
 
 def get_full_floorsheet(n):
-    console.print("  [yellow]Fetching full floorsheet — 30-60 seconds...[/yellow]")
+    console.print("  [yellow]Fetching full floorsheet â€” 30-60 seconds...[/yellow]")
     data = fetch_with_retry(lambda: n.getFloorSheet(show_progress=False), "floorsheet", retries=2, delay=3)
     return _normalize_fs(data)
 
@@ -251,7 +251,7 @@ def get_floorsheet_of_symbol(full_df, symbol):
     f = full_df[full_df['symbol'].str.upper() == symbol.upper()].copy()
     return f if not f.empty else None
 
-# ── FORMAT HELPERS ────────────────────────────────────────────────────────────
+# â”€â”€ FORMAT HELPERS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def color_change(val):
     try:
@@ -278,7 +278,7 @@ def fmt_rs(val):
         return f"Rs {v:.0f}"
     except: return str(val)
 
-# ── POWER SELL ────────────────────────────────────────────────────────────────
+# â”€â”€ POWER SELL â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def auto_update_watchlist(rs_data, full_fs, db_path, top_n=15, silent=False):
     import sqlite3, json
@@ -474,8 +474,8 @@ def analyze_power_sell(full_df, live_df):
     t.add_column("Signal",     width=28)
 
     for r in results[:15]:
-        sig = "[red]STRONG SELL — exit now[/red]" if r['sell_ratio'] >= 75 else \
-              "[yellow]MODERATE SELL — watch[/yellow]" if r['sell_ratio'] >= 65 else \
+        sig = "[red]STRONG SELL â€” exit now[/red]" if r['sell_ratio'] >= 75 else \
+              "[yellow]MODERATE SELL â€” watch[/yellow]" if r['sell_ratio'] >= 65 else \
               "[dim]Light selling[/dim]"
         t.add_row(
             r['symbol'],
@@ -489,11 +489,11 @@ def analyze_power_sell(full_df, live_df):
     console.print(t)
     return results
 
-# ── SECTOR ROTATION ───────────────────────────────────────────────────────────
+# â”€â”€ SECTOR ROTATION â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 
-# ── SECTOR MOMENTUM ───────────────────────────────────────────────────────────
+# â”€â”€ SECTOR MOMENTUM â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _load_sector_prices(db_path="nepse_market_data.db", days=35):
     """Load recent closing prices for all equity symbols."""
@@ -586,21 +586,21 @@ def _momentum_label(r5, r10, r20):
     avg         = sum(valid) / len(valid)
     accelerating = (r5 is not None and r10 is not None and r5 > r10 / 2)
     if avg > 2.0 and accelerating:
-        return "Strong uptrend  ↑↑", "bold green"
+        return "Strong uptrend  â†‘â†‘", "bold green"
     elif avg > 0.5:
-        return "Heating up      ↑",  "green"
+        return "Heating up      â†‘",  "green"
     elif avg > -0.5:
-        return "Neutral         →",  "dim white"
+        return "Neutral         â†’",  "dim white"
     elif avg > -2.0:
-        return "Cooling down    ↓",  "red"
+        return "Cooling down    â†“",  "red"
     else:
-        return "Strong downtrend ↓↓","bold red"
+        return "Strong downtrend â†“â†“","bold red"
 
 
 def analyze_sector_trend(db_path="nepse_market_data.db"):
     """--sector-trend: 5/10/20 day sector momentum table."""
     console.print(Rule("[bold cyan]Sector Momentum[/bold cyan]", style="cyan"))
-    console.print("[dim]Multi-period sector performance — spot rotation early[/dim]\n")
+    console.print("[dim]Multi-period sector performance â€” spot rotation early[/dim]\n")
 
     with console.status("[cyan]Loading price history...[/cyan]"):
         prices_df = _load_sector_prices(db_path)
@@ -712,7 +712,7 @@ def analyze_sector_heatmap(db_path="nepse_market_data.db"):
         valid = [r for r in (r5, r10, r20) if r is not None]
         avg   = sum(valid) / len(valid) if valid else 0
         filled = int(min(max(round((avg + 5) / 10 * 12), 0), 12))
-        bar    = "█" * filled + "░" * (12 - filled)
+        bar    = "â–ˆ" * filled + "â–‘" * (12 - filled)
         bar_style = "bold green" if avg > 1 else "bold red" if avg < -1 else "dim"
 
         t.add_row(
@@ -728,7 +728,7 @@ def analyze_sector_heatmap(db_path="nepse_market_data.db"):
 
 
 
-# ── SECTOR MOMENTUM ───────────────────────────────────────────────────────────
+# â”€â”€ SECTOR MOMENTUM â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def analyze_sector_rotation(full_df, live_df):
     """Show sector money flow with Traded/Listed counts."""
@@ -737,7 +737,7 @@ def analyze_sector_rotation(full_df, live_df):
 
     sector_data = {}
 
-    # From floorsheet — turnover per sector (equity only)
+    # From floorsheet â€” turnover per sector (equity only)
     if full_df is not None and not full_df.empty:
         fdf = full_df.copy()
         fdf["sector"] = fdf["symbol"].apply(get_sector)
@@ -749,7 +749,7 @@ def analyze_sector_rotation(full_df, live_df):
                 "stocks":     grp["symbol"].nunique(),
             }
 
-    # From live market — avg change, up/down per sector (equity only)
+    # From live market â€” avg change, up/down per sector (equity only)
     if live_df is not None and not live_df.empty:
         ldf = live_df.copy()
         ldf["sector"] = ldf["symbol"].apply(get_sector)
@@ -862,14 +862,14 @@ def analyze_whales(full_df):
         if w['share_pct'] >= 70:
             reading = "[red]Extreme control[/red]" if w['action']=='SELL' else "[green]Extreme accumulation[/green]"
         elif w['share_pct'] >= 55:
-            reading = "[yellow]Heavy — watch for reversal[/yellow]"
+            reading = "[yellow]Heavy â€” watch for reversal[/yellow]"
         else:
-            reading = "[dim]Notable — monitor[/dim]"
+            reading = "[dim]Notable â€” monitor[/dim]"
         t.add_row(w['symbol'], w['broker'], action_s, f"{w['qty']:,}",
                   f"{w['share_pct']}%", fmt_rs(w['amount']), reading)
     console.print(t)
 
-# ── BROKER TRACKER ───────────────────────────────────────────────────────────
+# â”€â”€ BROKER TRACKER â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def analyze_broker_tracker(full_df, live_df, broker_id):
     broker_id = str(broker_id)
@@ -903,7 +903,7 @@ def analyze_broker_tracker(full_df, live_df, broker_id):
             qty=('quantity','sum'), amt=('amount','sum'), trades=('quantity','count')
         ).sort_values('amt', ascending=False)
 
-        bt = Table(title=f"Broker {broker_id} — Stocks Bought Today",
+        bt = Table(title=f"Broker {broker_id} â€” Stocks Bought Today",
                    box=box.ROUNDED, border_style="green", header_style="bold green")
         bt.add_column("Symbol",  width=12, style="bold white")
         bt.add_column("Qty",     width=12, justify="right", style="green")
@@ -932,7 +932,7 @@ def analyze_broker_tracker(full_df, live_df, broker_id):
             qty=('quantity','sum'), amt=('amount','sum'), trades=('quantity','count')
         ).sort_values('amt', ascending=False)
 
-        st = Table(title=f"Broker {broker_id} — Stocks Sold Today",
+        st = Table(title=f"Broker {broker_id} â€” Stocks Sold Today",
                    box=box.ROUNDED, border_style="red", header_style="bold red")
         st.add_column("Symbol",  width=12, style="bold white")
         st.add_column("Qty",     width=12, justify="right", style="red")
@@ -975,7 +975,7 @@ def analyze_broker_tracker(full_df, live_df, broker_id):
     distributors = net_df[net_df['net_qty'] < 0]
 
     if not accumulators.empty or not distributors.empty:
-        nt = Table(title=f"Broker {broker_id} — Net Position Summary",
+        nt = Table(title=f"Broker {broker_id} â€” Net Position Summary",
                    box=box.ROUNDED, border_style="magenta", header_style="bold magenta")
         nt.add_column("Symbol",   width=12, style="bold white")
         nt.add_column("Bought",   width=10, justify="right", style="green")
@@ -992,12 +992,12 @@ def analyze_broker_tracker(full_df, live_df, broker_id):
                        net_s, fmt_rs(r['net_amt']), stance)
         console.print(nt)
 
-# ── SUPPORT / RESISTANCE ──────────────────────────────────────────────────────
+# â”€â”€ SUPPORT / RESISTANCE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def analyze_support_resistance(full_df, symbol):
     sym = symbol.upper()
     console.print()
-    console.print(Rule(f"[bold yellow]Support / Resistance — {sym}[/bold yellow]", style="yellow"))
+    console.print(Rule(f"[bold yellow]Support / Resistance â€” {sym}[/bold yellow]", style="yellow"))
 
     df = get_floorsheet_of_symbol(full_df, sym)
     if df is None or df.empty:
@@ -1009,7 +1009,7 @@ def analyze_support_resistance(full_df, symbol):
     buckets    = pd.cut(df['rate'], bins=12)
     vol_by_price = df.groupby(buckets, observed=True)['quantity'].sum().sort_values(ascending=False)
 
-    t = Table(title=f"Price Clusters — {sym}", box=box.ROUNDED, border_style="yellow", header_style="bold yellow")
+    t = Table(title=f"Price Clusters â€” {sym}", box=box.ROUNDED, border_style="yellow", header_style="bold yellow")
     t.add_column("Price Zone",   width=24, style="white")
     t.add_column("Volume",       width=12, justify="right", style="yellow")
     t.add_column("% of Day",     width=10, justify="right", style="cyan")
@@ -1019,7 +1019,7 @@ def analyze_support_resistance(full_df, symbol):
     for bucket, qty in vol_by_price.head(8).items():
         pct     = qty / total_qty * 100 if total_qty > 0 else 0
         bar_len = int(pct / 100 * 18)
-        bar     = "█" * bar_len + "░" * (18 - bar_len)
+        bar     = "â–ˆ" * bar_len + "â–‘" * (18 - bar_len)
         b_mid   = (bucket.left + bucket.right) / 2
         level   = "[green]SUPPORT[/green]" if b_mid < mid_price else "[red]RESISTANCE[/red]"
         strength_color = "red" if pct >= 20 else "yellow" if pct >= 10 else "dim"
@@ -1039,7 +1039,7 @@ def analyze_support_resistance(full_df, symbol):
         title="Key Levels", border_style="yellow"
     ))
 
-# ── WATCHLIST ─────────────────────────────────────────────────────────────────
+# â”€â”€ WATCHLIST â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def analyze_watchlist(live_df):
     import json, sqlite3 as _sq
@@ -1115,7 +1115,7 @@ def save_daily_report(summary, live_df, candidates, power_sell_results=None):
 
     lines = [
         "=" * 60,
-        f"  NEPSE DAILY REPORT — {now}",
+        f"  NEPSE DAILY REPORT â€” {now}",
         "=" * 60, "",
     ]
 
@@ -1168,7 +1168,7 @@ def save_daily_report(summary, live_df, candidates, power_sell_results=None):
     console.print(f"\n[green]Report saved:[/green] [cyan]{filename}[/cyan]")
     return filename
 
-# ── SIGNAL ENGINES ────────────────────────────────────────────────────────────
+# â”€â”€ SIGNAL ENGINES â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def signal_volume_breakout(df):
     if 'volume' not in df.columns: return pd.DataFrame()
@@ -1260,7 +1260,7 @@ def run_signals(df, selected):
     combined['confirmations'] = combined['symbol'].map(conf_map)
     combined = combined.drop_duplicates(subset='symbol', keep='first').copy()
 
-# ── DISPLAY ───────────────────────────────────────────────────────────────────
+# â”€â”€ DISPLAY â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def print_header(summary):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1371,12 +1371,12 @@ def print_legend():
     t = Table(box=box.SIMPLE, show_header=False, padding=(0,2))
     t.add_column("Signal",  style="yellow",   width=22)
     t.add_column("Meaning", style="dim white")
-    t.add_row("VOLUME BREAKOUT",    "Volume 2x+ median with positive price — accumulation")
-    t.add_row("MOMENTUM",           "Strong % gainer with decent volume — trend continuation")
-    t.add_row("52WK HIGH BREAKOUT", "Within 3% of yearly high — breakout setup")
-    t.add_row("52WK LOW BOUNCE",    "Near yearly low but positive today — discount rejection")
-    t.add_row("MEAN REVERSION",     "Down today but 30%+ below 52wk high — stretched discount")
-    t.add_row("RANGE COMPRESSION",  "Tight H-L range — consolidation before expansion")
+    t.add_row("VOLUME BREAKOUT",    "Volume 2x+ median with positive price â€” accumulation")
+    t.add_row("MOMENTUM",           "Strong % gainer with decent volume â€” trend continuation")
+    t.add_row("52WK HIGH BREAKOUT", "Within 3% of yearly high â€” breakout setup")
+    t.add_row("52WK LOW BOUNCE",    "Near yearly low but positive today â€” discount rejection")
+    t.add_row("MEAN REVERSION",     "Down today but 30%+ below 52wk high â€” stretched discount")
+    t.add_row("RANGE COMPRESSION",  "Tight H-L range â€” consolidation before expansion")
     console.print(Panel(t, title="Signal Legend", border_style="dim"))
     console.print()
     console.print(Panel(
@@ -1399,7 +1399,7 @@ def print_legend():
 def analyze_floorsheet_symbol(df, symbol):
     sym = symbol.upper()
     console.print()
-    console.print(Rule(f"[bold cyan]Floorsheet — {sym}[/bold cyan]", style="cyan"))
+    console.print(Rule(f"[bold cyan]Floorsheet â€” {sym}[/bold cyan]", style="cyan"))
     if df is None or df.empty:
         console.print(f"  [red]No data for {sym}. Available Sun-Thu 11am-3pm NST.[/red]")
         return
@@ -1423,7 +1423,11 @@ def analyze_floorsheet_symbol(df, symbol):
                      'net_qty':int(buy_qty.get(b,0)-sell_qty.get(b,0)),
                      'buy_amt':buy_amt.get(b,0),'sell_amt':sell_amt.get(b,0),
                      'net_amt':buy_amt.get(b,0)-sell_amt.get(b,0)} for b in all_b]
-        bdf = pd.DataFrame(bdata).sort_values('net_qty', ascending=False)
+        bdf = pd.DataFrame(bdata)
+        if bdf.empty or 'net_qty' not in bdf.columns:
+            console.print('  No broker data available.', style='yellow')
+            return
+        bdf = bdf.sort_values('net_qty', ascending=False)
 
         acc = Table(title="Top Accumulators", box=box.ROUNDED, border_style="green", header_style="bold green")
         dis = Table(title="Top Distributors", box=box.ROUNDED, border_style="red",   header_style="bold red")
@@ -1476,7 +1480,7 @@ def analyze_broker_market(df):
              'total_amt':buy_amt.get(b,0)+sell_amt.get(b,0)} for b in all_b]
     bdf = pd.DataFrame(rows)
     if bdf.empty or "total_amt" not in bdf.columns:
-        console.print("[yellow]Broker data unavailable — NEPSE API is not returning broker IDs today.[/]")
+        console.print("[yellow]Broker data unavailable â€” NEPSE API is not returning broker IDs today.[/]")
         console.print("[dim]This is an API-side limitation. Try again later or on a different trading day.[/]")
         return
 
@@ -1504,12 +1508,12 @@ def analyze_broker_market(df):
         st.add_row(r['broker'],f"[red]{r['net_qty']:,}[/red]",fmt_rs(r['net_amt']))
     console.print(Columns([bt, st]))
 
-# ── QUICK PICK ───────────────────────────────────────────────────────────────
+# â”€â”€ QUICK PICK â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def analyze_quick_pick(live_df, top_n=10, db_path="nepse_market_data.db"):
     console.print()
     console.print(Rule("[bold green]Quick Stock Pick[/bold green]", style="green"))
-    console.print("[dim]Best stocks for 10%+ gain in 7 days to 1 month — signals only[/dim]\n")
+    console.print("[dim]Best stocks for 10%+ gain in 7 days to 1 month â€” signals only[/dim]\n")
 
     if live_df is None or live_df.empty:
         console.print("[red]No live data.[/red]")
@@ -1564,7 +1568,7 @@ def analyze_quick_pick(live_df, top_n=10, db_path="nepse_market_data.db"):
         for sym, net in c.fetchall():
             db_broker_net[sym] = net or 0
 
-        # Sector momentum — avg % change per sector today
+        # Sector momentum â€” avg % change per sector today
         if "sector" in df.columns:
             for sector in df["sector"].dropna().unique():
                 sector_df = df[df["sector"] == sector]
@@ -1604,7 +1608,7 @@ def analyze_quick_pick(live_df, top_n=10, db_path="nepse_market_data.db"):
         elif chg < 0:
             score -= 10
 
-        # 2. Volume surge — use stock own 20D avg if available (max 25 pts)
+        # 2. Volume surge â€” use stock own 20D avg if available (max 25 pts)
         own_avg_vol = db_vol_avg.get(sym, 0)
         base_vol    = own_avg_vol if own_avg_vol > 0 else vol_median
         if base_vol > 0:
@@ -1647,7 +1651,7 @@ def analyze_quick_pick(live_df, top_n=10, db_path="nepse_market_data.db"):
             elif rng_pct <= 3 and chg > 0:
                 score += 8; reasons.append("Controlled move")
 
-        # 6. RS from fundamentals DB (max 20 pts) — NEW
+        # 6. RS from fundamentals DB (max 20 pts) â€” NEW
         rs_val = db_rs.get(sym, None)
         if rs_val is not None:
             if rs_val >= 10:
@@ -1659,7 +1663,7 @@ def analyze_quick_pick(live_df, top_n=10, db_path="nepse_market_data.db"):
             else:
                 score -= 5
 
-        # 7. Broker net buy last 3 days (max 15 pts) — NEW
+        # 7. Broker net buy last 3 days (max 15 pts) â€” NEW
         broker_net = db_broker_net.get(sym, None)
         if broker_net is not None:
             if broker_net > 50000:
@@ -1669,7 +1673,7 @@ def analyze_quick_pick(live_df, top_n=10, db_path="nepse_market_data.db"):
             elif broker_net < -50000:
                 score -= 10; reasons.append("Broker selling")
 
-        # 8. Sector momentum (max 10 pts) — NEW
+        # 8. Sector momentum (max 10 pts) â€” NEW
         if sector and sector in db_sector_scores:
             sec_chg = db_sector_scores[sector]
             if sec_chg >= 2:
@@ -1705,7 +1709,7 @@ def analyze_quick_pick(live_df, top_n=10, db_path="nepse_market_data.db"):
 
     scores = sorted(scores, key=lambda x: x["score"], reverse=True)
 
-    t = Table(title="Quick Pick — Top Candidates (10%+ Potential)",
+    t = Table(title="Quick Pick â€” Top Candidates (10%+ Potential)",
               box=box.ROUNDED, border_style="green", header_style="bold green")
     t.add_column("#",        width=3,  justify="right", style="dim")
     t.add_column("Symbol",   width=10, style="bold white")
@@ -1714,7 +1718,7 @@ def analyze_quick_pick(live_df, top_n=10, db_path="nepse_market_data.db"):
 def analyze_smart_pick(live_df, full_df, top_n=10):
     console.print()
     console.print(Rule("[bold cyan]Smart Stock Pick[/bold cyan]", style="cyan"))
-    console.print("[dim]Best stocks for 10%+ gain — signals + broker activity + whale confirmation[/dim]\n")
+    console.print("[dim]Best stocks for 10%+ gain â€” signals + broker activity + whale confirmation[/dim]\n")
 
     if live_df is None or live_df.empty:
         console.print("[red]No live data.[/red]")
@@ -1728,7 +1732,7 @@ def analyze_smart_pick(live_df, full_df, top_n=10):
     score_map = {r['symbol']: r for r in quick_scores}
 
     if full_df is None or full_df.empty:
-        console.print("[yellow]No floorsheet — showing quick pick scores only.[/yellow]")
+        console.print("[yellow]No floorsheet â€” showing quick pick scores only.[/yellow]")
         return
 
     # Broker activity boost
@@ -1815,14 +1819,14 @@ def analyze_smart_pick(live_df, full_df, top_n=10):
         })
 
     final_scores = sorted(final_scores, key=lambda x: x['score'], reverse=True)
-    # Filter only high probability — score >= 50 and upside >= 10%
+    # Filter only high probability â€” score >= 50 and upside >= 10%
     final_scores = [r for r in final_scores if r['score'] >= 50 and r['upside'] >= 10]
 
     if not final_scores:
         console.print("[yellow]No high-probability picks today. Market may be extended.[/yellow]")
         return
 
-    t = Table(title="Smart Pick — High Probability 10%+ Gain",
+    t = Table(title="Smart Pick â€” High Probability 10%+ Gain",
               box=box.ROUNDED, border_style="cyan", header_style="bold cyan")
     t.add_column("#",          width=3,  justify="right", style="dim")
     t.add_column("Symbol",     width=10, style="bold white")
@@ -1858,17 +1862,17 @@ def analyze_smart_pick(live_df, full_df, top_n=10):
     console.print(t)
     console.print(Panel(
         f"[bold]Found {len(final_scores)} high-probability candidates[/bold]\n"
-        "[dim]Score 80+  = HIGH confidence — multiple signals + broker confirmation\n"
-        "Score 65-79 = MODERATE — good signals, some broker activity\n"
-        "Score 50-64 = SPECULATIVE — signals present but less confirmation\n"
+        "[dim]Score 80+  = HIGH confidence â€” multiple signals + broker confirmation\n"
+        "Score 65-79 = MODERATE â€” good signals, some broker activity\n"
+        "Score 50-64 = SPECULATIVE â€” signals present but less confirmation\n"
         "Upside = distance to 52W high (realistic target in 1 month)[/dim]",
         border_style="cyan"
     ))
 
-# ── MAIN ──────────────────────────────────────────────────────────────────────
+# â”€â”€ MAIN â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def parse_args():
-    p = argparse.ArgumentParser(description="NEPSE Scanner — Full Edition")
+    p = argparse.ArgumentParser(description="NEPSE Scanner â€” Full Edition")
     p.add_argument('--signals',     nargs='+', choices=list(SIGNALS.keys()), default=list(SIGNALS.keys()))
     p.add_argument('--top',         type=int, default=15)
     p.add_argument('--floor',       nargs='+', metavar='SYMBOL')
@@ -1881,8 +1885,8 @@ def parse_args():
     p.add_argument('--sr',          nargs='+', metavar='SYMBOL')
     p.add_argument('--watchlist',   action='store_true')
     p.add_argument('--broker',      type=str, metavar='ID', help='Track a specific broker e.g. --broker 58')
-    p.add_argument('--quickpick',   action='store_true', help='Quick stock pick — signals only')
-    p.add_argument('--smartpick',   action='store_true', help='Smart stock pick — signals + broker + whale')
+    p.add_argument('--quickpick',   action='store_true', help='Quick stock pick â€” signals only')
+    p.add_argument('--smartpick',   action='store_true', help='Smart stock pick â€” signals + broker + whale')
     p.add_argument('--report',      action='store_true')
     p.add_argument('--movers-only', action='store_true')
     p.add_argument('--legend',      action='store_true')
@@ -1892,7 +1896,7 @@ def parse_args():
     p.add_argument('--broker-rs',   action='store_true', help='Broker accumulation on RS leaders')
     p.add_argument('--week52',       action='store_true', help='52-week high/low alerts + RS cross-check')
     p.add_argument('--rs',           action='store_true', help='Relative strength vs sector')
-    p.add_argument('--why',          action='store_true', help='Show Why block — broker+RS+52W+unlock reasoning')
+    p.add_argument('--why',          action='store_true', help='Show Why block â€” broker+RS+52W+unlock reasoning')
     p.add_argument('--fundamental', metavar='SYMBOL', help='Fundamental snapshot e.g. --fundamental NABIL')
     p.add_argument('--earnings',    metavar='SYMBOL', help='Quarterly earnings e.g. --earnings AKJCL')
     p.add_argument('--value',       nargs='?', const='ALL', metavar='SECTOR', help='Peer value screen e.g. --value or --value Hydropower')
@@ -1908,9 +1912,9 @@ def parse_args():
 
 
 
-# ════════════════════════════════════════════════════════════════════════════
-#  PHASE 5 — PORTFOLIO INTELLIGENCE
-# ════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+#  PHASE 5 â€” PORTFOLIO INTELLIGENCE
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def _get_returns(symbols, days=60):
     """Return a dict {symbol: pd.Series of daily pct returns} for the last N days."""
@@ -1942,7 +1946,7 @@ def _get_returns(symbols, days=60):
 
 
 def analyze_portfolio(symbols):
-    """--portfolio SYM1 SYM2 ... — position sizing + correlation + diversification."""
+    """--portfolio SYM1 SYM2 ... â€” position sizing + correlation + diversification."""
     import sqlite3, math
     import pandas as pd
     from rich.console import Console
@@ -1951,7 +1955,7 @@ def analyze_portfolio(symbols):
 
     console = Console()
     console.print()
-    console.print(f"[bold cyan]{'─'*30} Portfolio Intelligence {'─'*30}[/bold cyan]")
+    console.print(f"[bold cyan]{'â”€'*30} Portfolio Intelligence {'â”€'*30}[/bold cyan]")
 
     if not symbols:
         import sqlite3 as _sq
@@ -1970,7 +1974,7 @@ def analyze_portfolio(symbols):
     else:
         symbols = [s.upper() for s in symbols]
 
-    # ── Price data ──────────────────────────────────────────────────────────
+    # â”€â”€ Price data â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     returns_map = _get_returns(symbols, days=90)
     missing = [s for s in symbols if s not in returns_map]
     if missing:
@@ -1980,7 +1984,7 @@ def analyze_portfolio(symbols):
         console.print("[red]No valid symbols.[/red]")
         return
 
-    # ── Volatility & stats per symbol ───────────────────────────────────────
+    # â”€â”€ Volatility & stats per symbol â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     import numpy as np
     stats = {}
     for sym in symbols:
@@ -1991,18 +1995,18 @@ def analyze_portfolio(symbols):
         sharpe = (r.mean() / r.std() * math.sqrt(252)) if r.std() > 0 else 0
         stats[sym] = dict(vol=vol, ret5=ret5, ret20=ret20, sharpe=sharpe)
 
-    # ── Inverse-volatility weights ───────────────────────────────────────────
+    # â”€â”€ Inverse-volatility weights â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     inv_vols = {s: 1 / max(stats[s]['vol'], 0.1) for s in symbols}
     total_inv = sum(inv_vols.values())
     weights = {s: inv_vols[s] / total_inv * 100 for s in symbols}
 
-    # ── Correlation matrix (top 20 by weight only) ──────────────────────────
+    # â”€â”€ Correlation matrix (top 20 by weight only) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     top20 = sorted(symbols, key=lambda s: -weights[s])[:20]
     df_ret = pd.DataFrame({s: returns_map[s] for s in top20 if s in returns_map})
     corr = df_ret.corr(min_periods=10) if len(df_ret.columns) > 1 else None
     corr_symbols = list(df_ret.columns)
 
-    # Average pairwise correlation → diversification score
+    # Average pairwise correlation â†’ diversification score
     if corr is not None and len(corr_symbols) > 1:
         pairs = []
         for i, a in enumerate(corr_symbols):
@@ -2018,7 +2022,7 @@ def analyze_portfolio(symbols):
         avg_corr = 0
         div_score = 100
 
-    # ── Table 1: Per-stock stats + suggested weight ──────────────────────────
+    # â”€â”€ Table 1: Per-stock stats + suggested weight â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     t1 = Table(title="Position Sizing (Inverse-Volatility Weighted)",
                box=box.SIMPLE_HEAD, show_lines=False)
     t1.add_column("Symbol",   style="bold white")
@@ -2027,7 +2031,7 @@ def analyze_portfolio(symbols):
     t1.add_column("20D Ret%", justify="right")
     t1.add_column("Sharpe",   justify="right")
     t1.add_column("Weight%",  justify="right", style="bold cyan")
-    t1.add_column("Rs 1L →",  justify="right", style="bold green")
+    t1.add_column("Rs 1L â†’",  justify="right", style="bold green")
 
     for sym in sorted(symbols, key=lambda s: -weights[s]):
         s = stats[sym]
@@ -2045,9 +2049,9 @@ def analyze_portfolio(symbols):
         )
     console.print(t1)
 
-    # ── Table 2: Correlation matrix ──────────────────────────────────────────
+    # â”€â”€ Table 2: Correlation matrix â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if corr is not None and len(corr_symbols) > 1:
-        t2 = Table(title=f"Correlation Matrix — Top {len(corr_symbols)} by Weight (60-day)",
+        t2 = Table(title=f"Correlation Matrix â€” Top {len(corr_symbols)} by Weight (60-day)",
                    box=box.SIMPLE_HEAD, show_lines=False)
         t2.add_column("", style="bold white")
         for sym in corr_symbols:
@@ -2068,7 +2072,7 @@ def analyze_portfolio(symbols):
             t2.add_row(*row)
         console.print(t2)
 
-    # ── Diversification score ────────────────────────────────────────────────
+    # â”€â”€ Diversification score â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if div_score >= 70:
         div_color = "green"
         div_label = "Well diversified"
@@ -2077,7 +2081,7 @@ def analyze_portfolio(symbols):
         div_label = "Moderate overlap"
     else:
         div_color = "red"
-        div_label = "High overlap — consider swapping one stock"
+        div_label = "High overlap â€” consider swapping one stock"
 
     console.print(
         f"  Diversification Score: [{div_color}]{div_score}/100[/{div_color}]  "
@@ -2087,7 +2091,7 @@ def analyze_portfolio(symbols):
 
 
 def analyze_corr():
-    """--corr — sector-level correlation heatmap across all stocks."""
+    """--corr â€” sector-level correlation heatmap across all stocks."""
     import sqlite3, os, datetime
     import pandas as pd, numpy as np
     from rich.console import Console
@@ -2096,7 +2100,7 @@ def analyze_corr():
 
     console = Console()
     console.print()
-    console.print(f"[bold cyan]{'─'*28} Sector Correlation Heatmap {'─'*28}[/bold cyan]")
+    console.print(f"[bold cyan]{'â”€'*28} Sector Correlation Heatmap {'â”€'*28}[/bold cyan]")
     console.print("[dim]  How correlated are sectors? Red = move together, Green = independent[/dim]")
     console.print()
 
@@ -2205,9 +2209,9 @@ def analyze_corr():
     )
     console.print()
     console.print("  [bold white]Portfolio Diversification Guide:[/bold white]")
-    console.print("  [red]🔴 Red  > 0.85[/red]  — Move together always    → Avoid holding both, no diversification")
-    console.print("  [yellow]🟡 Yellow 0.60-0.85[/yellow] — Move together usually  → Partial diversification, acceptable")
-    console.print("  [green]🟢 Green < 0.60[/green]  — Move independently    → Best diversification, hold both")
+    console.print("  [red]ðŸ”´ Red  > 0.85[/red]  â€” Move together always    â†’ Avoid holding both, no diversification")
+    console.print("  [yellow]ðŸŸ¡ Yellow 0.60-0.85[/yellow] â€” Move together usually  â†’ Partial diversification, acceptable")
+    console.print("  [green]ðŸŸ¢ Green < 0.60[/green]  â€” Move independently    â†’ Best diversification, hold both")
     console.print()
     # Build recommendations from correlation data
     console.print("  [bold white]Sector Pair Recommendations:[/bold white]")
@@ -2236,21 +2240,21 @@ def analyze_corr():
     pairs_yellow.sort()
     pairs_green.sort(reverse=True)
     if pairs_green:
-        console.print("  [green]✅ Best pairs to hold together (independent):[/green]")
+        console.print("  [green]âœ… Best pairs to hold together (independent):[/green]")
         for v, p in pairs_green[:5]:
             console.print(f"     {p}  ({v:.2f})")
     else:
-        console.print("  [yellow]⚠️  No green pairs in NEPSE — all sectors are correlated[/yellow]")
+        console.print("  [yellow]âš ï¸  No green pairs in NEPSE â€” all sectors are correlated[/yellow]")
         console.print("  [yellow]   Best available pairs (lowest correlation):[/yellow]")
         for v, p in pairs_yellow[:5]:
             console.print(f"     [green]{p}  ({v:.2f})[/green]")
     console.print()
-    console.print("  [red]❌ Avoid holding together (move in sync):[/red]")
+    console.print("  [red]âŒ Avoid holding together (move in sync):[/red]")
     for v, p in sorted(pairs_red, reverse=True)[:5]:
         console.print(f"     [red]{p}  ({v:.2f})[/red]")
     console.print()
 def analyze_size(symbol, capital):
-    """--size SYM AMOUNT — volatility-adjusted position sizing."""
+    """--size SYM AMOUNT â€” volatility-adjusted position sizing."""
     import sqlite3, math
     import pandas as pd
     from rich.console import Console
@@ -2260,7 +2264,7 @@ def analyze_size(symbol, capital):
     console = Console()
     symbol = symbol.upper()
     console.print()
-    console.print(f"[bold cyan]{'─'*30} Position Sizer: {symbol} {'─'*30}[/bold cyan]")
+    console.print(f"[bold cyan]{'â”€'*30} Position Sizer: {symbol} {'â”€'*30}[/bold cyan]")
 
     conn = sqlite3.connect('nepse_market_data.db')
     df = pd.read_sql_query("""
@@ -2311,9 +2315,9 @@ def analyze_size(symbol, capital):
     t.add_column("Capital Used",  justify="right", style="bold green")
     t.add_column("% of Capital",  justify="right")
 
-    t.add_row("1% Risk / 2×ATR stop",
+    t.add_row("1% Risk / 2Ã—ATR stop",
               str(shares_1pct), f"Rs {cost_1pct:,.0f}", f"{cost_1pct/capital*100:.1f}%")
-    t.add_row("2% Risk / 2×ATR stop",
+    t.add_row("2% Risk / 2Ã—ATR stop",
               str(shares_2pct), f"Rs {cost_2pct:,.0f}", f"{cost_2pct/capital*100:.1f}%")
     t.add_row(f"Half-Kelly ({kelly_pct/2:.1f}%)",
               str(kelly_shares//2), f"Rs {kelly_shares//2*ltp:,.0f}",
@@ -2565,7 +2569,7 @@ def main():
         analyze_broker_market(full_fs)
         console.print()
 
-    # Default mode — signals
+    # Default mode â€” signals
     candidates = pd.DataFrame()
     if not any([args.floor, args.brokers, args.powersell, args.sector,
                 args.whale, args.sr, args.watchlist, args.movers_only, args.broker,
@@ -2594,7 +2598,7 @@ def main():
     console.print()
 
 
-# ── RELATIVE STRENGTH ─────────────────────────────────────────────────────────
+# â”€â”€ RELATIVE STRENGTH â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _calc_relative_strength(db_path="nepse_market_data.db"):
     """
@@ -2668,7 +2672,7 @@ def analyze_relative_strength():
     from rich.panel import Panel
     from rich import box
 
-    console.rule("[bold cyan]Relative Strength — Stocks vs Their Sector[/]")
+    console.rule("[bold cyan]Relative Strength â€” Stocks vs Their Sector[/]")
     console.print("[dim]Stocks gaining MORE than their sector = early movers[/]\n")
 
     data = _calc_relative_strength()
@@ -2676,7 +2680,7 @@ def analyze_relative_strength():
         console.print("[red]No data available.[/]")
         return
 
-    # ── TOP OUTPERFORMERS ────────────────────────────────────────────────────
+    # â”€â”€ TOP OUTPERFORMERS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     top = [r for r in data if r["rs5"] > 0][:20]
     bot = [r for r in reversed(data) if r["rs5"] < 0][:10]
 
@@ -2687,14 +2691,14 @@ def analyze_relative_strength():
         return f"[{color}]{sign}{v:.2f}%[/]"
 
     def _star(rs5):
-        if rs5 >= 5:   return "[bold green]★★★ Strong[/]"
-        if rs5 >= 2:   return "[green]★★  Leading[/]"
-        if rs5 >= 0.5: return "[cyan]★   Outperform[/]"
-        if rs5 >= -1:  return "[dim]–   Inline[/]"
-        return "[red]▼   Lagging[/]"
+        if rs5 >= 5:   return "[bold green]â˜…â˜…â˜… Strong[/]"
+        if rs5 >= 2:   return "[green]â˜…â˜…  Leading[/]"
+        if rs5 >= 0.5: return "[cyan]â˜…   Outperform[/]"
+        if rs5 >= -1:  return "[dim]â€“   Inline[/]"
+        return "[red]â–¼   Lagging[/]"
 
     tbl = Table(
-        title="Top Outperformers (Stock Return − Sector Avg)",
+        title="Top Outperformers (Stock Return âˆ’ Sector Avg)",
         box=box.SIMPLE_HEAVY, show_lines=False,
         title_style="bold white"
     )
@@ -2723,7 +2727,7 @@ def analyze_relative_strength():
 
     console.print(tbl)
 
-    # ── SECTOR SUMMARY ───────────────────────────────────────────────────────
+    # â”€â”€ SECTOR SUMMARY â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     import pandas as pd
     df = pd.DataFrame(data)
     sec_summary = (
@@ -2740,7 +2744,7 @@ def analyze_relative_strength():
     )
 
     stbl = Table(
-        title="Sector Breadth — How Many Stocks Are Outperforming?",
+        title="Sector Breadth â€” How Many Stocks Are Outperforming?",
         box=box.SIMPLE_HEAVY, show_lines=False,
         title_style="bold white"
     )
@@ -2762,7 +2766,7 @@ def analyze_relative_strength():
 
     console.print(stbl)
 
-    # ── BOTTOM LAGGARDS ──────────────────────────────────────────────────────
+    # â”€â”€ BOTTOM LAGGARDS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if bot:
         btbl = Table(
             title="Bottom Laggards (Underperforming their sector most)",
@@ -2791,7 +2795,7 @@ def analyze_relative_strength():
 
 
 
-# ── BROKER ACCUMULATION on RS LEADERS ────────────────────────────────────────
+# â”€â”€ BROKER ACCUMULATION on RS LEADERS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def analyze_broker_rs():
     """
@@ -2803,9 +2807,9 @@ def analyze_broker_rs():
     from rich import box
 
     console.rule("[bold cyan]Broker Accumulation on High-RS Stocks[/]")
-    console.print("[dim]Smart money confirmation — brokers buying stocks already outperforming their sector[/]\n")
+    console.print("[dim]Smart money confirmation â€” brokers buying stocks already outperforming their sector[/]\n")
 
-    # ── Step 1: Get top RS stocks ─────────────────────────────────────────────
+    # â”€â”€ Step 1: Get top RS stocks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     rs_data = _calc_relative_strength()
     if not rs_data:
         console.print("[red]No RS data available.[/]")
@@ -2816,10 +2820,10 @@ def analyze_broker_rs():
     top_symbols = {r["symbol"] for r in top_rs}
     rs_lookup = {r["symbol"]: r for r in top_rs}
 
-    # ── Step 2: Get floorsheet ────────────────────────────────────────────────
+    # â”€â”€ Step 2: Get floorsheet â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     n = Nepse()
     n.setTLSVerification(False)
-    console.print("  [yellow]Fetching floorsheet for broker analysis — 30-60 seconds...[/yellow]")
+    console.print("  [yellow]Fetching floorsheet for broker analysis â€” 30-60 seconds...[/yellow]")
     raw = fetch_with_retry(lambda: n.getFloorSheet(show_progress=False), "floorsheet", retries=2, delay=3)
     if raw is None or (hasattr(raw, "__len__") and len(raw) == 0):
         console.print("[red]No floorsheet data available.[/]")
@@ -2858,7 +2862,7 @@ def analyze_broker_rs():
         console.print("[yellow]None of the top RS stocks traded in floorsheet today.[/]")
         return
 
-    # ── Step 3: Broker net activity per RS stock ──────────────────────────────
+    # â”€â”€ Step 3: Broker net activity per RS stock â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     results = []
     for symbol in top_symbols:
         sym_df = rs_floor[rs_floor['symbol'] == symbol]
@@ -2896,13 +2900,13 @@ def analyze_broker_rs():
     import pandas as pd
     rdf = pd.DataFrame(results)
 
-    # ── Step 4: Top accumulators (net buyers in RS leaders) ──────────────────
+    # â”€â”€ Step 4: Top accumulators (net buyers in RS leaders) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     accum = rdf[rdf["net_qty"] > 0].sort_values("net_qty", ascending=False).head(20)
 
     def _rs_star(rs5):
-        if rs5 >= 5:  return "[bold green]★★★[/]"
-        if rs5 >= 2:  return "[green]★★ [/]"
-        return "[cyan]★  [/]"
+        if rs5 >= 5:  return "[bold green]â˜…â˜…â˜…[/]"
+        if rs5 >= 2:  return "[green]â˜…â˜… [/]"
+        return "[cyan]â˜…  [/]"
 
     tbl = Table(
         title="Top Broker Accumulators in High-RS Stocks",
@@ -2936,7 +2940,7 @@ def analyze_broker_rs():
         )
     console.print(tbl)
 
-    # ── Step 5: Broker conviction table ──────────────────────────────────────
+    # â”€â”€ Step 5: Broker conviction table â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # Which brokers are buying MULTIPLE high-RS stocks (highest conviction)
     broker_summary = (
         rdf[rdf["net_qty"] > 0]
@@ -2975,28 +2979,28 @@ def analyze_broker_rs():
         )
     console.print(ctbl)
 
-    # ── Step 6: RS stocks with no broker accumulation (warning) ──────────────
+    # â”€â”€ Step 6: RS stocks with no broker accumulation (warning) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     traded_syms = set(rdf["symbol"].unique())
     not_accumulated = [
         s for s in top_symbols
         if s not in traded_syms or rdf[(rdf["symbol"]==s) & (rdf["net_qty"]>0)].empty
     ]
     if not_accumulated:
-        console.print(f"  [yellow]⚠ RS leaders with NO net broker buying:[/] {', '.join(sorted(not_accumulated))}")
-        console.print("  [dim]Price outperformance without broker confirmation — treat with caution[/]\n")
+        console.print(f"  [yellow]âš  RS leaders with NO net broker buying:[/] {', '.join(sorted(not_accumulated))}")
+        console.print("  [dim]Price outperformance without broker confirmation â€” treat with caution[/]\n")
 
     # Summary
     if not accum.empty:
         top_broker = broker_summary.iloc[0]
         console.print(
             f"  [bold green]Most active accumulator:[/] Broker {top_broker['broker']} "
-            f"— buying {int(top_broker['stocks_accumulated'])} RS leaders "
+            f"â€” buying {int(top_broker['stocks_accumulated'])} RS leaders "
             f"({top_broker['symbols'][:50]})"
         )
 
 
 
-# ── 52-WEEK HIGH/LOW ALERTS ───────────────────────────────────────────────────
+# â”€â”€ 52-WEEK HIGH/LOW ALERTS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def analyze_week52(db_path="nepse_market_data.db"):
     """
@@ -3008,11 +3012,11 @@ def analyze_week52(db_path="nepse_market_data.db"):
     from rich import box
 
     console.rule("[bold cyan]52-Week High / Low Alerts[/]")
-    console.print("[dim]Breakout candidates near highs · Recovery plays near lows · Cross-checked with RS[/]\n")
+    console.print("[dim]Breakout candidates near highs Â· Recovery plays near lows Â· Cross-checked with RS[/]\n")
 
     conn = sqlite3.connect(db_path)
 
-    # ── Pull 52-week range + current price for all equity stocks ─────────────
+    # â”€â”€ Pull 52-week range + current price for all equity stocks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     df = pd.read_sql_query("""
         SELECT
             sp.symbol,
@@ -3038,25 +3042,25 @@ def analyze_week52(db_path="nepse_market_data.db"):
     df["pct_from_low"]  = (df["current"] - df["low52"])  / df["low52"]  * 100
     df["range_pct"]     = df["range52"] / df["low52"] * 100
 
-    # ── Get RS data for cross-reference ──────────────────────────────────────
+    # â”€â”€ Get RS data for cross-reference â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     rs_data   = _calc_relative_strength()
     rs_lookup = {r["symbol"]: r["rs5"] for r in rs_data} if rs_data else {}
 
     df["rs5"] = df["symbol"].map(rs_lookup).fillna(0)
 
-    # ── Near 52-week HIGH (within 5%) ────────────────────────────────────────
+    # â”€â”€ Near 52-week HIGH (within 5%) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     near_high = df[df["pct_from_high"] >= -5].sort_values("pct_from_high", ascending=False)
 
     def _signal(row):
         at_high  = row["pct_from_high"] >= -1
         rs_good  = row["rs5"] > 1
-        if at_high and rs_good:   return "[bold green]★★★ BREAKOUT[/]"
-        if at_high:               return "[green]★★  At High[/]"
-        if rs_good:               return "[cyan]★   RS+Near High[/]"
-        return "[dim]–   Near High[/]"
+        if at_high and rs_good:   return "[bold green]â˜…â˜…â˜… BREAKOUT[/]"
+        if at_high:               return "[green]â˜…â˜…  At High[/]"
+        if rs_good:               return "[cyan]â˜…   RS+Near High[/]"
+        return "[dim]â€“   Near High[/]"
 
     tbl_high = Table(
-        title="Near 52-Week High — Breakout Watch",
+        title="Near 52-Week High â€” Breakout Watch",
         box=box.SIMPLE_HEAVY, show_lines=False,
         title_style="bold white"
     )
@@ -3089,11 +3093,11 @@ def analyze_week52(db_path="nepse_market_data.db"):
         )
     console.print(tbl_high)
 
-    # ── Near 52-week LOW (within 10%) ─────────────────────────────────────────
+    # â”€â”€ Near 52-week LOW (within 10%) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     near_low = df[df["pct_from_low"] <= 10].sort_values("pct_from_low")
 
     tbl_low = Table(
-        title="Near 52-Week Low — Avoid or Watch for Recovery",
+        title="Near 52-Week Low â€” Avoid or Watch for Recovery",
         box=box.SIMPLE_HEAVY, show_lines=False,
         title_style="bold white"
     )
@@ -3127,7 +3131,7 @@ def analyze_week52(db_path="nepse_market_data.db"):
         )
     console.print(tbl_low)
 
-    # ── Sector summary ────────────────────────────────────────────────────────
+    # â”€â”€ Sector summary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     sec = df.groupby("sector").apply(lambda g: pd.Series({
         "near_high": (g["pct_from_high"] >= -5).sum(),
         "near_low":  (g["pct_from_low"]  <= 10).sum(),
@@ -3150,7 +3154,7 @@ def analyze_week52(db_path="nepse_market_data.db"):
         afh = row["avg_from_high"]
         color = "green" if afh >= -10 else "yellow" if afh >= -25 else "red"
         bar_n = max(0, min(12, int((afh + 50) / 50 * 12)))
-        bar = "█" * bar_n + "░" * (12 - bar_n)
+        bar = "â–ˆ" * bar_n + "â–‘" * (12 - bar_n)
         stbl.add_row(
             str(row["sector"]),
             f"[green]{int(row['near_high'])}/{int(row['total'])}[/]",
@@ -3160,28 +3164,28 @@ def analyze_week52(db_path="nepse_market_data.db"):
         )
     console.print(stbl)
 
-    # ── Top conviction: near high + strong RS ────────────────────────────────
+    # â”€â”€ Top conviction: near high + strong RS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     conviction = df[
         (df["pct_from_high"] >= -5) & (df["rs5"] >= 2)
     ].sort_values(["pct_from_high", "rs5"], ascending=[False, False])
 
     if not conviction.empty:
-        console.print("\n  [bold green]★★★ Highest conviction setups (Near 52W High + Strong RS):[/]")
+        console.print("\n  [bold green]â˜…â˜…â˜… Highest conviction setups (Near 52W High + Strong RS):[/]")
         for _, row in conviction.head(5).iterrows():
             console.print(
-                f"    [cyan]{row['symbol']}[/] ({row['sector']}) — "
+                f"    [cyan]{row['symbol']}[/] ({row['sector']}) â€” "
                 f"[green]{row['pct_from_high']:+.1f}%[/] from high, "
                 f"RS [green]+{row['rs5']:.1f}%[/]"
             )
     else:
-        console.print("\n  [yellow]No stocks currently near 52W high with strong RS — market may be extended or weak[/]")
+        console.print("\n  [yellow]No stocks currently near 52W high with strong RS â€” market may be extended or weak[/]")
 
 
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 #  FUNDAMENTAL ANALYSIS BLOCK  (injected by inject_fundamentals.py)
-# ══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 _SECTOR_ALIASES = {
     "Hydro Power": "Hydropower",
@@ -3194,13 +3198,13 @@ def _norm_sector(s):
     return _SECTOR_ALIASES.get(str(s).strip(), str(s).strip())
 
 
-# ── --fundamental SYMBOL ──────────────────────────────────────────────────────
+# â”€â”€ --fundamental SYMBOL â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 def analyze_fundamental(symbol: str):
     import sqlite3
     from rich.table import Table
     from rich import box
     sym = symbol.upper().strip()
-    console.rule(f"[bold cyan]Fundamental Snapshot — {sym}[/]")
+    console.rule(f"[bold cyan]Fundamental Snapshot â€” {sym}[/]")
     conn = sqlite3.connect("nepse_market_data.db")
     cur  = conn.cursor()
     cur.execute(
@@ -3264,7 +3268,7 @@ def analyze_fundamental(symbol: str):
     console.print(t)
     verdicts = []
     if pe and pb:
-        if pe < 20 and pb < 1.5: verdicts.append('[bold green]Potentially UNDERVALUED — low PE + low PB[/]')
+        if pe < 20 and pb < 1.5: verdicts.append('[bold green]Potentially UNDERVALUED â€” low PE + low PB[/]')
         elif pe > 40:            verdicts.append('[red]Expensive by PE[/]')
         elif pb > 4:             verdicts.append('[red]Expensive by PB[/]')
     if roe and roe > 15:         verdicts.append('[green]Strong ROE[/]')
@@ -3294,13 +3298,13 @@ def analyze_fundamental(symbol: str):
         console.print(qt)
 
 
-# ── --earnings SYMBOL ─────────────────────────────────────────────────────────
+# â”€â”€ --earnings SYMBOL â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 def analyze_earnings(symbol: str):
     import sqlite3
     from rich.table import Table
     from rich import box
     sym = symbol.upper().strip()
-    console.rule(f"[bold cyan]Earnings History — {sym}[/]")
+    console.rule(f"[bold cyan]Earnings History â€” {sym}[/]")
     conn = sqlite3.connect("nepse_market_data.db")
     cur  = conn.cursor()
     cur.execute(
@@ -3313,7 +3317,7 @@ def analyze_earnings(symbol: str):
     if not rows:
         console.print(f"[yellow]No earnings data for {sym}[/]")
         return
-    t = Table(box=box.SIMPLE_HEAVY, border_style='dim', title_style='bold white', title=f'{sym} — Quarterly Earnings')
+    t = Table(box=box.SIMPLE_HEAVY, border_style='dim', title_style='bold white', title=f'{sym} â€” Quarterly Earnings')
     t.add_column('FY',          width=10)
     t.add_column('Q',           width=4,  justify='center')
     t.add_column('EPS',         width=12, justify='right')
@@ -3342,7 +3346,7 @@ def analyze_earnings(symbol: str):
 
 
 
-# ── --value  (peer comparison by sector) ─────────────────────────────────────
+# â”€â”€ --value  (peer comparison by sector) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 def analyze_value(filter_sector=None):
     import sqlite3, pandas as pd
     from rich.table import Table
@@ -3466,7 +3470,7 @@ def analyze_value(filter_sector=None):
             console.print(f'[dim]Available: {list(df["sector"].unique())}[/]')
             return
 
-    # ── Pre-load earnings growth map ─────────────────────────────────────────
+    # â”€â”€ Pre-load earnings growth map â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     import sqlite3 as _sq3
     _eq_conn = _sq3.connect('nepse_market_data.db')
     _eq_rows = _eq_conn.execute(
@@ -3487,7 +3491,7 @@ def analyze_value(filter_sector=None):
         if len(sec_df) < 2:
             continue
 
-        # Sort will be by score after scoring — keep pb sort as initial
+        # Sort will be by score after scoring â€” keep pb sort as initial
         sec_df = sec_df.sort_values('pb_live', ascending=True, na_position='last')
 
         # Sector stats
@@ -3522,14 +3526,14 @@ def analyze_value(filter_sector=None):
             ppct   = r['promo_pct']
             fshares= r['pub_shares']
 
-            # ── Earnings growth score (QoQ) ─────────────────────────────
+            # â”€â”€ Earnings growth score (QoQ) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             eq = earnings_map.get(r['symbol'], [])
             if len(eq) >= 2 and eq[0] and eq[1] and eq[1] != 0:
                 eq_growth = (eq[0] - eq[1]) / abs(eq[1]) * 100
             else:
                 eq_growth = None
 
-            # ── Value Score 0-100 ─────────────────────────────────────────
+            # â”€â”€ Value Score 0-100 â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             score = 0
             # PB component (40 pts): below book=40, cheap vs peers=30, near median=15, expensive=0
             if pb is not None:
@@ -3596,7 +3600,7 @@ def analyze_value(filter_sector=None):
             all_scores.append({'symbol': r['symbol'], 'sector': sec, 'score': score,
                                 'pb': pb, 'ltp': ltp, 'bv': bv, 'roe': roe, 'fpct': fpct, 'fshares': fshares, 'reserve_cr': reserve_cr})
 
-            # ── Colors ────────────────────────────────────────────────────
+            # â”€â”€ Colors â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             if pb is None:   pb_c = 'dim'
             elif pb < 1.0:   pb_c = 'bold green'
             elif med_pb and pb < med_pb * 0.8: pb_c = 'green'
@@ -3615,7 +3619,7 @@ def analyze_value(filter_sector=None):
             elif score >= 30: sc_c = 'yellow'
             else:             sc_c = 'dim'
 
-            # ── Verdict ───────────────────────────────────────────────────
+            # â”€â”€ Verdict â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             tags = []
             if pb is not None and pb < 1.0:
                 tags.append('[bold green]BELOW BOOK[/]')
@@ -3680,19 +3684,19 @@ def analyze_value(filter_sector=None):
         scored = [x for x in all_scores if x['sector'] == sec and x['score'] > 0]
         if scored:
             top = max(scored, key=lambda x: x['score'])
-            stars = '★★★' if top['score'] >= 65 else '★★' if top['score'] >= 45 else '★'
+            stars = 'â˜…â˜…â˜…' if top['score'] >= 65 else 'â˜…â˜…' if top['score'] >= 45 else 'â˜…'
             sc_col = 'bold green' if top['score'] >= 65 else 'green' if top['score'] >= 45 else 'yellow'
             pb_str = f'PB {top["pb"]:.2f}x' if top['pb'] else ''
             roe_str = f'ROE {top["roe"]:.1f}%' if top['roe'] else ''
-            console.print(f'  [{sc_col}]{stars} Best in {sec}: {top["symbol"]} — Score {top["score"]}/100  {pb_str}  {roe_str}[/]')
+            console.print(f'  [{sc_col}]{stars} Best in {sec}: {top["symbol"]} â€” Score {top["score"]}/100  {pb_str}  {roe_str}[/]')
         console.print()
 
-    # ── Cross-sector Top 10 leaderboard ──────────────────────────────────────
+    # â”€â”€ Cross-sector Top 10 leaderboard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if all_scores:
         top10 = sorted(all_scores, key=lambda x: x['score'], reverse=True)[:20]
         from rich.table import Table as _T
         from rich import box as _box
-        lb = _T(title='[bold yellow]★ Top 10 Value Picks — All Sectors[/]',
+        lb = _T(title='[bold yellow]â˜… Top 10 Value Picks â€” All Sectors[/]',
                 box=_box.SIMPLE_HEAVY, border_style='yellow', title_style='bold yellow')
         lb.add_column('#',      width=4,  justify='right')
         lb.add_column('Symbol', width=10, style='bold white', no_wrap=True)
@@ -3738,16 +3742,16 @@ def analyze_value(filter_sector=None):
         console.print(lb)
         console.print()
 
-    console.print('[dim]Score: PB 40pts + Float 20pts + ROE 20pts + Earnings Growth 20pts. Green ≥65, Yellow ≥45.[/]') # VALUE_SCORE_PATCHED
+    console.print('[dim]Score: PB 40pts + Float 20pts + ROE 20pts + Earnings Growth 20pts. Green â‰¥65, Yellow â‰¥45.[/]') # VALUE_SCORE_PATCHED
 
-# ── --float SYMBOL ────────────────────────────────────────────────────────────
+# â”€â”€ --float SYMBOL â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 def analyze_float(symbol: str):
     from nepse import Nepse
     import warnings; warnings.filterwarnings('ignore')
     from rich.table import Table
     from rich import box
     sym = symbol.upper().strip()
-    console.rule(f"[bold cyan]Float & Ownership — {sym}[/]")
+    console.rule(f"[bold cyan]Float & Ownership â€” {sym}[/]")
     try:
         n = Nepse(); n.setTLSVerification(False)
         d = n.getCompanyDetails(sym)
@@ -3780,16 +3784,16 @@ def analyze_float(symbol: str):
     console.print(t)
     console.print()
     if pub_pct and pub_pct < 25:
-        console.print('  [bold green]Low float (<25%) — small supply, price can move fast[/]')
+        console.print('  [bold green]Low float (<25%) â€” small supply, price can move fast[/]')
     elif pub_pct and pub_pct < 40:
-        console.print('  [yellow]Moderate float (25-40%) — normal liquidity[/]')
+        console.print('  [yellow]Moderate float (25-40%) â€” normal liquidity[/]')
     else:
-        console.print('  [dim]High float (>40%) — high supply, needs strong demand[/]')
+        console.print('  [dim]High float (>40%) â€” high supply, needs strong demand[/]')
     if promo_pct and promo_pct > 60:
-        console.print('  [yellow]Promoter >60% — watch for unlock events[/]')
+        console.print('  [yellow]Promoter >60% â€” watch for unlock events[/]')
 
 
-# ── --unlock ──────────────────────────────────────────────────────────────────
+# â”€â”€ --unlock â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 def _unlock_db():
     import sqlite3
     conn = sqlite3.connect("nepse_market_data.db")
@@ -3883,12 +3887,12 @@ def analyze_unlock(args_unlock):
     console.print('[dim]Delete: python nepse_scanner.py --unlock delete ID[/]')
 
 
-# ── RELATIVE STRENGTH ─────────────────────────────────────────────────────────
+# â”€â”€ RELATIVE STRENGTH â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# WHY ENGINE — Broker Activity Logger + Story Generator + Why Block
-# ══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# WHY ENGINE â€” Broker Activity Logger + Story Generator + Why Block
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def _init_broker_activity_table(db_path="nepse_market_data.db"):
     """Create broker_activity table if it does not exist."""
@@ -4002,15 +4006,15 @@ def get_broker_story(symbol, fs_df, db_path="nepse_market_data.db"):
                     n5 = sum(nv for _, nv in h5)
                     a5 = ("Rs " + str(round(abs(n5)/1e6, 1)) + "M") if abs(n5) >= 1e6 else ("Rs " + str(round(abs(n5)/1e3)) + "K")
                     if b5 >= 4:
-                        five_day_verdict = "EARLY BUY SIGNAL — broker bought " + str(b5) + "/5 days (" + a5 + " in) — watch closely"
+                        five_day_verdict = "EARLY BUY SIGNAL â€” broker bought " + str(b5) + "/5 days (" + a5 + " in) â€” watch closely"
                     elif b5 == 3:
-                        five_day_verdict = "MILD INTEREST — broker bought 3/5 days (" + a5 + " in) — not confirmed yet"
+                        five_day_verdict = "MILD INTEREST â€” broker bought 3/5 days (" + a5 + " in) â€” not confirmed yet"
                     elif s5 >= 4:
-                        five_day_verdict = "EARLY SELL SIGNAL — broker sold " + str(s5) + "/5 days (" + a5 + " out) — caution"
+                        five_day_verdict = "EARLY SELL SIGNAL â€” broker sold " + str(s5) + "/5 days (" + a5 + " out) â€” caution"
                     elif s5 == 3:
-                        five_day_verdict = "MILD EXIT — broker sold 3/5 days (" + a5 + " out) — monitor"
+                        five_day_verdict = "MILD EXIT â€” broker sold 3/5 days (" + a5 + " out) â€” monitor"
                     else:
-                        five_day_verdict = "NO SIGNAL — broker direction unclear over 5 days"
+                        five_day_verdict = "NO SIGNAL â€” broker direction unclear over 5 days"
                 # 10d verdict
                 if len(hist) >= 10:
                     h10 = hist[:10]
@@ -4019,15 +4023,15 @@ def get_broker_story(symbol, fs_df, db_path="nepse_market_data.db"):
                     n10 = sum(nv for _, nv in h10)
                     a10 = ("Rs " + str(round(abs(n10)/1e6, 1)) + "M") if abs(n10) >= 1e6 else ("Rs " + str(round(abs(n10)/1e3)) + "K")
                     if b10 >= 8:
-                        ten_day_verdict = "STRONG BUY — broker bought " + str(b10) + "/10 days (" + a10 + " accumulated) — high conviction"
+                        ten_day_verdict = "STRONG BUY â€” broker bought " + str(b10) + "/10 days (" + a10 + " accumulated) â€” high conviction"
                     elif b10 >= 6:
-                        ten_day_verdict = "MODERATE BUY — broker bought " + str(b10) + "/10 days (" + a10 + " in) — building position"
+                        ten_day_verdict = "MODERATE BUY â€” broker bought " + str(b10) + "/10 days (" + a10 + " in) â€” building position"
                     elif s10 >= 8:
-                        ten_day_verdict = "STRONG AVOID — broker sold " + str(s10) + "/10 days (" + a10 + " distributed) — consistent exit"
+                        ten_day_verdict = "STRONG AVOID â€” broker sold " + str(s10) + "/10 days (" + a10 + " distributed) â€” consistent exit"
                     elif s10 >= 6:
-                        ten_day_verdict = "CAUTION — broker sold " + str(s10) + "/10 days (" + a10 + " out) — distribution ongoing"
+                        ten_day_verdict = "CAUTION â€” broker sold " + str(s10) + "/10 days (" + a10 + " out) â€” distribution ongoing"
                     else:
-                        ten_day_verdict = "NO CONVICTION — broker mixed over 10 days (bought " + str(b10) + ", sold " + str(s10) + ")"
+                        ten_day_verdict = "NO CONVICTION â€” broker mixed over 10 days (bought " + str(b10) + ", sold " + str(s10) + ")"
                 # 20d verdict
                 if len(hist) >= 20:
                     h20 = hist[:20]
@@ -4036,19 +4040,19 @@ def get_broker_story(symbol, fs_df, db_path="nepse_market_data.db"):
                     n20 = sum(nv for _, nv in h20)
                     a20 = ("Rs " + str(round(abs(n20)/1e6, 1)) + "M") if abs(n20) >= 1e6 else ("Rs " + str(round(abs(n20)/1e3)) + "K")
                     if b20 >= 16:
-                        twenty_day_verdict = "INSTITUTIONAL ACCUMULATION — broker bought " + str(b20) + "/20 days (" + a20 + " in) — very high conviction"
+                        twenty_day_verdict = "INSTITUTIONAL ACCUMULATION â€” broker bought " + str(b20) + "/20 days (" + a20 + " in) â€” very high conviction"
                     elif b20 >= 12:
-                        twenty_day_verdict = "STRONG ACCUMULATION — broker bought " + str(b20) + "/20 days (" + a20 + " in) — sustained buying"
+                        twenty_day_verdict = "STRONG ACCUMULATION â€” broker bought " + str(b20) + "/20 days (" + a20 + " in) â€” sustained buying"
                     elif b20 >= 8:
-                        twenty_day_verdict = "MODERATE ACCUMULATION — broker bought " + str(b20) + "/20 days (" + a20 + " in) — mild interest"
+                        twenty_day_verdict = "MODERATE ACCUMULATION â€” broker bought " + str(b20) + "/20 days (" + a20 + " in) â€” mild interest"
                     elif s20 >= 16:
-                        twenty_day_verdict = "INSTITUTIONAL DISTRIBUTION — broker sold " + str(s20) + "/20 days (" + a20 + " out) — major exit"
+                        twenty_day_verdict = "INSTITUTIONAL DISTRIBUTION â€” broker sold " + str(s20) + "/20 days (" + a20 + " out) â€” major exit"
                     elif s20 >= 12:
-                        twenty_day_verdict = "STRONG DISTRIBUTION — broker sold " + str(s20) + "/20 days (" + a20 + " out) — sustained selling"
+                        twenty_day_verdict = "STRONG DISTRIBUTION â€” broker sold " + str(s20) + "/20 days (" + a20 + " out) â€” sustained selling"
                     elif s20 >= 8:
-                        twenty_day_verdict = "MODERATE DISTRIBUTION — broker sold " + str(s20) + "/20 days (" + a20 + " out) — mild exit"
+                        twenty_day_verdict = "MODERATE DISTRIBUTION â€” broker sold " + str(s20) + "/20 days (" + a20 + " out) â€” mild exit"
                     else:
-                        twenty_day_verdict = "NO TREND — no clear direction over 20 days (bought " + str(b20) + ", sold " + str(s20) + ")"
+                        twenty_day_verdict = "NO TREND â€” no clear direction over 20 days (bought " + str(b20) + ", sold " + str(s20) + ")"
         except Exception:
             pass
         return dict(
@@ -4135,7 +4139,7 @@ def analyze_why(live_df, full_fs, rs_data=None, db_path="nepse_market_data.db"):
     except Exception:
         pass
 
-    # ── WHY BLOCK ─────────────────────────────────────────────────────────────
+    # â”€â”€ WHY BLOCK â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     def _print_why(stock, tag):
         symbol = stock['symbol']
         sector = stock.get('sector', '')
@@ -4165,26 +4169,26 @@ def analyze_why(live_df, full_fs, rs_data=None, db_path="nepse_market_data.db"):
                         high = float(r[hcol])
                         pct_from_high = (ltp - high) / high * 100
                         if pct_from_high >= -5:
-                            w52_note = f"Only {abs(pct_from_high):.1f}% from 52W high — breakout zone"
+                            w52_note = f"Only {abs(pct_from_high):.1f}% from 52W high â€” breakout zone"
                         elif lcol:
                             low = float(r[lcol])
                             if low > 0:
                                 pct_from_low = (ltp - low) / low * 100
                                 if pct_from_low <= 5:
-                                    w52_note = f"Only {pct_from_low:.1f}% above 52W low — danger zone"
+                                    w52_note = f"Only {pct_from_low:.1f}% above 52W low â€” danger zone"
                         if not w52_note:
                             w52_note = f"{abs(pct_from_high):.1f}% below 52W high"
             except Exception:
                 pass
 
-        # ── Build bullets ──────────────────────────────────────────────────
-        # Bullet 1 — Broker
+        # â”€â”€ Build bullets â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # Bullet 1 â€” Broker
         bid   = bstory['dominant_broker_id']
         bname = bstory['dominant_broker_name'] or (f"Broker {bid}" if bid else None)
         if bid:
-            conc  = {'high': f"dominant — {bstory['dominant_pct']:.0f}% of today's volume",
-                     'medium': f"active — {bstory['dominant_pct']:.0f}% of today's volume",
-                     'low':  f"present — {bstory['dominant_pct']:.0f}% of today's volume"}.get(bstory['concentration'], '')
+            conc  = {'high': f"dominant â€” {bstory['dominant_pct']:.0f}% of today's volume",
+                     'medium': f"active â€” {bstory['dominant_pct']:.0f}% of today's volume",
+                     'low':  f"present â€” {bstory['dominant_pct']:.0f}% of today's volume"}.get(bstory['concentration'], '')
             act   = {'buying': 'net BUYING', 'selling': 'net SELLING', 'neutral': 'market making'}.get(bstory['dominant_action'], '')
             nval  = _fmt_rs_val(abs(bstory['dominant_net_val'])) if bstory['dominant_net_val'] else ''
             nval_str = f" ({nval})" if nval else ""
@@ -4193,15 +4197,15 @@ def analyze_why(live_df, full_fs, rs_data=None, db_path="nepse_market_data.db"):
             if bstory['history_days'] > 1:
                 hist_note = f"  [{bstory['history_summary']}]"
                 if bstory['history_action'] == 'accumulating' and bstory['dominant_action'] == 'selling':
-                    hist_note += " ← FIRST SELL after accumulation (exit alert)"
+                    hist_note += " â† FIRST SELL after accumulation (exit alert)"
                 elif bstory['history_action'] == 'distributing' and bstory['dominant_action'] == 'buying':
-                    hist_note += " ← FIRST BUY after distribution (reversal alert)"
+                    hist_note += " â† FIRST BUY after distribution (reversal alert)"
             if bstory.get('five_day_verdict'):
-                hist_note += "\n      📊 5D:  " + bstory['five_day_verdict']
+                hist_note += "\n      ðŸ“Š 5D:  " + bstory['five_day_verdict']
             if bstory.get('ten_day_verdict'):
-                hist_note += "\n      ⭐ 10D: " + bstory['ten_day_verdict']
+                hist_note += "\n      â­ 10D: " + bstory['ten_day_verdict']
             if bstory.get('twenty_day_verdict'):
-                hist_note += "\n      🏆 20D: " + bstory['twenty_day_verdict']
+                hist_note += "\n      ðŸ† 20D: " + bstory['twenty_day_verdict']
 
             broad = ''
             if bstory['total_brokers'] > 0:
@@ -4211,39 +4215,39 @@ def analyze_why(live_df, full_fs, rs_data=None, db_path="nepse_market_data.db"):
                 elif bp < 35:
                     broad = f"  |  {bstory['sell_brokers']}/{bstory['total_brokers']} brokers net selling (broad distribution)"
 
-            b1 = f"Broker {bid} ({bname}) — {conc}, {act}{nval_str}{hist_note}{broad}"
+            b1 = f"Broker {bid} ({bname}) â€” {conc}, {act}{nval_str}{hist_note}{broad}"
         else:
             b1 = "Floorsheet not available (run with a scan that fetches floorsheet)"
 
-        # Bullet 2 — Sector context
+        # Bullet 2 â€” Sector context
         if sec5 != 0:
             if rs5 > 0 and sec5 > 0:
-                b2 = f"Sector ({sector}) also rising +{sec5:.1f}% 5D — stock outperforming by +{rs5:.1f}% (momentum confirmed)"
+                b2 = f"Sector ({sector}) also rising +{sec5:.1f}% 5D â€” stock outperforming by +{rs5:.1f}% (momentum confirmed)"
             elif rs5 < 0 and sec5 > 0:
                 if rs5 >= -2:
-                    b2 = f"Sector ({sector}) up +{sec5:.1f}% 5D — stock inline with sector ({rs5:+.1f}% RS)"
+                    b2 = f"Sector ({sector}) up +{sec5:.1f}% 5D â€” stock inline with sector ({rs5:+.1f}% RS)"
                 else:
-                    b2 = f"Sector ({sector}) up +{sec5:.1f}% but stock {ret5:+.1f}% — STOCK-SPECIFIC weakness, not sector"
+                    b2 = f"Sector ({sector}) up +{sec5:.1f}% but stock {ret5:+.1f}% â€” STOCK-SPECIFIC weakness, not sector"
             elif rs5 < 0 and sec5 < 0:
-                b2 = f"Sector ({sector}) also weak {sec5:.1f}% — broad sector selling, not just this stock"
+                b2 = f"Sector ({sector}) also weak {sec5:.1f}% â€” broad sector selling, not just this stock"
             else:
-                b2 = f"Sector ({sector}) {sec5:+.1f}% / Stock {ret5:+.1f}% — RS {rs5:+.1f}%"
+                b2 = f"Sector ({sector}) {sec5:+.1f}% / Stock {ret5:+.1f}% â€” RS {rs5:+.1f}%"
         else:
             b2 = f"Sector ({sector}) data unavailable for comparison"
 
-        # Bullet 3 — RS rank
+        # Bullet 3 â€” RS rank
         if rs5 > 5:
-            b3 = f"RS +{rs5:.2f}% vs sector — Rank #{rank}/{total} (top performer in market)"
+            b3 = f"RS +{rs5:.2f}% vs sector â€” Rank #{rank}/{total} (top performer in market)"
         elif rs5 > 2:
-            b3 = f"RS +{rs5:.2f}% vs sector — Rank #{rank}/{total} (outperforming sector)"
+            b3 = f"RS +{rs5:.2f}% vs sector â€” Rank #{rank}/{total} (outperforming sector)"
         elif rs5 >= -2:
-            b3 = f"RS {rs5:+.2f}% vs sector — Rank #{rank}/{total} (inline with sector)"
+            b3 = f"RS {rs5:+.2f}% vs sector â€” Rank #{rank}/{total} (inline with sector)"
         elif rs5 > -5:
-            b3 = f"RS {rs5:.2f}% vs sector — Rank #{rank}/{total} (underperforming sector)"
+            b3 = f"RS {rs5:.2f}% vs sector â€” Rank #{rank}/{total} (underperforming sector)"
         else:
-            b3 = f"RS {rs5:.2f}% vs sector — Rank #{rank}/{total} (worst performers in market)"
+            b3 = f"RS {rs5:.2f}% vs sector â€” Rank #{rank}/{total} (worst performers in market)"
 
-        # Bullet 4 — 52W + unlock
+        # Bullet 4 â€” 52W + unlock
         parts = []
         if w52_note:
             parts.append(w52_note)
@@ -4253,11 +4257,11 @@ def analyze_why(live_df, full_fs, rs_data=None, db_path="nepse_market_data.db"):
                 unlock_dt = datetime.strptime(unlock, '%Y-%m-%d').date()
                 days_away = (unlock_dt - date.today()).days
                 if days_away <= 180:
-                    parts.append(f"Lock-in expiry: {unlock} ({days_away} days away) — supply overhang risk")
+                    parts.append(f"Lock-in expiry: {unlock} ({days_away} days away) â€” supply overhang risk")
                 else:
                     parts.append(f"No near-term lock-in expiry (next: {unlock})")
             except Exception:
-                parts.append(f"Lock-in expiry: {unlock} — supply overhang risk")
+                parts.append(f"Lock-in expiry: {unlock} â€” supply overhang risk")
         else:
             parts.append("No lock-in expiry found")
         b4 = "  |  ".join(parts)
@@ -4268,17 +4272,17 @@ def analyze_why(live_df, full_fs, rs_data=None, db_path="nepse_market_data.db"):
         if tag == 'bull':
             # Conflict: strong RS but dominant broker selling
             if da == 'selling' and bstory.get('concentration') in ('high', 'medium') and rs5 > 0:
-                verdict = ('Strong RS but dominant broker net SELLING — '
+                verdict = ('Strong RS but dominant broker net SELLING â€” '
                            'possible distribution at highs. '
                            'Wait for broker to stop selling before entry.')
             elif ha == 'accumulating' and rs5 > 5:
-                verdict = "Sustained institutional accumulation + top RS. High conviction — buy on dips."
+                verdict = "Sustained institutional accumulation + top RS. High conviction â€” buy on dips."
             elif da == 'buying' and bstory['concentration'] == 'high' and rs5 > 3:
                 verdict = "Whale accumulating aggressively + strong RS. Watch for 52W high breakout."
             elif rs5 > 5:
                 verdict = "Strongest momentum in market. Sector tailwind confirmed. Buy pullbacks."
             else:
-                verdict = "Outperforming sector. Positive momentum — monitor for continuation."
+                verdict = "Outperforming sector. Positive momentum â€” monitor for continuation."
 
         elif tag == 'bear':
             if ha == 'distributing' and rs5 < -5:
@@ -4286,26 +4290,26 @@ def analyze_why(live_df, full_fs, rs_data=None, db_path="nepse_market_data.db"):
             elif da == 'selling' and sec5 > 0:
                 buy_pct = (bstory.get('buy_brokers', 0) / bstory.get('total_brokers', 1)) * 100
                 if buy_pct > 60:
-                    verdict = ('One whale selling while 60%+ brokers buying — '
+                    verdict = ('One whale selling while 60%+ brokers buying â€” '
                                'possible shakeout before move up. Watch closely.')
                 else:
                     verdict = 'Promoter/whale exit while sector rises. Stock-specific. Avoid until selling stops.'
             elif unlock:
                 verdict = f"Lock-in expiry {unlock} creating supply. Wait for expiry to pass before entry."
             elif sec5 < 0:
-                verdict = "Sector-wide weakness — not stock-specific. Wait for sector to stabilize first."
+                verdict = "Sector-wide weakness â€” not stock-specific. Wait for sector to stabilize first."
             else:
                 verdict = "Underperforming sector. No catalyst visible. Avoid or cut losses."
 
         else:  # neutral
             if da == 'buying' and rs5 < 0:
-                verdict = "Broker accumulating but RS still negative — early/risky entry. Wait for RS to turn positive."
+                verdict = "Broker accumulating but RS still negative â€” early/risky entry. Wait for RS to turn positive."
             elif da == 'selling' and rs5 > 0:
-                verdict = "RS positive but broker distributing — topping risk. Tighten stops if holding."
+                verdict = "RS positive but broker distributing â€” topping risk. Tighten stops if holding."
             elif unlock:
                 verdict = f"Mixed signals + unlock on {unlock}. Wait for post-expiry clarity."
             else:
-                verdict = "No strong signal. High turnover stock — monitor for breakout direction."
+                verdict = "No strong signal. High turnover stock â€” monitor for breakout direction."
 
         # Print
         colors = {'bull': 'green', 'bear': 'red', 'neutral': 'yellow'}
@@ -4313,12 +4317,12 @@ def analyze_why(live_df, full_fs, rs_data=None, db_path="nepse_market_data.db"):
         c = colors.get(tag, 'white')
         l = labels.get(tag, '')
 
-        console.print(f"  [bold {c}]📌 {symbol}[/bold {c}] [{c}]— {l}[/{c}]")
-        console.print(f"    [cyan]•[/cyan] {b1}")
-        console.print(f"    [cyan]•[/cyan] {b2}")
-        console.print(f"    [cyan]•[/cyan] {b3}")
-        console.print(f"    [cyan]•[/cyan] {b4}")
-        console.print(f"    [bold white]→ Verdict:[/bold white] {verdict}")
+        console.print(f"  [bold {c}]ðŸ“Œ {symbol}[/bold {c}] [{c}]â€” {l}[/{c}]")
+        console.print(f"    [cyan]â€¢[/cyan] {b1}")
+        console.print(f"    [cyan]â€¢[/cyan] {b2}")
+        console.print(f"    [cyan]â€¢[/cyan] {b3}")
+        console.print(f"    [cyan]â€¢[/cyan] {b4}")
+        console.print(f"    [bold white]â†’ Verdict:[/bold white] {verdict}")
         # Top 4 broker holders from history
         holders = get_top_broker_holders(symbol, db_path, top_n=4)
         if holders:
@@ -4328,22 +4332,22 @@ def analyze_why(live_df, full_fs, rs_data=None, db_path="nepse_market_data.db"):
                 direction = 'NET LONG' if net >= 0 else 'NET SHORT'
                 amt = ('Rs ' + str(round(abs(net)/1e6, 1)) + 'M') if abs(net) >= 1e6 else ('Rs ' + str(round(abs(net)/1e3)) + 'K')
                 col = 'green' if net >= 0 else 'red'
-                console.print(f"      Broker {h['broker_id']} ({h['broker_name']}) [{h['days_active']}d] — [{col}]{direction} {amt}[/{col}]", style="dim")
+                console.print(f"      Broker {h['broker_id']} ({h['broker_name']}) [{h['days_active']}d] â€” [{col}]{direction} {amt}[/{col}]", style="dim")
         console.print()
 
     # Print all sections
     if bullish:
-        console.print("[bold green]── BULLISH — Accumulation Signals ──────────────────────────────[/bold green]")
+        console.print("[bold green]â”€â”€ BULLISH â€” Accumulation Signals â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€[/bold green]")
         for s in bullish:
             _print_why(s, 'bull')
 
     if bearish:
-        console.print("[bold red]── BEARISH — Distribution Signals ──────────────────────────────[/bold red]")
+        console.print("[bold red]â”€â”€ BEARISH â€” Distribution Signals â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€[/bold red]")
         for s in bearish:
             _print_why(s, 'bear')
 
     if neutral_syms:
-        console.print("[bold yellow]── NEUTRAL — Watch for Direction ────────────────────────────────[/bold yellow]")
+        console.print("[bold yellow]â”€â”€ NEUTRAL â€” Watch for Direction â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€[/bold yellow]")
         for s in neutral_syms:
             _print_why(s, 'neutral')
 
@@ -4422,7 +4426,7 @@ def log_broker_activity(fs_df, db_path='nepse_market_data.db'):
         stocks_logged = len(merged['symbol'].unique())
         clean_msg = f'  (cleaned {deleted} old records)' if deleted > 0 else ''
         print(
-            f'  Broker activity saved — {stocks_logged} stocks, {len(records)} broker rows '
+            f'  Broker activity saved â€” {stocks_logged} stocks, {len(records)} broker rows '
             f'logged for {trade_date}{clean_msg}  '
             f'[{total_rows:,} total rows, {distinct_dates} trading days in history]'
         )
@@ -4473,7 +4477,7 @@ def get_top_broker_holders(symbol, db_path='nepse_market_data.db', top_n=15):
 
 
 def analyze_broker_holders(symbol=None, db_path='nepse_market_data.db'):
-    """Menu option — show top 15 broker holders for any stock."""
+    """Menu option â€” show top 15 broker holders for any stock."""
     from rich.table import Table
     from rich.rule import Rule
     if not symbol:
@@ -4484,7 +4488,7 @@ def analyze_broker_holders(symbol=None, db_path='nepse_market_data.db'):
         return
     holders = get_top_broker_holders(symbol, db_path, top_n=15)
     console.print()
-    console.print(Rule(f'Top Broker Holders — {symbol}', style='cyan'))
+    console.print(Rule(f'Top Broker Holders â€” {symbol}', style='cyan'))
     if not holders:
         console.print(f'  No broker history found for {symbol}.', style='yellow')
         console.print('  History builds automatically each trading day you run any scan.', style='dim')
@@ -4529,10 +4533,10 @@ def analyze_broker_holders(symbol=None, db_path='nepse_market_data.db'):
     console.print()
     if holders:
         top = holders[0]
-        console.print(f"  Top holder: Broker {top['broker_id']} ({top['broker_name']}) — net {'+' if top['total_net']>=0 else ''}{round(top['total_net']/1e6,1)}M over {top['days_active']} days", style='bold')
+        console.print(f"  Top holder: Broker {top['broker_id']} ({top['broker_name']}) â€” net {'+' if top['total_net']>=0 else ''}{round(top['total_net']/1e6,1)}M over {top['days_active']} days", style='bold')
         console.print()
         # Smart summary for top 3 holders
-        console.print("  [bold cyan]── Smart Summary ──[/bold cyan]")
+        console.print("  [bold cyan]â”€â”€ Smart Summary â”€â”€[/bold cyan]")
         for h in holders[:3]:
             net = h['total_net']
             net_qty = h.get('net_qty', 0)
@@ -4545,22 +4549,22 @@ def analyze_broker_holders(symbol=None, db_path='nepse_market_data.db'):
             qty_str = f'{abs(net_qty):,}'
             if net > 0 and avg_b > 0 and avg_s > 0:
                 if avg_b > avg_s:
-                    msg = f"Broker {bid} ({name}) bought avg Rs {avg_b:,.1f} and sold avg Rs {avg_s:,.1f} — buying HIGHER than selling, net accumulating {qty_str} shares worth {amt}"
+                    msg = f"Broker {bid} ({name}) bought avg Rs {avg_b:,.1f} and sold avg Rs {avg_s:,.1f} â€” buying HIGHER than selling, net accumulating {qty_str} shares worth {amt}"
                 else:
-                    msg = f"Broker {bid} ({name}) bought avg Rs {avg_b:,.1f} and sold avg Rs {avg_s:,.1f} — selling HIGHER than buying, collecting profit while accumulating {qty_str} net shares ({amt})"
+                    msg = f"Broker {bid} ({name}) bought avg Rs {avg_b:,.1f} and sold avg Rs {avg_s:,.1f} â€” selling HIGHER than buying, collecting profit while accumulating {qty_str} net shares ({amt})"
             elif net > 0 and avg_b > 0 and avg_s == 0:
-                msg = f"Broker {bid} ({name}) only BUYING — no sells, accumulating {qty_str} shares at avg Rs {avg_b:,.1f} ({amt} invested)"
+                msg = f"Broker {bid} ({name}) only BUYING â€” no sells, accumulating {qty_str} shares at avg Rs {avg_b:,.1f} ({amt} invested)"
             elif net < 0 and avg_b > 0 and avg_s > 0:
                 if avg_s > avg_b:
-                    msg = f"Broker {bid} ({name}) bought avg Rs {avg_b:,.1f} and sold avg Rs {avg_s:,.1f} — selling HIGHER than buying, distributing {qty_str} shares at profit"
+                    msg = f"Broker {bid} ({name}) bought avg Rs {avg_b:,.1f} and sold avg Rs {avg_s:,.1f} â€” selling HIGHER than buying, distributing {qty_str} shares at profit"
                 else:
-                    msg = f"Broker {bid} ({name}) bought avg Rs {avg_b:,.1f} and sold avg Rs {avg_s:,.1f} — selling LOWER than buying, exiting position at loss ({amt} distributed)"
+                    msg = f"Broker {bid} ({name}) bought avg Rs {avg_b:,.1f} and sold avg Rs {avg_s:,.1f} â€” selling LOWER than buying, exiting position at loss ({amt} distributed)"
             elif net < 0 and avg_s > 0 and avg_b == 0:
-                msg = f"Broker {bid} ({name}) only SELLING — no buys, distributing {qty_str} shares at avg Rs {avg_s:,.1f} ({amt} out)"
+                msg = f"Broker {bid} ({name}) only SELLING â€” no buys, distributing {qty_str} shares at avg Rs {avg_s:,.1f} ({amt} out)"
             else:
-                msg = f"Broker {bid} ({name}) — net {'+' if net>=0 else ''}{amt} over {days} days"
+                msg = f"Broker {bid} ({name}) â€” net {'+' if net>=0 else ''}{amt} over {days} days"
             col = 'green' if net >= 0 else 'red'
-            console.print(f"  [{col}]• {msg}[/{col}]")
+            console.print(f"  [{col}]â€¢ {msg}[/{col}]")
     console.print()
 
 
@@ -4602,7 +4606,7 @@ def analyze_broker_trend(symbol=None, days=7, db_path="nepse_market_data.db"):
         if not dates:
             console.print(f"  No data for {symbol}.", style="yellow"); conn.close(); return
         console.print()
-        console.rule(f"[bold cyan]Broker Trend — {symbol} (last {len(dates)} days)[/bold cyan]")
+        console.rule(f"[bold cyan]Broker Trend â€” {symbol} (last {len(dates)} days)[/bold cyan]")
         console.print()
         t = Table(show_header=True, header_style="bold cyan", box=None, padding=(0, 2))
         t.add_column("Date", width=12)
@@ -4629,8 +4633,8 @@ def analyze_broker_trend(symbol=None, days=7, db_path="nepse_market_data.db"):
             for r2 in rows:
                 if r2[0] in whale_buyers: ss = min(100, ss + 8)
                 elif r2[0] in whale_sellers: ss = max(0, ss - 8)
-            buyer_name = f"{smb[0][0]} {smb[0][1][:18]} {_fmt_rs_val(abs(smb[0][2]))}" if smb else "—"
-            seller_name = f"{sms[0][0]} {sms[0][1][:18]} {_fmt_rs_val(abs(sms[0][2]))}" if sms else "—"
+            buyer_name = f"{smb[0][0]} {smb[0][1][:18]} {_fmt_rs_val(abs(smb[0][2]))}" if smb else "â€”"
+            seller_name = f"{sms[0][0]} {sms[0][1][:18]} {_fmt_rs_val(abs(sms[0][2]))}" if sms else "â€”"
             ssv = "BULL" if ss >= 70 else "BEAR" if ss <= 30 else "MIX"
             ssc = "green" if ss >= 70 else "red" if ss <= 30 else "yellow"
             net_flow = sum(r[2] for r in rows if r[2] > 0)
@@ -4647,11 +4651,11 @@ def analyze_broker_trend(symbol=None, days=7, db_path="nepse_market_data.db"):
         if len(score_history) >= 2:
             console.print("[bold]Trend Insights:[/bold]")
             if score_history[-1] > score_history[0]:
-                console.print("  ↗ Smart money sentiment improving", style="green")
+                console.print("  â†— Smart money sentiment improving", style="green")
             elif score_history[-1] < score_history[0]:
-                console.print("  ↘ Smart money sentiment deteriorating", style="red")
+                console.print("  â†˜ Smart money sentiment deteriorating", style="red")
             else:
-                console.print("  → Sentiment flat over period", style="yellow")
+                console.print("  â†’ Sentiment flat over period", style="yellow")
             avg = sum(score_history) / len(score_history)
             console.print(f"  Avg score over {len(score_history)} days: {avg:.0f}/100")
         conn.close()
@@ -4876,7 +4880,7 @@ def analyze_broker_date(symbol=None, date_str=None, db_path='nepse_market_data.d
                 console.print(f'    {_i:>2}. {_d}')
             console.print()
         else:
-            console.print(f'  No data found for {symbol} yet — run a scan first on a trading day.', style='yellow')
+            console.print(f'  No data found for {symbol} yet â€” run a scan first on a trading day.', style='yellow')
     except Exception:
         pass
     if not date_str or date_str.lower() == 'prompt':
@@ -4922,7 +4926,7 @@ def analyze_broker_date(symbol=None, date_str=None, db_path='nepse_market_data.d
         console.print(f'  DB error: {e}', style='red')
         return
     console.print()
-    console.print(Rule(f'Broker Activity — {symbol} on {date_str}', style='cyan'))
+    console.print(Rule(f'Broker Activity â€” {symbol} on {date_str}', style='cyan'))
     if not rows:
         console.print(f'  No data found for {symbol} on {date_str}.', style='yellow')
         console.print('  Note: Only dates after you started running scans will have data.', style='dim')
