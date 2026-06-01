@@ -1903,6 +1903,7 @@ def parse_args():
     p.add_argument('--broker-impact', action='store_true', default=False, help='Broker impact ranking')
     p.add_argument('--momentum-hunter',action='store_true',default=False,help='Momentum hunter')
     p.add_argument('--broker-holders', metavar='SYMBOL', default=None, help='Top 15 broker holders for a stock')
+    p.add_argument('--preopen', nargs='*', metavar='SYMBOL', help='Pre-open band calculator')
     return p.parse_args()
 
 
@@ -2351,7 +2352,7 @@ def cmd_preopen(symbols=None):
 
     for symbol in symbols:
         row = None
-        for table in ["daily_prices", "prices", "market_data"]:
+        for table in ["stock_prices", "daily_prices", "prices", "market_data"]:
             try:
                 c.execute(f"SELECT close, date FROM {table} WHERE symbol=? ORDER BY date DESC LIMIT 1", (symbol,))
                 row = c.fetchone()

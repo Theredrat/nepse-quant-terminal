@@ -1,7 +1,7 @@
 ﻿import sqlite3
 conn = sqlite3.connect("nepse_market_data.db")
 c = conn.cursor()
-c.execute("SELECT symbol, close, date FROM stock_prices WHERE symbol='NICL' AND date>='2026-05-25' ORDER BY date DESC")
+c.execute("SELECT * FROM watchlist_items ORDER BY symbol")
 for r in c.fetchall():
     print(r)
 conn.close()
