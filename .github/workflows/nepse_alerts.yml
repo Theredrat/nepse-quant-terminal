@@ -12,7 +12,6 @@ on:
     - cron: "10 9 * * 1-5"
     - cron: "30 9 * * 1-5"
   workflow_dispatch:
-
 jobs:
   alert:
     runs-on: ubuntu-latest
@@ -29,10 +28,9 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT: ${{ secrets.TELEGRAM_CHAT }}
         run: python nepse_alerts_ci.py
-
   daily_scan:
     runs-on: ubuntu-latest
-    if: github.event.schedule == '30 9 * * 1-5'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v3
         with:
@@ -50,5 +48,5 @@ jobs:
           git config user.name "NEPSE Bot"
           git config user.email "bot@nepse.com"
           git add daily_data/
-          git diff --staged --quiet || git commit -m "Daily broker data"
+          git diff --staged --quiet || git commit -m "Daily broker data $(date +%Y-%m-%d)"
           git push
