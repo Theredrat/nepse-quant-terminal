@@ -1359,7 +1359,7 @@ def print_market_movers(gainers, losers, turnover_list):
         t2 = Table(box=box.SIMPLE, show_header=True, header_style="bold yellow")
         t2.add_column("Symbol",   style="white",  width=10)
         t2.add_column("Turnover", style="yellow", width=14, justify="right")
-        for item in turnover_list[:8]:
+        for item in turnover_list[:35]:
             try: t2.add_row(item.get('symbol',''), fmt_rs(item.get('turnover', item.get('totalTradeValue',0))))
             except: pass
         panels.append(Panel(t2, title="[yellow]Top Turnover[/yellow]", border_style="yellow"))
@@ -5053,3 +5053,4 @@ def analyze_broker_date(symbol=None, date_str=None, db_path='nepse_market_data.d
 
 if __name__ == "__main__":
     main()
+
