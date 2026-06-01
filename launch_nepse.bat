@@ -64,6 +64,7 @@ echo   17c. Broker Activity - Specific Date
 echo   17d. Broker Trend  (7-day smart money)
 echo   17e. Broker Impact  (institutional ranking)
 echo   17f. Momentum Hunter (early accumulation)
+echo   17p. Pre-Open Band    (5%% up/down calculator)
 echo   18. Support/Resistance - Any Stock
 echo.
 echo   --- PORTFOLIO INTELLIGENCE ---
@@ -117,6 +118,7 @@ if "%choice%"=="17c" goto CUSTOM_BROKERDATE
 if "%choice%"=="17d" goto BROKER_TREND
 if "%choice%"=="17e" goto BROKER_IMPAAT
 if "%choice%"=="17f" goto MOMENTUM_HUNTER
+if "%choice%"=="17p" goto PREOPEN_CALC
 if "%choice%"=="34" goto CUSTOM_HOLDERS
 if "%choice%"=="17" goto CUSTOM_FLOOR
 if "%choice%"=="18" goto CUSTOM_SR
@@ -174,6 +176,11 @@ goto AGAIN
 :MOMENTUM_HUNTER
 python nepse_scanner.py --momentum-hunter
 goto AGAIN
+:PREOPEN_CALC
+set /p symbols=  Enter symbol(s) separated by space (e.g. AKJCL GUFL HPPL):
+python nepse_scanner.py --preopen %symbols%
+goto AGAIN
+
 :CUSTOM_FLOOR
 set /p symbol=  Enter stock symbol (e.g. NABIL):
 python nepse_scanner.py --floor %symbol%

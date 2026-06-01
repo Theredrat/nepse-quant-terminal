@@ -2329,9 +2329,67 @@ def analyze_size(symbol, capital):
     )
     console.print()
 
+
+def cmd_preopen(symbols=None):
+    import sqlite3
+    from datetime import datetime
+    db = "nepse_market_data.db"
+
+    if not symbols:
+        raw = input("  Enter symbol(s) separated by space (e.g. AKJCL GUFL HPPL): ").strip().upper()
+        symbols = [s.strip().replace(",","") for s in raw.split() if s.strip()]
+
+    if not symbols:
+        print("  No symbols entered.")
+        return
+
+    conn = sqlite3.connect(db)
+    c = conn.cursor()
+
+    results = []
+    not_found = []
+
+    for symbol in symbols:
+        row = None
+        for table in ["daily_prices", "prices", "market_data"]:
+            try:
+                c.execute(f"SELECT close, date FROM {table} WHERE symbol=? ORDER BY date DESC LIMIT 1", (symbol,))
+                row = c.fetchone()
+                if row:
+                    break
+            except:
+                pass
+        if row:
+            close = float(row[0])
+            date  = row[1]
+            mn    = round(close * 0.95, 2)
+            mx    = round(close * 1.05, 2)
+            results.append((symbol, close, mn, mx, date))
+        else:
+            not_found.append(symbol)
+
+    conn.close()
+
+    print()
+    print("  " + "=" * 58)
+    print(f"  PRE-OPEN BAND  --  {datetime.now().strftime('%Y-%m-%d')}")
+    print("  Valid order range  (10:30 - 10:45 AM)")
+    print("  " + "=" * 58)
+    print(f"  {'Symbol':<10} {'Last Close':>12} {'Min (-5%)':>12} {'Max (+5%)':>12}")
+    print("  " + "-" * 58)
+    for sym, close, mn, mx, date in results:
+        print(f"  {sym:<10} {close:>12,.2f} {mn:>12,.2f} {mx:>12,.2f}")
+    print("  " + "=" * 58)
+    if not_found:
+        print(f"  Not found in DB: {', '.join(not_found)}")
+    print()
+
 def main():
     args = parse_args()
 
+    if getattr(args, 'preopen', None) is not None:
+        cmd_preopen(args.preopen if args.preopen else None)
+        return
     if args.legend:
         print_legend()
         return
