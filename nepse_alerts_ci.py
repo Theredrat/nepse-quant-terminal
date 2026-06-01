@@ -104,12 +104,61 @@ def compute_rs(live, sector_map, n):
             pass
     sector_avg = {s: sum(v)/len(v) for s,v in ret5_by_sector.items() if v}
     rs_final = {sym: d["ret5"] - sector_avg.get(d["sector"],0) for sym,d in rs_score.items()}
-    return rs_final, week52, vol_med
+    return rs_final, week52, vol_med, rs_score, sector_avg
 
-def morning_briefing(live, rs_final, sector_map):
+def get_sector_rotation(live, sector_map):
+    import collections
+    sector_data = collections.defaultdict(lambda: {"up":0,"down":0,"flat":0,"total":0,"chg_sum":0.0})
+    for _, row in live.iterrows():
+        sym = str(row.get("symbol",""))
+        chg = float(row.get("change_pct", 0))
+        sector = sector_map.get(sym, "Others")
+        if not sector:
+            sector = "Others"
+        sector_data[sector]["total"] += 1
+        sector_data[sector]["chg_sum"] += chg
+        if chg > 0.1:
+            sector_data[sector]["up"] += 1
+        elif chg < -0.1:
+            sector_data[sector]["down"] += 1
+        else:
+            sector_data[sector]["flat"] += 1
+    result = []
+    for sector, d in sector_data.items():
+        if d["total"] > 0:
+            avg_chg = d["chg_sum"] / d["total"]
+            result.append((sector, d["up"], d["down"], d["total"], avg_chg))
+    result.sort(key=lambda x: -x[4])
+    return result
+
+def morning_briefing(live, rs_final, sector_map, rs_score, sector_avg):
     log.info("Sending morning briefing...")
     wl_count = str(len(WATCHLIST))
-    lines = ["<b>NEPSE Morning Briefing</b>", "", "<b>Watchlist (" + wl_count + " stocks):</b>"]
+    lines = ["<b>🌅 NEPSE Morning Briefing</b>", ""]
+
+    # Top 5 RS stocks
+    top_rs = sorted(rs_final.items(), key=lambda x: -x[1])[:5]
+    lines.append("<b>🔥 Top 5 RS Outperformers:</b>")
+    for sym, rs in top_rs:
+        sector = rs_score.get(sym, {}).get("sector", "")
+        row = live[live["symbol"] == sym]
+        ltp = int(float(row.iloc[0].get("ltp", 0))) if not row.empty else 0
+        chg = float(row.iloc[0].get("change_pct", 0)) if not row.empty else 0
+        arrow = "+" if chg >= 0 else ""
+        lines.append("  <b>" + sym + "</b> RS +" + str(round(rs,1)) + "% | Rs " + str(ltp) + " (" + arrow + str(round(chg,1)) + "%) | " + sector)
+    lines.append("")
+
+    # Hottest sector
+    if sector_avg:
+        hottest = max(sector_avg.items(), key=lambda x: x[1])
+        coldest = min(sector_avg.items(), key=lambda x: x[1])
+        lines.append("<b>📊 Sector Pulse:</b>")
+        lines.append("  🔥 Hottest: " + hottest[0] + " (+" + str(round(hottest[1],1)) + "% avg 5D)")
+        lines.append("  ❄️ Coldest: " + coldest[0] + " (" + str(round(coldest[1],1)) + "% avg 5D)")
+        lines.append("")
+
+    # Watchlist
+    lines.append("<b>📋 Watchlist (" + wl_count + " stocks):</b>")
     for sym in WATCHLIST:
         row = live[live["symbol"] == sym]
         if row.empty:
@@ -119,35 +168,36 @@ def morning_briefing(live, rs_final, sector_map):
         chg = float(row.iloc[0].get("change_pct", 0))
         rs5 = rs_final.get(sym, 0)
         score = 0
-        if rs5 >= 5:
-            score += 30
-        elif rs5 >= 2:
-            score += 20
-        elif rs5 >= 0:
-            score += 10
-        if float(row.iloc[0].get("volume", 0)) > 0:
-            score += 10
-        if chg > 0:
-            score += 5
-        if score >= 35:
-            reason = "Strong RS + Momentum"
-        elif score >= 25:
-            reason = "Good RS"
-        elif score >= 15:
-            reason = "Moderate signal"
-        else:
-            reason = "Monitor"
+        if rs5 >= 5: score += 30
+        elif rs5 >= 2: score += 20
+        elif rs5 >= 0: score += 10
+        if float(row.iloc[0].get("volume", 0)) > 0: score += 10
+        if chg > 0: score += 5
+        if score >= 35: reason = "Strong RS + Momentum"
+        elif score >= 25: reason = "Good RS"
+        elif score >= 15: reason = "Moderate signal"
+        else: reason = "Monitor"
         arrow = "+" if chg >= 0 else ""
-        chg_str = arrow + str(round(chg, 1)) + "%"
-        ltp_str = str(int(ltp))
-        lines.append("  <b>" + sym + "</b> Rs " + ltp_str + " (" + chg_str + ") Score " + str(score) + " | " + reason)
+        lines.append("  <b>" + sym + "</b> Rs " + str(int(ltp)) + " (" + arrow + str(round(chg,1)) + "%) Score " + str(score) + " | " + reason)
+
     lines.append("")
     lines.append("<i>Alerts active. Good trading!</i>")
     send_telegram("\n".join(lines))
 
 def eod_summary(live, sector_map):
     log.info("Sending EOD summary...")
-    lines = ["<b>NEPSE EOD Summary</b>", ""]
+    lines = ["<b>📉 NEPSE EOD Summary</b>", ""]
+
+    # Sector rotation
+    rotation = get_sector_rotation(live, sector_map)
+    lines.append("<b>🔄 Sector Rotation Today:</b>")
+    for sector, up, down, total, avg_chg in rotation[:6]:
+        arrow = "▲" if avg_chg > 0 else "▼"
+        pressure = "Buying" if up > down else "Selling"
+        lines.append("  " + arrow + " " + sector + " " + str(round(avg_chg,1)) + "% | " + str(up) + "/" + str(total) + " up | " + pressure)
+    lines.append("")
+
+    # Watchlist gainers/losers
     gainers, losers, flat = [], [], []
     for sym in WATCHLIST:
         row = live[live["symbol"] == sym]
@@ -156,30 +206,26 @@ def eod_summary(live, sector_map):
         ltp = float(row.iloc[0].get("ltp", 0))
         chg = float(row.iloc[0].get("change_pct", 0))
         vol = float(row.iloc[0].get("volume", 0))
-        if chg > 0.1:
-            gainers.append((sym, ltp, chg, vol))
-        elif chg < -0.1:
-            losers.append((sym, ltp, chg, vol))
-        else:
-            flat.append((sym, ltp, chg, vol))
+        if chg > 0.1: gainers.append((sym, ltp, chg, vol))
+        elif chg < -0.1: losers.append((sym, ltp, chg, vol))
+        else: flat.append((sym, ltp, chg, vol))
+
     gainers.sort(key=lambda x: -x[2])
     losers.sort(key=lambda x: x[2])
-    lines.append("<b>Gainers:</b>")
+
+    lines.append("<b>✅ Watchlist Gainers:</b>")
     for sym, ltp, chg, vol in gainers:
         lines.append("  " + sym + " +" + str(round(chg,1)) + "% | Rs " + str(int(ltp)) + " | Vol " + str(int(vol)))
     if not gainers:
         lines.append("  None")
+
     lines.append("")
-    lines.append("<b>Losers:</b>")
+    lines.append("<b>❌ Watchlist Losers:</b>")
     for sym, ltp, chg, vol in losers:
         lines.append("  " + sym + " " + str(round(chg,1)) + "% | Rs " + str(int(ltp)) + " | Vol " + str(int(vol)))
     if not losers:
         lines.append("  None")
-    if flat:
-        lines.append("")
-        lines.append("<b>Flat:</b>")
-        for sym, ltp, chg, vol in flat:
-            lines.append("  " + sym + " " + str(round(chg,1)) + "% | Rs " + str(int(ltp)))
+
     send_telegram("\n".join(lines))
 
 def check_alerts(live, rs_final, week52, vol_med, sector_map):
@@ -247,9 +293,9 @@ def run():
         log.warning("No live data - market may be closed")
         return
     sector_map = get_sector_map(n)
-    rs_final, week52, vol_med = compute_rs(live, sector_map, n)
+    rs_final, week52, vol_med, rs_score, sector_avg = compute_rs(live, sector_map, n)
     if hour == 5 and minute <= 20:
-        morning_briefing(live, rs_final, sector_map)
+        morning_briefing(live, rs_final, sector_map, rs_score, sector_avg)
     elif hour == 9 and minute >= 25:
         eod_summary(live, sector_map)
     else:
