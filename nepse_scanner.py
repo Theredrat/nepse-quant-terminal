@@ -2438,9 +2438,10 @@ def main():
 
     print_header(summary)
     console.print()
-    if gainers or losers or turnover:
-        print_market_movers(gainers, losers, turnover)
-        console.print()
+    if args.movers_only or not any([args.watchlist, args.powersell, args.sector, args.whale, args.sr, args.floor, args.brokers, args.quickpick, args.smartpick, args.broker, args.rs, args.week52, args.portfolio, args.corr, args.size, args.value, args.broker_rs]):
+        if gainers or losers or turnover:
+            print_market_movers(gainers, losers, turnover)
+            console.print()
 
     if args.movers_only:
         return
@@ -5053,4 +5054,5 @@ def analyze_broker_date(symbol=None, date_str=None, db_path='nepse_market_data.d
 
 if __name__ == "__main__":
     main()
+
 
