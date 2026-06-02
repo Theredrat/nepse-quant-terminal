@@ -73,16 +73,81 @@ def save_broker_json(broker_data, date_str):
     log.info('Saved: ' + path)
     return path
 
+def fetch_price_data(n):
+    try:
+        import pandas as pd
+        log.info("Fetching live market prices...")
+        data = n.getLiveMarket()
+        if data is None:
+            log.error("getLiveMarket returned None")
+            return None
+        df = data if isinstance(data, pd.DataFrame) else pd.DataFrame(data)
+        if df.empty:
+            log.error("Live market empty")
+            return None
+        log.info("Live market rows: " + str(len(df)))
+        # Normalize columns
+        col_map = {}
+        for c in df.columns:
+            cl = c.lower()
+            if cl in ("symbol", "stocksymbol", "scrip"): col_map[c] = "symbol"
+            elif cl in ("lasttradedprice", "ltp", "closeprice", "close"): col_map[c] = "close"
+            elif cl in ("openprice", "open"): col_map[c] = "open"
+            elif cl in ("highprice", "high"): col_map[c] = "high"
+            elif cl in ("lowprice", "low"): col_map[c] = "low"
+            elif cl in ("totaltradedquantity", "totaltradeQuantity", "volume", "qty"): col_map[c] = "volume"
+        df = df.rename(columns=col_map)
+        required = ["symbol", "close"]
+        if not all(c in df.columns for c in required):
+            log.error("Missing required cols. Available: " + str(list(df.columns)))
+            return None
+        for col in ["close", "open", "high", "low", "volume"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+        df = df[df["close"] > 0]
+        prices = []
+        for _, row in df.iterrows():
+            sym = str(row.get("symbol", "")).strip()
+            if not sym:
+                continue
+            prices.append({
+                "symbol": sym,
+                "open":   float(row.get("open",   row["close"])),
+                "high":   float(row.get("high",   row["close"])),
+                "low":    float(row.get("low",    row["close"])),
+                "close":  float(row["close"]),
+                "volume": float(row.get("volume", 0)),
+            })
+        log.info("Processed " + str(len(prices)) + " price rows")
+        return prices
+    except Exception as e:
+        log.error("Price fetch error: " + str(e))
+        import traceback; traceback.print_exc()
+        return None
+
+def save_price_json(prices, date_str):
+    os.makedirs("daily_data", exist_ok=True)
+    path = "daily_data/prices_" + date_str + ".json"
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"date": date_str, "prices": prices}, f)
+    log.info("Saved: " + path)
+    return path
+
 def main():
     today = datetime.date.today().isoformat()
-    log.info('NEPSE Daily Scan CI - ' + today)
+    log.info("NEPSE Daily Scan CI - " + today)
     n = get_nepse()
     broker_data = fetch_broker_data(n)
     if broker_data is None:
-        log.error('No broker data - market may be closed or API unavailable')
+        log.error("No broker data - market may be closed or API unavailable")
         return
     path = save_broker_json(broker_data, today)
-    log.info('Done: ' + path)
+    log.info("Done: " + path)
+    prices = fetch_price_data(n)
+    if prices:
+        save_price_json(prices, today)
+    else:
+        log.warning("No price data saved")
 
 if __name__ == '__main__':
     main()

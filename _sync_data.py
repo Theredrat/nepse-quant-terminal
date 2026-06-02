@@ -80,6 +80,47 @@ def cleanup_old_files(log):
         print(chr(67)+chr(108)+chr(101)+chr(97)+chr(110)+chr(101)+chr(100)+chr(32)+chr(117)+chr(112),len(to_delete),chr(102)+chr(105)+chr(108)+chr(101)+chr(115)+chr(32)+chr(40)+chr(49)+chr(32)+chr(121)+chr(114)+chr(32)+chr(111)+chr(108)+chr(100)+chr(41))
     return log
 
+def get_imported_price_dates(conn):
+    try:
+        rows = conn.execute("SELECT DISTINCT date FROM stock_prices").fetchall()
+        return set(r[0] for r in rows)
+    except:
+        return set()
+
+def import_price_json(conn, path, date_str):
+    import json
+    data = json.load(open(path, encoding="utf-8"))
+    prices = data.get("prices", [])
+    rows = []
+    for p in prices:
+        sym = p.get("symbol", "")
+        if not sym:
+            continue
+        rows.append((
+            sym, date_str,
+            p.get("open", 0),
+            p.get("high", 0),
+            p.get("low", 0),
+            p.get("close", 0),
+            p.get("volume", 0),
+        ))
+    if rows:
+        conn.executemany(
+            "INSERT OR REPLACE INTO stock_prices (symbol,date,open,high,low,close,volume) VALUES (?,?,?,?,?,?,?)",
+            rows
+        )
+        conn.commit()
+        print("  Prices imported", date_str, "-", len(rows), "rows")
+        return True
+    return False
+
+def ensure_prices_table(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS stock_prices (
+        symbol TEXT, date TEXT, open REAL, high REAL, low REAL, close REAL, volume REAL,
+        UNIQUE(symbol, date)
+    )""")
+    conn.commit()
+
 def main():
     print(chr(80)+chr(117)+chr(108)+chr(108)+chr(105)+chr(110)+chr(103)+chr(32)+chr(108)+chr(97)+chr(116)+chr(101)+chr(115)+chr(116)+chr(32)+chr(100)+chr(97)+chr(116)+chr(97)+chr(32)+chr(102)+chr(114)+chr(111)+chr(109)+chr(32)+chr(71)+chr(105)+chr(116)+chr(72)+chr(117)+chr(98)+chr(46)+chr(46)+chr(46))
     git_pull()
@@ -104,6 +145,21 @@ def main():
             new_count+=1
     conn.close()
     save_log(log)
+    # Import price files
+    price_imported = get_imported_price_dates(conn2 := sqlite3.connect(DB))
+    ensure_prices_table(conn2)
+    price_files = sorted(f for f in os.listdir(DATA_DIR) if f.startswith('prices_') and f.endswith('.json'))
+    price_new = 0
+    for fname in price_files:
+        date_str = fname[7:17]
+        if date_str not in price_imported:
+            path = os.path.join(DATA_DIR, fname)
+            if import_price_json(conn2, path, date_str):
+                price_new += 1
+    conn2.close()
+    if price_new:
+        print("Price days imported:", price_new)
+
     if new_count: print(chr(73)+chr(109)+chr(112)+chr(111)+chr(114)+chr(116)+chr(101)+chr(100),new_count,chr(110)+chr(101)+chr(119)+chr(32)+chr(100)+chr(97)+chr(121)+chr(115))
     else: print(chr(68)+chr(66)+chr(32)+chr(117)+chr(112)+chr(32)+chr(116)+chr(111)+chr(32)+chr(100)+chr(97)+chr(116)+chr(101)+chr(32)+chr(45)+chr(32)+chr(110)+chr(111)+chr(32)+chr(110)+chr(101)+chr(119)+chr(32)+chr(100)+chr(97)+chr(116)+chr(97))
     cleanup_old_files(log)
