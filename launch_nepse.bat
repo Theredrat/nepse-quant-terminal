@@ -5,6 +5,8 @@ chcp 437 >nul
 cd /d "C:\Users\HP User\nepse-quant-terminal"
 call .venv\Scripts\activate
 python _backup.py >nul 2>&1
+:: BACKUP daily_data before sync
+python backup_daily_data.py
 :: SYNC - pull latest JSON from GitHub
 echo Syncing data...
 python _sync_data.py
