@@ -251,12 +251,6 @@ if errorlevel 1 goto AGAIN
 python nepse_scanner.py
 goto AGAIN
  
-:RUN_FULLSCAN
-python _marketcheck.py
-if errorlevel 1 goto AGAIN
-python nepse_scanner.py
-goto AGAIN
- 
 :RUN_MOVERS
 python _marketcheck.py
 if errorlevel 1 goto AGAIN
