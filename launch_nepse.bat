@@ -260,11 +260,13 @@ goto AGAIN
 :RUN_MOVERS
 python _marketcheck.py
 if errorlevel 1 python nepse_scanner.py --offline --movers-only & goto AGAIN
+python nepse_scanner.py --movers-only
 goto AGAIN
 
 :RUN_WATCHLIST
 python _marketcheck.py
 if errorlevel 1 python nepse_scanner.py --offline --watchlist & goto AGAIN
+python nepse_scanner.py --watchlist
 goto AGAIN
 
 :UPDATE_FUNDAMENTALS
