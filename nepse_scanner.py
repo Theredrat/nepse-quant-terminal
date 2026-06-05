@@ -593,15 +593,15 @@ def _momentum_label(r5, r10, r20):
     avg         = sum(valid) / len(valid)
     accelerating = (r5 is not None and r10 is not None and r5 > r10 / 2)
     if avg > 2.0 and accelerating:
-        return "Strong uptrend  â†‘â†‘", "bold green"
+        return "Strong uptrend  ", "bold green"
     elif avg > 0.5:
-        return "Heating up      â†‘",  "green"
+        return "Heating up      ", "green"
     elif avg > -0.5:
         return "Neutral         →",  "dim white"
     elif avg > -2.0:
-        return "Cooling down    â†“",  "red"
+        return "Cooling down    ", "red"
     else:
-        return "Strong downtrend â†“â†“","bold red"
+        return "Strong downtrend", "bold red"
 
 
 def analyze_sector_trend(db_path="nepse_market_data.db"):
@@ -4260,9 +4260,9 @@ def analyze_why(live_df, full_fs, rs_data=None, db_path="nepse_market_data.db"):
             if bstory['history_days'] > 1:
                 hist_note = f"  [{bstory['history_summary']}]"
                 if bstory['history_action'] == 'accumulating' and bstory['dominant_action'] == 'selling':
-                    hist_note += " â† FIRST SELL after accumulation (exit alert)"
+                    hist_note += "  FIRST SELL after accumulation (exit alert)"
                 elif bstory['history_action'] == 'distributing' and bstory['dominant_action'] == 'buying':
-                    hist_note += " â† FIRST BUY after distribution (reversal alert)"
+                    hist_note += "  FIRST BUY after distribution (reversal alert)"
             if bstory.get('five_day_verdict'):
                 hist_note += "\n      ðŸ“Š 5D:  " + bstory['five_day_verdict']
             if bstory.get('ten_day_verdict'):
@@ -4679,12 +4679,12 @@ def analyze_broker_trend(symbol=None, days=7, db_path="nepse_market_data.db"):
         score_history = []
         for date_str in dates:
             rows = conn.execute(
-                "SELECT broker_id, broker_name, net_val FROM broker_activity WHERE symbol=? AND date=? ORDER BY net_val DESC",
+                "SELECT broker_id, net_val FROM broker_activity WHERE symbol=? AND date=? AND broker_id GLOB '[0-9]*' ORDER BY net_val DESC",
                 (symbol, date_str)
             ).fetchall()
             if not rows: continue
-            smb = [r for r in rows if r[2] > 0]
-            sms = [r for r in rows if r[2] < 0]
+            smb = [r for r in rows if r[1] > 0]
+            sms = [r for r in rows if r[1] < 0]
             ssn = len(rows); snb = len(smb)
             sbp = snb / ssn * 100 if ssn else 0
             whale_buyers, whale_sellers = _get_dynamic_whales()
@@ -4693,13 +4693,13 @@ def analyze_broker_trend(symbol=None, days=7, db_path="nepse_market_data.db"):
             elif sbp > 50: ss += 10
             else: ss -= 10
             for r2 in rows:
-                if r2[0] in whale_buyers: ss = min(100, ss + 8)
-                elif r2[0] in whale_sellers: ss = max(0, ss - 8)
-            buyer_name = f"Broker {smb[0][0]} {_fmt_rs_val(abs(smb[0][2]))}" if smb else "—"
-            seller_name = f"Broker {sms[0][0]} {_fmt_rs_val(abs(sms[0][2]))}" if sms else "—"
+                if str(r2[0]) in whale_buyers: ss = min(100, ss + 8)
+                elif str(r2[0]) in whale_sellers: ss = max(0, ss - 8)
+            buyer_name = f"Broker {smb[0][0]} {_fmt_rs_val(abs(smb[0][1]))}" if smb else "—"
+            seller_name = f"Broker {sms[0][0]} {_fmt_rs_val(abs(sms[0][1]))}" if sms else "—"
             ssv = "BULL" if ss >= 70 else "BEAR" if ss <= 30 else "MIX"
             ssc = "green" if ss >= 70 else "red" if ss <= 30 else "yellow"
-            net_flow = sum(r[2] for r in rows if r[2] > 0)
+            net_flow = sum(r[1] for r in rows if r[1] > 0)
 
 
             if net_flow > 100000: flow_str = f"[green]IN {_fmt_rs_val(abs(net_flow))}[/green]"
@@ -4713,9 +4713,9 @@ def analyze_broker_trend(symbol=None, days=7, db_path="nepse_market_data.db"):
         if len(score_history) >= 2:
             console.print("[bold]Trend Insights:[/bold]")
             if score_history[-1] > score_history[0]:
-                console.print("  â†— Smart money sentiment improving", style="green")
+                console.print("   [^] Smart money sentiment improving", style="green")
             elif score_history[-1] < score_history[0]:
-                console.print("  â†˜ Smart money sentiment deteriorating", style="red")
+                console.print("   [v] Smart money sentiment deteriorating", style="red")
             else:
                 console.print("  → Sentiment flat over period", style="yellow")
             avg = sum(score_history) / len(score_history)
