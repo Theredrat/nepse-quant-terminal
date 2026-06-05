@@ -2536,9 +2536,14 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
                     elif eps_chg > 0: fund_score += 15
                     else: fund_score -= 10
                 else:
-                    console.print(f'  EPS: Rs {eps_curr:.2f} [dim]({q_label})[/dim]' if eps_curr else f'  EPS: Rs {eps:.2f} [dim](latest)[/dim]' if eps else '  EPS: N/A')
+                    # Only one quarter has EPS - show it with quarter label
+                    q_label = f'FY{quarters[0][0]} Q{quarters[0][1]}'
+                    val = eps_curr if eps_curr else eps
+                    console.print(f'  EPS: Rs {val:.2f} [dim]({q_label} — no prev quarter to compare)[/dim]' if val else '  EPS: N/A')
+                    if val and val > 0: fund_score += 10
             elif eps:
-                console.print(f'  EPS: Rs {eps:.2f} [dim](latest available)[/dim]')
+                q_label = f'FY{quarters[0][0]} Q{quarters[0][1]}' if quarters else 'latest'
+                console.print(f'  EPS: Rs {eps:.2f} [dim]({q_label})[/dim]')
                 if eps > 0: fund_score += 10
 
             # Book Value trend
@@ -2553,7 +2558,8 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
                 console.print(f'  Book Value: [{bv_col}]Rs {bv_curr:.2f} ({bv_arrow}{bv_chg:.1f}% vs {q_prev_label})[/{bv_col}] [dim]({q_label})[/dim]')
                 if bv_chg > 0: fund_score += 15
             elif bv:
-                console.print(f'  Book Value: Rs {bv:.2f} [dim](latest available)[/dim]')
+                q_label = f'FY{quarters[0][0]} Q{quarters[0][1]}' if quarters else 'latest'
+                console.print(f'  Book Value: Rs {bv:.2f} [dim]({q_label})[/dim]')
                 if bv > 0: fund_score += 10
 
             # PE and ROE
