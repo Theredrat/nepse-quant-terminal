@@ -1510,11 +1510,12 @@ def analyze_broker_market(df):
 
 # ── QUICK PICK ───────────────────────────────────────────────────────────────
 
-def analyze_quick_pick(live_df, top_n=10, db_path="nepse_market_data.db"):
+def analyze_quick_pick(live_df, top_n=10, db_path="nepse_market_data.db", offline=False):
     console.print()
     console.print(Rule("[bold green]Quick Stock Pick[/bold green]", style="green"))
     console.print("[dim]Best stocks for 10%+ gain in 7 days to 1 month — signals only[/dim]\n")
 
+    console.print(f"[dim]offline={offline} live_df rows={len(live_df) if live_df is not None else 0}[/dim]")
     if live_df is None or live_df.empty:
         console.print("[red]No live data.[/red]")
         return []
@@ -1585,6 +1586,7 @@ def analyze_quick_pick(live_df, top_n=10, db_path="nepse_market_data.db"):
 
     for _, row in df.iterrows():
         sym    = row.get("symbol", "")
+        if sym in NON_EQUITY_SYMBOLS: continue
         ltp    = row.get("ltp", 0)
         chg    = row.get("change_pct", 0) or 0
         vol    = row.get("volume", 0) or 0
@@ -1683,9 +1685,11 @@ def analyze_quick_pick(live_df, top_n=10, db_path="nepse_market_data.db"):
             elif sec_chg < -1:
                 score -= 5
 
-        # Filter
-        if chg <= 0 or score < 30:
-            continue
+        # Filter - relax in offline mode
+        if offline:
+            if score < 15: continue
+        else:
+            if chg <= 0 or score < 30: continue
 
         # Upside estimate
         if h52 > 0 and ltp > 0:
@@ -1700,6 +1704,7 @@ def analyze_quick_pick(live_df, top_n=10, db_path="nepse_market_data.db"):
             "change":  chg,
             "volume":  vol,
             "upside":  round(upside, 1),
+            "change_pct": chg,
             "reasons": " | ".join(reasons[:4]),
         })
 
@@ -1714,6 +1719,27 @@ def analyze_quick_pick(live_df, top_n=10, db_path="nepse_market_data.db"):
     t.add_column("#",        width=3,  justify="right", style="dim")
     t.add_column("Symbol",   width=10, style="bold white")
     t.add_column("LTP",      width=13, justify="right", no_wrap=True)
+    t.add_column("Chg%",     width=8,  justify="right", no_wrap=True)
+    t.add_column("Score",    width=7,  justify="right")
+    t.add_column("Upside",   width=8,  justify="right")
+    t.add_column("Why",      min_width=30)
+
+    for rank, r in enumerate(scores[:top_n], 1):
+        chg = r.get("change_pct", 0) or 0
+        chg_col = "green" if chg >= 0 else "red"
+        upside = r.get("upside", 0) or 0
+        t.add_row(
+            str(rank),
+            r["symbol"],
+            f'{r["ltp"]:.2f}',
+            f'[{chg_col}]{chg:+.2f}%[/{chg_col}]',
+            str(r["score"]),
+            f'+{upside:.1f}%' if upside > 0 else "-",
+            r.get("reasons", ""),
+        )
+
+    console.print(t)
+    return scores[:top_n]
 
 def analyze_smart_pick(live_df, full_df, top_n=10):
     console.print()
@@ -2570,7 +2596,7 @@ def main():
         console.print()
 
     if args.quickpick:
-        analyze_quick_pick(live_df)
+        analyze_quick_pick(live_df, offline=getattr(args, "offline", False))
         console.print()
 
     if args.smartpick:
