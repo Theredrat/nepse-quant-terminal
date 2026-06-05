@@ -5168,11 +5168,15 @@ def analyze_broker_date(symbol=None, date_str=None, db_path='nepse_market_data.d
     if active_net_sellers:
         lines_out.append(f'[red]- Known market-wide NET SELLERS active here: Broker {", ".join(active_net_sellers)} — CAUTION[/red]')
 
-    # Verdict
-    if ss >= 70:
-        verdict = '[bold green]HOLD / ACCUMULATE — Strong institutional buying. Watch for breakout.[/bold green]'
-    elif ss >= 50:
-        verdict = '[bold yellow]HOLD — Mixed signals. Institutional interest present but sellers active. Wait for clarity.[/bold yellow]'
+    # Verdict - consider buyer count and known net buyers too
+    strong_buyers_active = len(active_net_buyers) >= 3
+    buyer_majority = sbp >= 65
+    if ss >= 70 or (strong_buyers_active and buyer_majority):
+        verdict = '[bold green]STRONG BUY / ACCUMULATE — Multiple institutional buyers active. Watch for breakout.[/bold green]'
+    elif ss >= 50 or (strong_buyers_active and ss >= 35):
+        verdict = '[bold green]HOLD / ACCUMULATE — Known net buyers accumulating. Institutional interest strong.[/bold green]'
+    elif buyer_majority and ss >= 35:
+        verdict = '[bold yellow]HOLD — Broad buying but dominant seller present. Watch if seller exits.[/bold yellow]'
     elif ss >= 35:
         verdict = '[bold yellow]CAUTION — More selling than buying. Consider reducing if in profit.[/bold yellow]'
     else:
