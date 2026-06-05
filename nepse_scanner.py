@@ -2685,7 +2685,7 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
             latest_vol = vols[0] if vols else 0
             vol_ratio = latest_vol / avg_vol if avg_vol > 0 else 1
 
-            # Volume ratio scoring (improved)
+            # Volume ratio scoring
             if vol_ratio >= 3.0: supply_score += 30
             elif vol_ratio >= 2.0: supply_score += 20
             elif vol_ratio >= 1.5: supply_score += 10
@@ -2697,22 +2697,52 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
             console.print(f'  Avg Volume (10d): [white]{avg_vol:,.0f}[/white]')
             console.print(f'  Volume Ratio: [{vol_col}]{vol_ratio:.1f}x avg[/{vol_col}] {"(HIGH demand)" if vol_ratio >= 1.5 else "(normal)" if vol_ratio >= 0.8 else "(LOW demand)"}')
 
-            # Float turnover using REAL tradeable float
-            base_shares = tradeable_float if tradeable_float else shares_out
+            # Use correct base for float calculation
+            # If locked: use public_shares only
+            # If unlocked: use total shares (all tradeable)
+            base_shares = tradeable_float if (still_locked and tradeable_float) else shares_out
+
             if base_shares and avg_vol > 0:
                 float_pct = (avg_vol / base_shares) * 100
-                # Improved float scoring
-                if float_pct < 0.3: supply_score += 25
-                elif float_pct < 1.0: supply_score += 15
-                elif float_pct < 2.0: supply_score += 5
-                elif float_pct < 3.0: supply_score += 0
+
+                # Float turnover scoring
+                if float_pct < 0.5: supply_score += 25
+                elif float_pct < 1.5: supply_score += 15
+                elif float_pct < 3.0: supply_score += 5
                 elif float_pct < 5.0: supply_score -= 10
                 else: supply_score -= 20
 
-                float_label = 'extremely tight' if float_pct < 0.3 else 'tight' if float_pct < 1 else 'normal' if float_pct < 3 else 'heavy supply'
-                float_col = 'green' if float_pct < 1 else 'yellow' if float_pct < 3 else 'red'
-                float_base = 'real float' if still_locked else 'total shares'
-                console.print(f'  Daily Float Turnover: [{float_col}]{float_pct:.2f}% of {float_base}[/{float_col}] ({float_label})')
+                float_label = 'ILLIQUID' if float_pct < 0.5 else 'LOW LIQUID' if float_pct < 1.5 else 'LIQUID' if float_pct < 3 else 'HIGH LIQUID' if float_pct < 5 else 'HYPER LIQUID'
+                float_col = 'green' if float_pct < 1.5 else 'yellow' if float_pct < 3 else 'cyan' if float_pct < 5 else 'blue'
+                float_base = 'public float' if still_locked else 'total shares'
+                console.print(f'  Float Turnover: [{float_col}]{float_pct:.2f}% of {float_base}[/{float_col}] — {float_label}')
+
+            # Float Market Cap
+            cur_price = conn.execute(
+                'SELECT close_price FROM market_quotes WHERE symbol=? ORDER BY fetched_at_utc DESC LIMIT 1',
+                (symbol,)
+            ).fetchone()
+            if cur_price and cur_price[0] and base_shares:
+                float_mcap = base_shares * cur_price[0]
+                float_mcap_m = float_mcap / 1_000_000
+                if float_mcap < 200_000_000:
+                    cap_label = 'MICRO CAP'
+                    cap_col = 'red'
+                elif float_mcap < 1_000_000_000:
+                    cap_label = 'SMALL CAP'
+                    cap_col = 'yellow'
+                elif float_mcap < 5_000_000_000:
+                    cap_label = 'MID CAP'
+                    cap_col = 'cyan'
+                elif float_mcap < 15_000_000_000:
+                    cap_label = 'LARGE CAP'
+                    cap_col = 'green'
+                else:
+                    cap_label = 'MEGA CAP'
+                    cap_col = 'bold green'
+
+                cap_note = '(locked float only)' if still_locked else '(full float)'
+                console.print(f'  Float Market Cap: [{cap_col}]Rs {float_mcap_m:,.0f}M — {cap_label}[/{cap_col}] [dim]{cap_note}[/dim]')
 
         supply_score = max(0, min(100, supply_score))
         s_verdict = 'TIGHT' if supply_score >= 65 else 'NORMAL' if supply_score >= 40 else 'HEAVY'
