@@ -4721,6 +4721,7 @@ def analyze_broker_trend(symbol=None, days=7, db_path="nepse_market_data.db"):
             avg = sum(score_history) / len(score_history)
             console.print(f"  Avg score over {len(score_history)} days: {avg:.0f}/100")
         conn.close()
+        conn.close()
         console.print()
     except Exception as e:
         console.print(f"  Error: {e}", style="red")
@@ -4757,7 +4758,6 @@ def analyze_broker_impact(days=30, top_n=20, db_path="nepse_market_data.db"):
             GROUP BY broker_id
             ORDER BY (total_bought + total_sold) DESC
         """.format(",".join(["?"]*len(dates))), dates).fetchall()
-        conn.close()
         if not rows:
             console.print("  No broker data found.", style="yellow"); return
         # Score each broker: avg_trade_size * stocks_traded * appearances
@@ -4766,7 +4766,7 @@ def analyze_broker_impact(days=30, top_n=20, db_path="nepse_market_data.db"):
             bid, stocks, apps, bdays, sdays, tbought, tsold, avg_size = r
             impact = (avg_size / 1000000) * (stocks ** 0.5) * (apps ** 0.3)
             net = tbought - tsold
-            bias = "BUYER" if tbought > tsold * 1.2 else "SELLER" if tsold > tbought * 1.2 else "NEUTRAL"
+            bias = "BUYER" if tbought > tsold else "SELLER" if tsold > tbought else "NEUTRAL"
             scored.append((bid, stocks, apps, bdays, sdays, tbought, tsold, avg_size, impact, bias, net))
         scored.sort(key=lambda x: x[9], reverse=True)
         scored = scored[:top_n]
@@ -4792,15 +4792,30 @@ def analyze_broker_impact(days=30, top_n=20, db_path="nepse_market_data.db"):
             )
         console.print(t)
         console.print()
-        console.print("[bold]Top 5 Institutional Buyers:[/bold]")
-        buyers = sorted([r for r in scored if r[9] == 'BUYER'], key=lambda x: x[5], reverse=True)[:5]
-        for r in buyers:
-            console.print(f"  [green]Broker {r[0]} - avg {_fmt_rs_val(r[7])} per trade, {r[1]} stocks, bias: {r[9]}[/green]")
+        # Query ALL brokers for net buyers/sellers (not just top 20 by volume)
+        all_rows = conn.execute("""
+            SELECT broker_id,
+                COUNT(DISTINCT symbol) as stocks,
+                COUNT(*) as apps,
+                SUM(CASE WHEN net_val>0 THEN net_val ELSE 0 END) as tbought,
+                SUM(CASE WHEN net_val<0 THEN ABS(net_val) ELSE 0 END) as tsold
+            FROM broker_activity
+            WHERE date IN ({})
+            AND broker_id GLOB '[0-9]*'
+            GROUP BY broker_id
+        """.format(",".join(["?"]*len(dates))), dates).fetchall()
+        all_buyers = sorted([r for r in all_rows if r[3] > r[4]], key=lambda x: x[3]-x[4], reverse=True)[:5]
+        all_sellers = sorted([r for r in all_rows if r[4] > r[3]], key=lambda x: x[4]-x[3], reverse=True)[:5]
+        console.print("[bold]Top 5 Net Buyers:[/bold]")
+        for r in all_buyers:
+            net = r[3] - r[4]
+            console.print(f"  [green]Broker {r[0]} - net bought {_fmt_rs_val(net)} across {r[1]} stocks ({r[2]} trades)[/green]")
         console.print()
-        console.print("[bold]Top 5 Institutional Sellers:[/bold]")
-        sellers = sorted([r for r in scored if r[9] == 'SELLER'], key=lambda x: x[6], reverse=True)[:5]
-        for r in sellers:
-            console.print(f"  [red]Broker {r[0]} - avg {_fmt_rs_val(r[7])} per trade, {r[1]} stocks, bias: {r[9]}[/red]")
+        console.print("[bold]Top 5 Net Sellers:[/bold]")
+        for r in all_sellers:
+            net = r[4] - r[3]
+            console.print(f"  [red]Broker {r[0]} - net sold {_fmt_rs_val(net)} across {r[1]} stocks ({r[2]} trades)[/red]")
+        conn.close()
         console.print()
     except Exception as e:
         console.print(f"  Error: {e}", style="red")
@@ -5037,20 +5052,25 @@ def analyze_broker_date(symbol=None, date_str=None, db_path='nepse_market_data.d
     # Smart Money Analysis
     console.print()
     console.rule('[bold cyan]Smart Money Analysis[/bold cyan]')
-    # Detect top brokers for THIS specific stock from DB history
+    # Detect market-wide net buyers and sellers from DB
     try:
         import sqlite3 as _sq2
         _conn2 = _sq2.connect(db_path)
-        _top = _conn2.execute('''
-            SELECT broker_id, SUM(buy_val) as tb, SUM(sell_val) as ts
-            FROM broker_activity WHERE symbol=?
-            AND broker_id GLOB '[0-9]*'
+        _all = _conn2.execute('''
+            SELECT broker_id,
+                SUM(CASE WHEN net_val>0 THEN net_val ELSE 0 END) as tb,
+                SUM(CASE WHEN net_val<0 THEN ABS(net_val) ELSE 0 END) as ts
+            FROM broker_activity
+            WHERE broker_id GLOB '[0-9]*'
             GROUP BY broker_id
-            ORDER BY (tb + ts) DESC LIMIT 10
-        ''', (sym,)).fetchall()
+        ''').fetchall()
         _conn2.close()
-        lw = {str(r[0]): f'Broker {r[0]}' for r in _top}
+        _net_buyers = set(str(r[0]) for r in sorted(_all, key=lambda x: x[1]-x[2], reverse=True)[:8] if r[1] > r[2])
+        _net_sellers = set(str(r[0]) for r in sorted(_all, key=lambda x: x[2]-x[1], reverse=True)[:8] if r[2] > r[1])
+        lw = {b: 'NET BUYER' for b in _net_buyers}
+        lw.update({s: 'NET SELLER' for s in _net_sellers})
     except Exception:
+        _net_buyers, _net_sellers = set(), set()
         lw = {}
     smb = [r for r in rows if r[6] > 0]
     sms = [r for r in rows if r[6] < 0]
@@ -5123,17 +5143,15 @@ def analyze_broker_date(symbol=None, date_str=None, db_path='nepse_market_data.d
     if smtb:
         bv = _fmt_rs_val(smtb[6])
         bid_b = str(smtb[0])
-        lw_name = lw.get(bid_b, '')
-        label = f'Broker {bid_b} ({lw_name})' if lw_name else f'Broker {bid_b}'
-        lines_out.append(f'[green]+ {label} is the top buyer at {bv}[/green]')
+        tag = ' [NET BUYER market-wide]' if bid_b in _net_buyers else ''
+        lines_out.append(f'[green]+ Broker {bid_b}{tag} is the top buyer at {bv}[/green]')
 
     # Dominant seller
     if smts:
         sv = _fmt_rs_val(abs(smts[6]))
         bid_s = str(smts[0])
-        lw_name_s = lw.get(bid_s, '')
-        label_s = f'Broker {bid_s} ({lw_name_s})' if lw_name_s else f'Broker {bid_s}'
-        lines_out.append(f'[red]- {label_s} is the dominant seller at {sv}[/red]')
+        tag_s = ' [NET SELLER market-wide]' if bid_s in _net_sellers else ''
+        lines_out.append(f'[red]- Broker {bid_s}{tag_s} is the dominant seller at {sv}[/red]')
 
     # Buyer vs seller count
     if sbp > 60:
@@ -5143,13 +5161,13 @@ def analyze_broker_date(symbol=None, date_str=None, db_path='nepse_market_data.d
     else:
         lines_out.append(f'[yellow]~ Buyers ({snb}) and sellers ({sns}) roughly balanced — tug of war[/yellow]')
 
-    # Whale tracked brokers summary
-    whale_buying = [bid for bid in lw if any(str(r[0])==bid and r[6]>0 for r in rows)]
-    whale_selling = [bid for bid in lw if any(str(r[0])==bid and r[6]<0 for r in rows)]
-    if whale_buying:
-        lines_out.append(f'[green]+ Tracked institutional buyers: Broker {", ".join(whale_buying)}[/green]')
-    if whale_selling:
-        lines_out.append(f'[red]- Tracked institutional sellers: Broker {", ".join(whale_selling)}[/red]')
+    # Known net buyers active in this stock today
+    active_net_buyers = [str(r[0]) for r in rows if str(r[0]) in _net_buyers and r[6] > 0]
+    active_net_sellers = [str(r[0]) for r in rows if str(r[0]) in _net_sellers and r[6] < 0]
+    if active_net_buyers:
+        lines_out.append(f'[green]+ Known market-wide NET BUYERS active here: Broker {", ".join(active_net_buyers)} — STRONG signal[/green]')
+    if active_net_sellers:
+        lines_out.append(f'[red]- Known market-wide NET SELLERS active here: Broker {", ".join(active_net_sellers)} — CAUTION[/red]')
 
     # Verdict
     if ss >= 70:
