@@ -1888,6 +1888,7 @@ def parse_args():
     p.add_argument('--quickpick',   action='store_true', help='Quick stock pick — signals only')
     p.add_argument('--smartpick',   action='store_true', help='Smart stock pick — signals + broker + whale')
     p.add_argument('--report',      action='store_true')
+    p.add_argument('--offline',     action='store_true', help='Use DB data instead of live API')
     p.add_argument('--movers-only', action='store_true')
     p.add_argument('--legend',      action='store_true')
     p.add_argument('--portfolio',   nargs='*', metavar='SYMBOL', help='Position sizing + correlation for a set of stocks')
@@ -2451,7 +2452,27 @@ def main():
     need_floor = any([args.floor, args.brokers, args.powersell, args.sector, args.whale, args.sr, args.broker, args.smartpick])
 
     live_df = None
-    if need_live:
+    if getattr(args, "offline", False):
+        try:
+            import sqlite3 as _sq, pandas as _pd
+            _conn = _sq.connect("nepse_market_data.db")
+            _lat = _conn.execute("SELECT MAX(date) FROM stock_prices").fetchone()[0]
+            _rows = _conn.execute("""
+                SELECT t.symbol, t.close as ltp, t.open, t.high, t.low, t.volume,
+                       ((t.close - y.close) / y.close) * 100 as change_pct,
+                       t.close * t.volume as turnover
+                FROM stock_prices t
+                JOIN stock_prices y ON t.symbol = y.symbol
+                WHERE t.date = ? AND y.date = (
+                    SELECT MAX(date) FROM stock_prices WHERE date < ?)
+            """, (_lat, _lat)).fetchall()
+            _conn.close()
+            if _rows:
+                live_df = _pd.DataFrame(_rows, columns=["symbol","ltp","open","high","low","volume","change_pct","turnover"])
+                console.print(f"[dim yellow]OFFLINE MODE - {len(live_df)} securities from DB ({_lat})[/dim yellow]\n")
+        except Exception as _oe:
+            console.print(f"[red]DB load failed: {_oe}[/red]")
+    elif need_live:
         with console.status("[cyan]Fetching live market data...[/cyan]"):
             live_df = get_live_market(n)
         if live_df is not None:
