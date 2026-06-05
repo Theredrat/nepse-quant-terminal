@@ -159,8 +159,15 @@ NON_EQUITY_SYMBOLS = {
 
 def get_sector(symbol):
     """Return sector for a symbol, or None if non-equity."""
+    import re as _re
     sym = symbol.upper()
     if sym in NON_EQUITY_SYMBOLS:
+        return None
+    # Debenture/bond pattern: ends in 2-digit year (e.g. LBLD88, SBD87, NCCD86)
+    if _re.search(r'(LD|BD|CD|BLD|CBD|NBD|NILD|BILD)\d{2}$', sym):
+        return None
+    # Mutual fund pattern
+    if _re.search(r'(MF|SF|GF)\d+$', sym):
         return None
     for sector, symbols in SECTOR_MAP.items():
         if sym in symbols:
@@ -1587,6 +1594,10 @@ def analyze_quick_pick(live_df, top_n=10, db_path="nepse_market_data.db", offlin
     for _, row in df.iterrows():
         sym    = row.get("symbol", "")
         if sym in NON_EQUITY_SYMBOLS: continue
+        # Skip debentures/bonds by pattern
+        import re as _re
+        if _re.search(r'(LD|BD|CD|BLD|CBD|NBD|NILD|BILD)\d{2}$', sym): continue
+        if _re.search(r'(MF|SF|GF)\d+$', sym): continue
         ltp    = row.get("ltp", 0)
         chg    = row.get("change_pct", 0) or 0
         vol    = row.get("volume", 0) or 0
