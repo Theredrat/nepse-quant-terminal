@@ -2511,36 +2511,45 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
 
         quarters = conn.execute(
             'SELECT fiscal_year, quarter, eps, book_value, net_profit FROM quarterly_earnings '
-            'WHERE symbol=? AND eps IS NOT NULL ORDER BY fiscal_year DESC, quarter DESC LIMIT 4',
+            'WHERE symbol=? ORDER BY fiscal_year DESC, quarter DESC LIMIT 4',
             (symbol,)
         ).fetchall()
 
         if f:
-            eps, bv, pe, pb, roe, mcap, sector, shares = f
+            eps, bv, pe, pb, roe, mcap, sector, shares_outstanding = f
             console.print(f'  Sector: [cyan]{sector}[/cyan]')
             console.print(f'  Market Cap: [white]{_fmt_rs_val(mcap) if mcap else "N/A"}[/white]')
             console.print()
 
+            # Helper: estimate EPS from net_profit if eps column is null
+            def _calc_eps(net_profit, shares):
+                if net_profit and shares and shares > 0:
+                    return net_profit / shares
+                return None
+
             # EPS trend
             if len(quarters) >= 2:
-                eps_curr = quarters[0][2]
-                eps_prev = quarters[1][2]
                 q_label = f'FY{quarters[0][0]} Q{quarters[0][1]}'
                 q_prev_label = f'FY{quarters[1][0]} Q{quarters[1][1]}'
+                eps_curr = quarters[0][2] or _calc_eps(quarters[0][4], shares_outstanding)
+                eps_prev = quarters[1][2] or _calc_eps(quarters[1][4], shares_outstanding)
+                eps_src = '' if quarters[0][2] else ' [dim](est. from net profit)[/dim]'
                 if eps_curr and eps_prev:
                     eps_chg = ((eps_curr - eps_prev) / abs(eps_prev)) * 100
                     eps_col = 'green' if eps_chg > 0 else 'red'
                     eps_arrow = '+' if eps_chg > 0 else ''
-                    console.print(f'  EPS: [{eps_col}]Rs {eps_curr:.2f} ({eps_arrow}{eps_chg:.1f}% vs {q_prev_label})[/{eps_col}] [dim]({q_label})[/dim]')
+                    if abs(eps_chg) > 500:
+                        console.print(f'  EPS: [{eps_col}]Rs {eps_curr:.2f} vs Rs {eps_prev:.2f} prev quarter (large swing)[/{eps_col}] [dim]({q_label})[/dim]{eps_src}')
+                    else:
+                        console.print(f'  EPS: [{eps_col}]Rs {eps_curr:.2f} ({eps_arrow}{eps_chg:.1f}% vs {q_prev_label})[/{eps_col}] [dim]({q_label})[/dim]{eps_src}')
                     if eps_chg > 10: fund_score += 25
                     elif eps_chg > 0: fund_score += 15
                     else: fund_score -= 10
+                elif eps_curr:
+                    console.print(f'  EPS: Rs {eps_curr:.2f} [dim]({q_label} — prev quarter no data)[/dim]{eps_src}')
+                    if eps_curr > 0: fund_score += 10
                 else:
-                    # Only one quarter has EPS - show it with quarter label
-                    q_label = f'FY{quarters[0][0]} Q{quarters[0][1]}'
-                    val = eps_curr if eps_curr else eps
-                    console.print(f'  EPS: Rs {val:.2f} [dim]({q_label} — no prev quarter to compare)[/dim]' if val else '  EPS: N/A')
-                    if val and val > 0: fund_score += 10
+                    console.print('  EPS: N/A')
             elif eps:
                 q_label = f'FY{quarters[0][0]} Q{quarters[0][1]}' if quarters else 'latest'
                 console.print(f'  EPS: Rs {eps:.2f} [dim]({q_label})[/dim]')
@@ -2559,7 +2568,20 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
                 if bv_chg > 0: fund_score += 15
             elif bv:
                 q_label = f'FY{quarters[0][0]} Q{quarters[0][1]}' if quarters else 'latest'
-                console.print(f'  Book Value: Rs {bv:.2f} [dim]({q_label})[/dim]')
+                if len(quarters) >= 2 and quarters[0][4] and quarters[1][4]:
+                    np_chg = ((quarters[0][4] - quarters[1][4]) / abs(quarters[1][4])) * 100
+                    np_col = 'green' if np_chg > 0 else 'red'
+                    np_arrow = '+' if np_chg > 0 else ''
+                    np_disp = min(np_chg, 999.9) if np_chg > 0 else max(np_chg, -999.9)
+                    q_prev_label = f'FY{quarters[1][0]} Q{quarters[1][1]}'
+                    if abs(np_chg) > 500:
+                        np_curr_m = quarters[0][4]/1000000
+                        np_prev_m = quarters[1][4]/1000000
+                        console.print(f'  Book Value: Rs {bv:.2f} [dim]({q_label})[/dim]  Net Profit: [{np_col}]Rs {np_curr_m:.1f}M vs Rs {np_prev_m:.1f}M prev (large swing)[/{np_col}]')
+                    else:
+                        console.print(f'  Book Value: Rs {bv:.2f} [dim]({q_label})[/dim]  Net Profit: [{np_col}]{np_arrow}{np_disp:.1f}% vs {q_prev_label}[/{np_col}]')
+                else:
+                    console.print(f'  Book Value: Rs {bv:.2f} [dim]({q_label})[/dim]')
                 if bv > 0: fund_score += 10
 
             # PE and ROE
