@@ -2621,20 +2621,14 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
     supply_score = 50
     try:
         f2 = conn.execute(
-            'SELECT shares_outstanding, sector FROM fundamentals WHERE symbol=? ORDER BY date DESC LIMIT 1',
+            'SELECT shares_outstanding, sector, promoter_pct, public_shares, promoter_shares FROM fundamentals WHERE symbol=? ORDER BY date DESC LIMIT 1',
             (symbol,)
         ).fetchone()
         shares_out = f2[0] if f2 and f2[0] else None
         sector_name = f2[1] if f2 and f2[1] else ''
-
-        # Promoter % by sector (SEBON rules)
-        sector_lower = sector_name.lower()
-        if any(x in sector_lower for x in ['hydro', 'hotel', 'manufacturing', 'investment', 'others']):
-            promoter_pct = 0.51
-        elif any(x in sector_lower for x in ['bank', 'finance', 'microfinance', 'insurance', 'development']):
-            promoter_pct = 0.40
-        else:
-            promoter_pct = 0.51
+        promoter_pct = (f2[2] / 100) if f2 and f2[2] else 0.51
+        real_public_shares = f2[3] if f2 and f2[3] else None
+        real_promoter_shares = f2[4] if f2 and f2[4] else None
 
         # Check if still locked from unlock_dates
         unlock_row = conn.execute(
@@ -2660,8 +2654,8 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
         # Calculate real tradeable float
         if shares_out:
             if still_locked:
-                locked_shares = shares_out * promoter_pct
-                tradeable_float = shares_out - locked_shares
+                locked_shares = real_promoter_shares if real_promoter_shares else shares_out * promoter_pct
+                tradeable_float = real_public_shares if real_public_shares else shares_out - locked_shares
                 lock_col = 'yellow'
             else:
                 locked_shares = 0
@@ -2670,11 +2664,11 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
 
             console.print(f'  Total Listed Shares: [white]{shares_out:,.0f}[/white]')
             if still_locked:
-                console.print(f'  Promoter Locked: [{lock_col}]{locked_shares:,.0f} (~{promoter_pct*100:.0f}%) — {unlock_info}[/{lock_col}]')
-                console.print(f'  Real Tradeable Float: [cyan]{tradeable_float:,.0f} shares[/cyan]')
+                console.print(f'  Promoter Locked: [{lock_col}]{locked_shares:,.0f} ({promoter_pct*100:.1f}%) — {unlock_info}[/{lock_col}]')
+                console.print(f'  Real Tradeable Float: [cyan]{tradeable_float:,.0f} shares ({100-promoter_pct*100:.1f}% public)[/cyan]')
             else:
                 console.print(f'  Lock-in Status: [green]UNLOCKED ({unlock_info})[/green]')
-                console.print(f'  Real Tradeable Float: [green]{tradeable_float:,.0f} shares (all tradeable)[/green]')
+                console.print(f'  Real Tradeable Float: [green]{shares_out:,.0f} shares (all tradeable)[/green]')
         else:
             tradeable_float = None
 
