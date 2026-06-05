@@ -590,7 +590,7 @@ def _momentum_label(r5, r10, r20):
     elif avg > 0.5:
         return "Heating up      â†‘",  "green"
     elif avg > -0.5:
-        return "Neutral         â†’",  "dim white"
+        return "Neutral         →",  "dim white"
     elif avg > -2.0:
         return "Cooling down    â†“",  "red"
     else:
@@ -712,7 +712,7 @@ def analyze_sector_heatmap(db_path="nepse_market_data.db"):
         valid = [r for r in (r5, r10, r20) if r is not None]
         avg   = sum(valid) / len(valid) if valid else 0
         filled = int(min(max(round((avg + 5) / 10 * 12), 0), 12))
-        bar    = "â–ˆ" * filled + "â–‘" * (12 - filled)
+        bar    = "█" * filled + "░" * (12 - filled)
         bar_style = "bold green" if avg > 1 else "bold red" if avg < -1 else "dim"
 
         t.add_row(
@@ -1019,7 +1019,7 @@ def analyze_support_resistance(full_df, symbol):
     for bucket, qty in vol_by_price.head(8).items():
         pct     = qty / total_qty * 100 if total_qty > 0 else 0
         bar_len = int(pct / 100 * 18)
-        bar     = "â–ˆ" * bar_len + "â–‘" * (18 - bar_len)
+        bar     = "█" * bar_len + "░" * (18 - bar_len)
         b_mid   = (bucket.left + bucket.right) / 2
         level   = "[green]SUPPORT[/green]" if b_mid < mid_price else "[red]RESISTANCE[/red]"
         strength_color = "red" if pct >= 20 else "yellow" if pct >= 10 else "dim"
@@ -2006,7 +2006,7 @@ def analyze_portfolio(symbols):
     corr = df_ret.corr(min_periods=10) if len(df_ret.columns) > 1 else None
     corr_symbols = list(df_ret.columns)
 
-    # Average pairwise correlation â†’ diversification score
+    # Average pairwise correlation → diversification score
     if corr is not None and len(corr_symbols) > 1:
         pairs = []
         for i, a in enumerate(corr_symbols):
@@ -2031,7 +2031,7 @@ def analyze_portfolio(symbols):
     t1.add_column("20D Ret%", justify="right")
     t1.add_column("Sharpe",   justify="right")
     t1.add_column("Weight%",  justify="right", style="bold cyan")
-    t1.add_column("Rs 1L â†’",  justify="right", style="bold green")
+    t1.add_column("Rs 1L →",  justify="right", style="bold green")
 
     for sym in sorted(symbols, key=lambda s: -weights[s]):
         s = stats[sym]
@@ -2209,9 +2209,9 @@ def analyze_corr():
     )
     console.print()
     console.print("  [bold white]Portfolio Diversification Guide:[/bold white]")
-    console.print("  [red]ðŸ”´ Red  > 0.85[/red]  — Move together always    â†’ Avoid holding both, no diversification")
-    console.print("  [yellow]ðŸŸ¡ Yellow 0.60-0.85[/yellow] — Move together usually  â†’ Partial diversification, acceptable")
-    console.print("  [green]ðŸŸ¢ Green < 0.60[/green]  — Move independently    â†’ Best diversification, hold both")
+    console.print("  [red]ðŸ”´ Red  > 0.85[/red]  — Move together always    → Avoid holding both, no diversification")
+    console.print("  [yellow]ðŸŸ¡ Yellow 0.60-0.85[/yellow] — Move together usually  → Partial diversification, acceptable")
+    console.print("  [green]ðŸŸ¢ Green < 0.60[/green]  — Move independently    → Best diversification, hold both")
     console.print()
     # Build recommendations from correlation data
     console.print("  [bold white]Sector Pair Recommendations:[/bold white]")
@@ -3156,7 +3156,7 @@ def analyze_week52(db_path="nepse_market_data.db"):
         afh = row["avg_from_high"]
         color = "green" if afh >= -10 else "yellow" if afh >= -25 else "red"
         bar_n = max(0, min(12, int((afh + 50) / 50 * 12)))
-        bar = "â–ˆ" * bar_n + "â–‘" * (12 - bar_n)
+        bar = "█" * bar_n + "░" * (12 - bar_n)
         stbl.add_row(
             str(row["sector"]),
             f"[green]{int(row['near_high'])}/{int(row['total'])}[/]",
@@ -4319,12 +4319,12 @@ def analyze_why(live_df, full_fs, rs_data=None, db_path="nepse_market_data.db"):
         c = colors.get(tag, 'white')
         l = labels.get(tag, '')
 
-        console.print(f"  [bold {c}]ðŸ“Œ {symbol}[/bold {c}] [{c}]— {l}[/{c}]")
-        console.print(f"    [cyan]â€¢[/cyan] {b1}")
-        console.print(f"    [cyan]â€¢[/cyan] {b2}")
-        console.print(f"    [cyan]â€¢[/cyan] {b3}")
-        console.print(f"    [cyan]â€¢[/cyan] {b4}")
-        console.print(f"    [bold white]â†’ Verdict:[/bold white] {verdict}")
+        console.print(f"  [bold {c}]📌 {symbol}[/bold {c}] [{c}]— {l}[/{c}]")
+        console.print(f"    [cyan]•[/cyan] {b1}")
+        console.print(f"    [cyan]•[/cyan] {b2}")
+        console.print(f"    [cyan]•[/cyan] {b3}")
+        console.print(f"    [cyan]•[/cyan] {b4}")
+        console.print(f"    [bold white]→ Verdict:[/bold white] {verdict}")
         # Top 4 broker holders from history
         holders = get_top_broker_holders(symbol, db_path, top_n=4)
         if holders:
@@ -4566,7 +4566,7 @@ def analyze_broker_holders(symbol=None, db_path='nepse_market_data.db'):
             else:
                 msg = f"Broker {bid} ({name}) — net {'+' if net>=0 else ''}{amt} over {days} days"
             col = 'green' if net >= 0 else 'red'
-            console.print(f"  [{col}]â€¢ {msg}[/{col}]")
+            console.print(f"  [{col}]• {msg}[/{col}]")
     console.print()
 
 
@@ -4657,7 +4657,7 @@ def analyze_broker_trend(symbol=None, days=7, db_path="nepse_market_data.db"):
             elif score_history[-1] < score_history[0]:
                 console.print("  â†˜ Smart money sentiment deteriorating", style="red")
             else:
-                console.print("  â†’ Sentiment flat over period", style="yellow")
+                console.print("  → Sentiment flat over period", style="yellow")
             avg = sum(score_history) / len(score_history)
             console.print(f"  Avg score over {len(score_history)} days: {avg:.0f}/100")
         conn.close()
