@@ -4559,7 +4559,6 @@ def analyze_broker_holders(symbol=None, db_path='nepse_market_data.db'):
     t = Table(show_header=True, header_style='bold cyan', box=None, padding=(0, 2))
     t.add_column('#', style='dim', width=4)
     t.add_column('Broker ID', width=10)
-    t.add_column('Broker Name', width=32)
     t.add_column('Net Position', width=14, justify='right')
     t.add_column('Net Shares', width=12, justify='right')
     t.add_column('Avg Buy', width=10, justify='right')
@@ -4583,7 +4582,6 @@ def analyze_broker_holders(symbol=None, db_path='nepse_market_data.db'):
         t.add_row(
             str(i),
             h['broker_id'],
-            h['broker_name'],
             f'[{net_style}]{net_str}[/{net_style}]',
             f'[{nq_style}]{nq_str}[/{nq_style}]',
             avg_b,
@@ -4596,7 +4594,7 @@ def analyze_broker_holders(symbol=None, db_path='nepse_market_data.db'):
     console.print()
     if holders:
         top = holders[0]
-        console.print(f"  Top holder: Broker {top['broker_id']} ({top['broker_name']}) — net {'+' if top['total_net']>=0 else ''}{round(top['total_net']/1e6,1)}M over {top['days_active']} days", style='bold')
+        console.print(f"  Top holder: Broker {top['broker_id']} — net {'+' if top['total_net']>=0 else ''}{round(top['total_net']/1e6,1)}M over {top['days_active']} days", style='bold')
         console.print()
         # Smart summary for top 3 holders
         console.print("  [bold cyan]── Smart Summary ──[/bold cyan]")
@@ -4606,26 +4604,25 @@ def analyze_broker_holders(symbol=None, db_path='nepse_market_data.db'):
             avg_b = h.get('avg_buy_price', 0)
             avg_s = h.get('avg_sell_price', 0)
             days = h['days_active']
-            name = h['broker_name']
             bid = h['broker_id']
             amt = ('Rs ' + str(round(abs(net)/1e6, 1)) + 'M') if abs(net) >= 1e6 else ('Rs ' + str(round(abs(net)/1e3)) + 'K')
             qty_str = f'{abs(net_qty):,}'
             if net > 0 and avg_b > 0 and avg_s > 0:
                 if avg_b > avg_s:
-                    msg = f"Broker {bid} ({name}) bought avg Rs {avg_b:,.1f} and sold avg Rs {avg_s:,.1f} — buying HIGHER than selling, net accumulating {qty_str} shares worth {amt}"
+                    msg = f"Broker {bid} bought avg Rs {avg_b:,.1f} and sold avg Rs {avg_s:,.1f} — buying HIGHER than selling, net accumulating {qty_str} shares worth {amt}"
                 else:
-                    msg = f"Broker {bid} ({name}) bought avg Rs {avg_b:,.1f} and sold avg Rs {avg_s:,.1f} — selling HIGHER than buying, collecting profit while accumulating {qty_str} net shares ({amt})"
+                    msg = f"Broker {bid} bought avg Rs {avg_b:,.1f} and sold avg Rs {avg_s:,.1f} — selling HIGHER than buying, collecting profit while accumulating {qty_str} net shares ({amt})"
             elif net > 0 and avg_b > 0 and avg_s == 0:
-                msg = f"Broker {bid} ({name}) only BUYING — no sells, accumulating {qty_str} shares at avg Rs {avg_b:,.1f} ({amt} invested)"
+                msg = f"Broker {bid} only BUYING — no sells, accumulating {qty_str} shares at avg Rs {avg_b:,.1f} ({amt} invested)"
             elif net < 0 and avg_b > 0 and avg_s > 0:
                 if avg_s > avg_b:
-                    msg = f"Broker {bid} ({name}) bought avg Rs {avg_b:,.1f} and sold avg Rs {avg_s:,.1f} — selling HIGHER than buying, distributing {qty_str} shares at profit"
+                    msg = f"Broker {bid} bought avg Rs {avg_b:,.1f} and sold avg Rs {avg_s:,.1f} — selling HIGHER than buying, distributing {qty_str} shares at profit"
                 else:
-                    msg = f"Broker {bid} ({name}) bought avg Rs {avg_b:,.1f} and sold avg Rs {avg_s:,.1f} — selling LOWER than buying, exiting position at loss ({amt} distributed)"
+                    msg = f"Broker {bid} bought avg Rs {avg_b:,.1f} and sold avg Rs {avg_s:,.1f} — selling LOWER than buying, exiting position at loss ({amt} distributed)"
             elif net < 0 and avg_s > 0 and avg_b == 0:
-                msg = f"Broker {bid} ({name}) only SELLING — no buys, distributing {qty_str} shares at avg Rs {avg_s:,.1f} ({amt} out)"
+                msg = f"Broker {bid} only SELLING — no buys, distributing {qty_str} shares at avg Rs {avg_s:,.1f} ({amt} out)"
             else:
-                msg = f"Broker {bid} ({name}) — net {'+' if net>=0 else ''}{amt} over {days} days"
+                msg = f"Broker {bid} — net {'+' if net>=0 else ''}{amt} over {days} days"
             col = 'green' if net >= 0 else 'red'
             console.print(f"  [{col}]• {msg}[/{col}]")
     console.print()
