@@ -2781,14 +2781,12 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
 
         consec = 0
         for d in all_dates:
-            row = conn.execute(
-                'SELECT SUM(CASE WHEN net_val>0 THEN net_val ELSE 0 END), SUM(CASE WHEN net_val<0 THEN ABS(net_val) ELSE 0 END) '
+            counts = conn.execute(
+                'SELECT COUNT(CASE WHEN net_val>0 THEN 1 END), COUNT(CASE WHEN net_val<0 THEN 1 END) '
                 'FROM broker_activity WHERE symbol=? AND date=? AND broker_id GLOB "[0-9]*"',
                 (symbol, d)
             ).fetchone()
-            tb = row[0] or 0
-            ts = row[1] or 0
-            if tb > ts:
+            if (counts[0] or 0) > (counts[1] or 0):
                 consec += 1
             else:
                 break
@@ -2850,11 +2848,14 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
     console.print()
 
     final_pct = (total_score / max_score * 100) if max_score > 0 else 0
-    if final_pct >= 70:
-        final_verdict = '[bold green]STRONG BUY — All signals aligned. Good entry opportunity.[/bold green]'
-    elif final_pct >= 57:
-        final_verdict = '[bold green]BUY / ACCUMULATE — Most signals positive. Consider entering.[/bold green]'
-    elif final_pct >= 45:
+    broker_s = next((s for n,s,v,c in section_verdicts if n == 'Broker Activity'), 50)
+    tech_s = next((s for n,s,v,c in section_verdicts if n == 'Technical'), 50)
+    fund_s = next((s for n,s,v,c in section_verdicts if n == 'Fundamentals'), 50)
+    if final_pct >= 70 or (broker_s >= 80 and tech_s >= 60):
+        final_verdict = '[bold green]STRONG BUY — Strong accumulation and momentum. Good entry.[/bold green]'
+    elif final_pct >= 55 or (broker_s >= 70 and final_pct >= 45):
+        final_verdict = '[bold green]BUY / ACCUMULATE — Institutional buying active. Consider entering.[/bold green]'
+    elif final_pct >= 45 or (broker_s >= 60 and fund_s >= 40):
         final_verdict = '[bold yellow]HOLD / WATCH — Mixed signals. Wait for more confirmation.[/bold yellow]'
     elif final_pct >= 35:
         final_verdict = '[bold yellow]CAUTION — More negatives than positives. Avoid new entry.[/bold yellow]'
