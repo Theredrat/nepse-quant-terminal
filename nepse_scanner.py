@@ -1403,6 +1403,48 @@ def print_legend():
         title="Usage Guide", border_style="dim"
     ))
 
+def print_buy_sell_guide():
+    console.print()
+    console.rule("[bold cyan]Buy / Sell Decision Guide[/bold cyan]", style="cyan")
+    console.print()
+    console.print("[bold yellow]HOW TO FIND A BUY:[/bold yellow]")
+    console.print()
+    steps = [
+        ("Step 1", "Run option 4 (Quick Pick)", "Look for score 70+. These are your candidates."),
+        ("Step 2", "Run option 17f (Momentum Hunter)", "Stock must have 3+ consecutive buy days and score 80+."),
+        ("Step 3", "Run option 17c -> latest date", "Verdict must say STRONG BUY or HOLD/ACCUMULATE.\n         If CAUTION or CONSIDER SELLING -> skip this stock."),
+        ("Step 4", "Run option 17b -> same stock", "Same brokers buying 3+ days in a row = strong confirmation.\n         New brokers each day = weak signal, skip."),
+        ("Step 5", "Run option 18 -> same stock", "Price near SUPPORT zone = BUY.\n         Price near RESISTANCE zone = wait for pullback.\n         Price in middle = small entry, add on dip."),
+    ]
+    for step, option, desc in steps:
+        console.print(f"  [bold green]{step}[/bold green] — [cyan]{option}[/cyan]")
+        console.print(f"         {desc}")
+        console.print()
+    console.print("[bold yellow]HOW TO DECIDE TO SELL:[/bold yellow]")
+    console.print()
+    sell_steps = [
+        ("Signal 1", "Run 17c", "Known NET SELLERS appear + verdict changes to CAUTION -> sell 50%"),
+        ("Signal 2", "Run 17d", "Trend score dropping 3 days in a row -> sell remaining"),
+        ("Signal 3", "Check chart", "Price hits resistance zone -> take partial profits"),
+        ("Signal 4", "Run 17b", "Top accumulating brokers now net selling -> exit"),
+    ]
+    for sig, option, desc in sell_steps:
+        console.print(f"  [bold red]{sig}[/bold red] — [cyan]{option}[/cyan]")
+        console.print(f"         {desc}")
+        console.print()
+    console.print("[bold yellow]ALL 5 MUST AGREE TO BUY. ANY 2 SELL SIGNALS = EXIT.[/bold yellow]")
+    console.print()
+    console.print("[bold cyan]EXAMPLE — JHAPA June 5:[/bold cyan]")
+    console.print("  17f score: 98/100                    [green]PASS[/green]")
+    console.print("  17c verdict: STRONG BUY, 6 net buyers [green]PASS[/green]")
+    console.print("  17b: Broker 14, 25, 17 accumulating   [green]PASS[/green]")
+    console.print("  18: Price at Rs 1,335 = support zone  [green]PASS[/green]")
+    console.print("  Previous high Rs 1,860 = 39% upside   [green]PASS[/green]")
+    console.print("  [bold green]Decision: BUY at support, target Rs 1,600+, stop Rs 1,250[/bold green]")
+    console.print()
+    console.print("  [dim]Research only. Not financial advice. Paper trade first.[/dim]")
+    console.print()
+
 def analyze_floorsheet_symbol(df, symbol):
     sym = symbol.upper()
     console.print()
@@ -2435,6 +2477,8 @@ def main():
         return
     if args.legend:
         print_legend()
+    elif getattr(args, "buy_sell_guide", False):
+        print_buy_sell_guide()
         return
     if getattr(args, "unlock", None) and args.unlock[0].lower() in ("add","delete","list","upcoming"):
         _unlock_db()
