@@ -7,7 +7,7 @@ Streamlit front-end in app.py.
 """
 
 from .config import PERIODS_PER_YEAR
-from .types import (
+from .nepse_types import (
     RegimeResult,
     FactorModelResult,
     DownsideRiskResult,
