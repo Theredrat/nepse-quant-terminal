@@ -2669,11 +2669,14 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
         buy_days = 0
         sell_days = 0
         for d in dates:
-            net = conn.execute(
-                'SELECT SUM(net_val) FROM broker_activity WHERE symbol=? AND date=? AND broker_id GLOB "[0-9]*"',
+            row = conn.execute(
+                'SELECT SUM(CASE WHEN net_val>0 THEN net_val ELSE 0 END), SUM(CASE WHEN net_val<0 THEN ABS(net_val) ELSE 0 END) '
+                'FROM broker_activity WHERE symbol=? AND date=? AND broker_id GLOB "[0-9]*"',
                 (symbol, d)
-            ).fetchone()[0] or 0
-            if net > 0: buy_days += 1
+            ).fetchone()
+            total_buy = row[0] or 0
+            total_sell = row[1] or 0
+            if total_buy > total_sell: buy_days += 1
             else: sell_days += 1
 
         bd_col = 'green' if buy_days > sell_days else 'red'
@@ -2695,7 +2698,7 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
             [symbol] + dates
         ).fetchall()
 
-        active_buyers = [str(r[0]) for r in recent if str(r[0]) in _net_buyers and r[1] > 0]
+        active_buyers = [str(r[0]) for r in recent if str(r[0]) in _net_buyers and (r[1] or 0) > 0]
         if active_buyers:
             console.print(f'  [green]Known NET BUYERS active: Broker {", ".join(active_buyers)} — STRONG signal[/green]')
             broker_score += 30
@@ -2736,11 +2739,13 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
         consec = 0
         for d in all_dates:
             row = conn.execute(
-                'SELECT SUM(net_val), COUNT(CASE WHEN net_val>0 THEN 1 END), COUNT(*) '
+                'SELECT SUM(CASE WHEN net_val>0 THEN net_val ELSE 0 END), SUM(CASE WHEN net_val<0 THEN ABS(net_val) ELSE 0 END) '
                 'FROM broker_activity WHERE symbol=? AND date=? AND broker_id GLOB "[0-9]*"',
                 (symbol, d)
             ).fetchone()
-            if row and row[0] and row[0] > 0:
+            tb = row[0] or 0
+            ts = row[1] or 0
+            if tb > ts:
                 consec += 1
             else:
                 break
