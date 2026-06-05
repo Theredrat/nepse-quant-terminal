@@ -83,6 +83,7 @@ echo   29. Value Screen          (undervalued by sector - ALL)
 echo   29s. Value Screen         (specific sector)
 rem   30. Float / Ownership     (any stock)
 rem   31. Unlock Dates          (upcoming lock-in expiry)
+echo   34. Update Quarterly Fundamentals  (smart scrape all equity)
 echo.
 echo   --- SIGNAL TRACKER ---
 echo   32. Signal Performance  (accuracy by signal type)
@@ -121,7 +122,6 @@ if "%choice%"=="17d" goto BROKER_TREND
 if "%choice%"=="17e" goto BROKER_IMPAAT
 if "%choice%"=="17f" goto MOMENTUM_HUNTER
 if "%choice%"=="17p" goto PREOPEN_CALC
-if "%choice%"=="34" goto CUSTOM_HOLDERS
 if "%choice%"=="17" goto CUSTOM_FLOOR
 if "%choice%"=="18" goto CUSTOM_SR
 if "%choice%"=="19" python nepse_scanner.py --report & goto AGAIN
@@ -140,6 +140,7 @@ if "%choice%"=="30" goto CUSTOM_FLOAT
 if "%choice%"=="31" python nepse_scanner.py --unlock upcoming & goto AGAIN
 if "%choice%"=="32" python signal_tracker.py --report & goto AGAIN
 if "%choice%"=="33" python dashboard_tui.py & goto AGAIN
+if "%choice%"=="34" goto UPDATE_FUNDAMENTALS
 if "%choice%"=="0"  exit
 echo  Invalid choice, try again.
 pause
@@ -160,24 +161,24 @@ set /p symbol=  Enter stock symbol (e.g. BUNGAL):
 python nepse_scanner.py --broker-holders %symbol%
 goto AGAIN
 
-
 :CUSTOM_BROKERDATE
 set /p symbol=  Enter stock symbol (e.g. CHCL):
 python nepse_scanner.py --broker-date %symbol% prompt
 goto AGAIN
 
 :BROKER_TREND
-set /p btsym=  Enter stock symbol (e.g. JBBL): 
+set /p btsym=  Enter stock symbol (e.g. JBBL):
 python nepse_scanner.py --broker-trend %btsym%
 goto AGAIN
 
 :BROKER_IMPAAT
 python nepse_scanner.py --broker-impact
 goto AGAIN
- 
+
 :MOMENTUM_HUNTER
 python nepse_scanner.py --momentum-hunter
 goto AGAIN
+
 :PREOPEN_CALC
 set /p symbols=  Enter symbol(s) separated by space (e.g. AKJCL GUFL HPPL):
 python nepse_scanner.py --preopen %symbols%
@@ -208,10 +209,12 @@ goto AGAIN
 set /p symbol=  Enter stock symbol (e.g. NABIL):
 python nepse_scanner.py --fundamental %symbol%
 goto AGAIN
+
 :CUSTOM_EARNINGS
 set /p symbol=  Enter stock symbol (e.g. AKJCL):
 python nepse_scanner.py --earnings %symbol%
 goto AGAIN
+
 :CUSTOM_VALUE
 echo.
 echo   1.  Hydropower
@@ -247,22 +250,30 @@ goto AGAIN
 set /p symbol=  Enter stock symbol (e.g. NABIL):
 python nepse_scanner.py --float %symbol%
 goto AGAIN
+
 :RUN_FULLSCAN
 python _marketcheck.py
 if errorlevel 1 goto AGAIN
 python nepse_scanner.py
 goto AGAIN
- 
+
 :RUN_MOVERS
 python _marketcheck.py
 if errorlevel 1 goto AGAIN
 python nepse_scanner.py --movers-only
 goto AGAIN
+
 :RUN_WATCHLIST
 python _marketcheck.py
 if errorlevel 1 goto AGAIN
 python nepse_scanner.py --watchlist
 goto AGAIN
+
+:UPDATE_FUNDAMENTALS
+echo Running smart quarterly scraper...
+python backend\quant_pro\smart_scraper.py
+goto AGAIN
+
 :AGAIN
 echo.
 echo  ============================================
