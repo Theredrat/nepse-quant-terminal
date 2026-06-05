@@ -33,11 +33,11 @@ def fetch_broker_data(n):
         col_map = {}
         for c in df.columns:
             cl = c.lower()
-            if 'buyer' in cl and 'broker' in cl: col_map[c] = 'buyer_broker'
-            elif 'seller' in cl and 'broker' in cl: col_map[c] = 'seller_broker'
-            elif 'symbol' in cl or 'scrip' in cl: col_map[c] = 'symbol'
-            elif 'amount' in cl or 'value' in cl: col_map[c] = 'amount'
-            elif 'quantity' in cl or 'qty' in cl: col_map[c] = 'quantity'
+            if cl in ('buyermemberid', 'buyerbrokerid', 'buyerbroker'): col_map[c] = 'buyer_broker'
+            elif cl in ('sellermemberid', 'sellerbrokerid', 'sellerbroker'): col_map[c] = 'seller_broker'
+            elif cl in ('stocksymbol', 'symbol', 'scrip'): col_map[c] = 'symbol'
+            elif cl in ('contractamount', 'amount', 'value'): col_map[c] = 'amount'
+            elif cl in ('contractquantity', 'quantity', 'qty'): col_map[c] = 'quantity'
         df = df.rename(columns=col_map)
         required = ['symbol','buyer_broker','seller_broker','amount']
         missing = [r for r in required if r not in df.columns]
