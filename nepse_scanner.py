@@ -4503,18 +4503,20 @@ def get_top_broker_holders(symbol, db_path='nepse_market_data.db', top_n=15):
         import sqlite3
         conn = sqlite3.connect(db_path)
         rows = conn.execute(
-            'SELECT broker_id, broker_name, '
+            'SELECT broker_id, '
             'SUM(buy_val) as total_buy, SUM(sell_val) as total_sell, '
             'SUM(net_val) as total_net, COUNT(DISTINCT date) as days_active, '
             'SUM(buy_qty) as total_buy_qty, SUM(sell_qty) as total_sell_qty '
             'FROM broker_activity WHERE symbol=? '
-            'GROUP BY broker_id, broker_name '
+            'AND broker_id NOT LIKE "% %" '
+            'AND broker_id GLOB "[0-9]*" '
+            'GROUP BY broker_id '
             'ORDER BY total_net DESC',
             (symbol,)
         ).fetchall()
         conn.close()
         results = []
-        for bid, bname, tbuy, tsell, tnet, days, bqty, sqty in rows:
+        for bid, tbuy, tsell, tnet, days, bqty, sqty in rows:
             tbuy = float(tbuy or 0)
             tsell = float(tsell or 0)
             bqty = int(bqty or 0)
@@ -4523,7 +4525,7 @@ def get_top_broker_holders(symbol, db_path='nepse_market_data.db', top_n=15):
             avg_sell = round(tsell / sqty, 2) if sqty > 0 else 0
             results.append(dict(
                 broker_id=str(bid),
-                broker_name=str(bname or ''),
+                broker_name=str(bid),
                 total_buy=tbuy,
                 total_sell=tsell,
                 total_net=float(tnet or 0),
