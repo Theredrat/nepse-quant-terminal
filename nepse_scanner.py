@@ -5101,15 +5101,62 @@ def analyze_broker_date(symbol=None, date_str=None, db_path='nepse_market_data.d
     if ss >= 70: console.print('  [bold green]SIGNAL:[/bold green] Strong smart money accumulation - watch for breakout')
     elif ss <= 30: console.print('  [bold red]SIGNAL:[/bold red] Smart money distributing - consider reducing exposure')
     console.print()
-    if smts:
-        sp2 = abs(smts[6]) / smst * 100 if smst else 0
-        if sp2 > 50 and sbp > 60:
-            bid5 = str(smts[0])
-            console.print(f'  [bold yellow]WARNING:[/bold yellow] Large single seller (Broker {bid5}) offsetting all buying - possible distribution')
-    if ss >= 70: console.print('  [bold green]SIGNAL:[/bold green] Strong smart money accumulation - watch for breakout')
-    elif ss <= 30: console.print('  [bold red]SIGNAL:[/bold red] Smart money distributing - consider reducing exposure')
-    console.print()
     console.print(f'  [{flow_col}]{flow_dir}: {_fmt(abs(net_flow))}[/{flow_col}]')
+    console.print()
+
+    # Final analysis summary
+    console.rule('[bold cyan]Analysis Summary[/bold cyan]')
+    console.print()
+    lines_out = []
+
+    # Dominant buyer
+    if smtb:
+        bv = _fmt_rs_val(smtb[6])
+        bid_b = str(smtb[0])
+        lw_name = lw.get(bid_b, '')
+        label = f'Broker {bid_b} ({lw_name})' if lw_name else f'Broker {bid_b}'
+        lines_out.append(f'[green]+ {label} is the top buyer at {bv}[/green]')
+
+    # Dominant seller
+    if smts:
+        sv = _fmt_rs_val(abs(smts[6]))
+        bid_s = str(smts[0])
+        lw_name_s = lw.get(bid_s, '')
+        label_s = f'Broker {bid_s} ({lw_name_s})' if lw_name_s else f'Broker {bid_s}'
+        lines_out.append(f'[red]- {label_s} is the dominant seller at {sv}[/red]')
+
+    # Buyer vs seller count
+    if sbp > 60:
+        lines_out.append(f'[green]+ More brokers buying ({snb}) than selling ({sns}) — buying pressure[/green]')
+    elif sbp < 40:
+        lines_out.append(f'[red]- More brokers selling ({sns}) than buying ({snb}) — selling pressure[/red]')
+    else:
+        lines_out.append(f'[yellow]~ Buyers ({snb}) and sellers ({sns}) roughly balanced — tug of war[/yellow]')
+
+    # Whale tracked brokers summary
+    whale_buying = [bid for bid in lw if any(str(r[0])==bid and r[6]>0 for r in rows)]
+    whale_selling = [bid for bid in lw if any(str(r[0])==bid and r[6]<0 for r in rows)]
+    if whale_buying:
+        lines_out.append(f'[green]+ Tracked institutional buyers: Broker {", ".join(whale_buying)}[/green]')
+    if whale_selling:
+        lines_out.append(f'[red]- Tracked institutional sellers: Broker {", ".join(whale_selling)}[/red]')
+
+    # Verdict
+    if ss >= 70:
+        verdict = '[bold green]HOLD / ACCUMULATE — Strong institutional buying. Watch for breakout.[/bold green]'
+    elif ss >= 50:
+        verdict = '[bold yellow]HOLD — Mixed signals. Institutional interest present but sellers active. Wait for clarity.[/bold yellow]'
+    elif ss >= 35:
+        verdict = '[bold yellow]CAUTION — More selling than buying. Consider reducing if in profit.[/bold yellow]'
+    else:
+        verdict = '[bold red]CONSIDER SELLING — Smart money distributing. High selling pressure.[/bold red]'
+
+    for l in lines_out:
+        console.print(f'  {l}')
+    console.print()
+    console.print(f'  Verdict: {verdict}')
+    console.print()
+    console.print('  [dim]Research only. Not financial advice. Paper trade first.[/dim]')
     console.print()
 
 
