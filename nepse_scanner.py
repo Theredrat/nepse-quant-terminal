@@ -1970,6 +1970,7 @@ def parse_args():
     p.add_argument('--offline',     action='store_true', help='Use DB data instead of live API')
     p.add_argument('--movers-only', action='store_true')
     p.add_argument('--legend',      action='store_true')
+    p.add_argument('--guide',       action='store_true', dest='buy_sell_guide')
     p.add_argument('--portfolio',   nargs='*', metavar='SYMBOL', help='Position sizing + correlation for a set of stocks')
     p.add_argument('--corr',        action='store_true', help='Sector correlation heatmap')
     p.add_argument('--size',        nargs=2, metavar=('SYMBOL','AMOUNT'), help='Volatility-adjusted sizing e.g. --size AKJCL 100000')
