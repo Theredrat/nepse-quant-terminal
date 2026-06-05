@@ -5038,11 +5038,11 @@ def analyze_broker_date(symbol=None, date_str=None, db_path='nepse_market_data.d
     console.print()
     console.rule('[bold cyan]Smart Money Analysis[/bold cyan]')
     lw = {'34':'Vision Sec','41':'Linch Stock','52':'Sundhara Sec','58':'Naasa Sec'}
-    smb = [r for r in rows if r[7] > 0]
-    sms = [r for r in rows if r[7] < 0]
-    smtb = max(smb, key=lambda x: x[7]) if smb else None
-    smts = min(sms, key=lambda x: x[7]) if sms else None
-    smst = sum(abs(r[7]) for r in sms)
+    smb = [r for r in rows if r[6] > 0]
+    sms = [r for r in rows if r[6] < 0]
+    smtb = max(smb, key=lambda x: x[6]) if smb else None
+    smts = min(sms, key=lambda x: x[6]) if sms else None
+    smst = sum(abs(r[6]) for r in sms)
     ssn = len(rows); snb = len(smb); sns = len(sms)
     sbp = snb / ssn * 100 if ssn else 0
     console.print()
@@ -5052,31 +5052,31 @@ def analyze_broker_date(symbol=None, date_str=None, db_path='nepse_market_data.d
         bid = str(r[0])
         if bid in lw:
             swf = True
-            sa = 'BUYING' if r[7] > 0 else 'SELLING'
-            sc2 = 'green' if r[7] > 0 else 'red'
-            sv = _fmt_rs_val(abs(r[7]))
-            sd = ' <- DOMINANT SELLER' if smts and r[0] == smts[0] and r[7] < 0 else ''
+            sa = 'BUYING' if r[6] > 0 else 'SELLING'
+            sc2 = 'green' if r[6] > 0 else 'red'
+            sv = _fmt_rs_val(abs(r[6]))
+            sd = ' <- DOMINANT SELLER' if smts and r[0] == smts[0] and r[6] < 0 else ''
             console.print(f'     [{sc2}]Broker {bid} ({lw[bid]}) - {sa} {sv}{sd}[/{sc2}]')
     if smts and str(smts[0]) not in lw:
-        sv2 = _fmt_rs_val(abs(smts[7]))
-        bid2 = str(smts[0]); bnm2 = smts[1]
-        console.print(f'     [red]Broker {bid2} ({bnm2}) - SELLING {sv2} <- DOMINANT SELLER[/red]')
+        sv2 = _fmt_rs_val(abs(smts[6]))
+        bid2 = str(smts[0])
+        console.print(f'     [red]Broker {bid2} - SELLING {sv2} <- DOMINANT SELLER[/red]')
     if smtb and str(smtb[0]) not in lw:
-        sv3 = _fmt_rs_val(smtb[7])
-        bid3 = str(smtb[0]); bnm3 = smtb[1]
-        console.print(f'     [green]Broker {bid3} ({bnm3}) - BUYING {sv3} <- DOMINANT BUYER[/green]')
+        sv3 = _fmt_rs_val(smtb[6])
+        bid3 = str(smtb[0])
+        console.print(f'     [green]Broker {bid3} - BUYING {sv3} <- DOMINANT BUYER[/green]')
     if not swf: console.print('     [dim]No tracked whales active today[/dim]')
     ss = 50
     if sbp > 65: ss += 20
     elif sbp > 50: ss += 10
     else: ss -= 10
     if smts:
-        sp2 = abs(smts[7]) / smst * 100 if smst else 0
+        sp2 = abs(smts[6]) / smst * 100 if smst else 0
         if sp2 > 60: ss -= 20
         elif sp2 > 40: ss -= 10
     for r in rows:
         if str(r[0]) in lw:
-            ss += 10 if r[7] > 0 else -10
+            ss += 10 if r[6] > 0 else -10
     ss = max(0, min(100, ss))
     ssv,ssc = ('BULLISH','green') if ss>=70 else ('MIXED','yellow') if ss>=50 else ('BEARISH','red')
     console.print()
@@ -5084,9 +5084,9 @@ def analyze_broker_date(symbol=None, date_str=None, db_path='nepse_market_data.d
     console.print(f'     + {snb} brokers buying ({sbp:.0f}% of participants)')
     console.print(f'     - {sns} brokers selling')
     if smts:
-        sp2 = abs(smts[7]) / smst * 100 if smst else 0
+        sp2 = abs(smts[6]) / smst * 100 if smst else 0
         if sp2 > 40:
-            sv4 = _fmt_rs_val(abs(smts[7]))
+            sv4 = _fmt_rs_val(abs(smts[6]))
             bid4 = str(smts[0])
             console.print(f'     - 1 dominant seller (Broker {bid4}) - {sv4} ({sp2:.0f}% of all selling)')
     if net_flow > 10000: console.print(f'     + Net flow: [green]INFLOW {_fmt_rs_val(abs(net_flow))}[/green]')
@@ -5094,7 +5094,7 @@ def analyze_broker_date(symbol=None, date_str=None, db_path='nepse_market_data.d
     else: console.print('     ~ Net flow: [yellow]NEUTRAL[/yellow]')
     console.print()
     if smts:
-        sp2 = abs(smts[7]) / smst * 100 if smst else 0
+        sp2 = abs(smts[6]) / smst * 100 if smst else 0
         if sp2 > 50 and sbp > 60:
             bid5 = str(smts[0])
             console.print(f'  [bold yellow]WARNING:[/bold yellow] Large single seller (Broker {bid5}) offsetting all buying - possible distribution')
@@ -5102,7 +5102,7 @@ def analyze_broker_date(symbol=None, date_str=None, db_path='nepse_market_data.d
     elif ss <= 30: console.print('  [bold red]SIGNAL:[/bold red] Smart money distributing - consider reducing exposure')
     console.print()
     if smts:
-        sp2 = abs(smts[7]) / smst * 100 if smst else 0
+        sp2 = abs(smts[6]) / smst * 100 if smst else 0
         if sp2 > 50 and sbp > 60:
             bid5 = str(smts[0])
             console.print(f'  [bold yellow]WARNING:[/bold yellow] Large single seller (Broker {bid5}) offsetting all buying - possible distribution')
