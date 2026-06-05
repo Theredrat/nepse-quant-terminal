@@ -1410,11 +1410,13 @@ def print_buy_sell_guide():
     console.print("[bold yellow]HOW TO FIND A BUY:[/bold yellow]")
     console.print()
     steps = [
-        ("Step 1", "Run option 4 (Quick Pick)", "Look for score 70+. These are your candidates."),
-        ("Step 2", "Run option 17f (Momentum Hunter)", "Stock must have 3+ consecutive buy days and score 80+."),
-        ("Step 3", "Run option 17c -> latest date", "Verdict must say STRONG BUY or HOLD/ACCUMULATE.\n         If CAUTION or CONSIDER SELLING -> skip this stock."),
-        ("Step 4", "Run option 17b -> same stock", "Same brokers buying 3+ days in a row = strong confirmation.\n         New brokers each day = weak signal, skip."),
-        ("Step 5", "Run option 18 -> same stock", "Price near SUPPORT zone = BUY.\n         Price near RESISTANCE zone = wait for pullback.\n         Price in middle = small entry, add on dip."),
+        ("Step 1", "Run option 3 (Watchlist)", "Check your tracked stocks first — known stocks you follow."),
+        ("Step 2", "Run option 4 (Quick Pick)", "Look for score 70+. New candidates from full market."),
+        ("Step 3", "Run option 5 (Smart Pick)", "Confirms signals + broker + whale together. Strongest filter."),
+        ("Step 4", "Run option 17f (Momentum Hunter)", "Stock must have 3+ consecutive buy days and score 80+."),
+        ("Step 5", "Run option 17c -> latest date", "Verdict must say STRONG BUY or HOLD/ACCUMULATE.\n         If CAUTION or CONSIDER SELLING -> skip this stock."),
+        ("Step 6", "Run option 17b -> same stock", "Same brokers buying 3+ days in a row = strong confirmation.\n         New brokers each day = weak signal, skip."),
+        ("Step 7", "Run option 18 -> same stock", "Price near SUPPORT zone = BUY.\n         Price near RESISTANCE zone = wait for pullback.\n         Price in middle = small entry, add on dip."),
     ]
     for step, option, desc in steps:
         console.print(f"  [bold green]{step}[/bold green] — [cyan]{option}[/cyan]")
@@ -1432,7 +1434,7 @@ def print_buy_sell_guide():
         console.print(f"  [bold red]{sig}[/bold red] — [cyan]{option}[/cyan]")
         console.print(f"         {desc}")
         console.print()
-    console.print("[bold yellow]ALL 5 MUST AGREE TO BUY. ANY 2 SELL SIGNALS = EXIT.[/bold yellow]")
+    console.print("[bold yellow]ALL 7 MUST AGREE TO BUY. ANY 2 SELL SIGNALS = EXIT.[/bold yellow]")
     console.print()
     console.print("[bold cyan]EXAMPLE — JHAPA June 5:[/bold cyan]")
     console.print("  17f score: 98/100                    [green]PASS[/green]")
