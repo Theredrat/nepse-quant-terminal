@@ -2648,12 +2648,13 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
     try:
         # Top holders from broker_holdings
         holders = conn.execute(
-            'SELECT broker_id, hold_vol, avg_buy FROM broker_holdings '
+            'SELECT broker_id, hold_vol, avg_buy, imported_date FROM broker_holdings '
             'WHERE symbol=? ORDER BY hold_vol DESC LIMIT 5',
             (symbol,)
         ).fetchall()
         if holders:
-            console.print('  [bold]Top Holders:[/bold]')
+            data_date = holders[0][3] if holders[0][3] else 'unknown'
+            console.print(f'  [bold]Top Holders:[/bold] [dim](data as of {data_date})[/dim]')
             for h in holders:
                 console.print(f'    Broker {h[0]} — holds {h[1]:,.0f} shares (avg buy Rs {h[2]:,.1f})')
             console.print()
