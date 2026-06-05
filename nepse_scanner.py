@@ -2498,11 +2498,14 @@ def main():
                 console.print(f"[dim yellow]OFFLINE MODE - {len(live_df)} securities from DB ({_lat})[/dim yellow]\n")
         except Exception as _oe:
             console.print(f"[red]DB load failed: {_oe}[/red]")
-    elif need_live:
+    elif need_live and not _force_offline:
         with console.status("[cyan]Fetching live market data...[/cyan]"):
             live_df = get_live_market(n)
-        if live_df is not None:
+        if live_df is not None and not live_df.empty:
             console.print(f"[dim]Loaded {len(live_df)} securities.[/dim]\n")
+        else:
+            console.print("[dim yellow]Live fetch empty - falling back to DB...[/dim yellow]")
+            _force_offline = True
 
     full_fs = None
     if need_floor:

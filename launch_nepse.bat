@@ -101,8 +101,8 @@ set /p choice=  Pick a number and press Enter:
 if "%choice%"=="1" goto RUN_FULLSCAN
 if "%choice%"=="2" goto RUN_MOVERS
 if "%choice%"=="3" goto RUN_WATCHLIST
-if "%choice%"=="4"  python nepse_scanner.py --offline --quickpick & goto AGAIN
-if "%choice%"=="5"  python nepse_scanner.py --offline --smartpick & goto AGAIN
+if "%choice%"=="4"  python nepse_scanner.py --quickpick & goto AGAIN
+if "%choice%"=="5"  python nepse_scanner.py --smartpick & goto AGAIN
 if "%choice%"=="6"  python nepse_scanner.py --powersell & goto AGAIN
 if "%choice%"=="7"  python nepse_scanner.py --sector & goto AGAIN
 if "%choice%"=="7t" python nepse_scanner.py --sector-trend & goto AGAIN
