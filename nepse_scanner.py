@@ -2621,10 +2621,62 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
     supply_score = 50
     try:
         f2 = conn.execute(
-            'SELECT shares_outstanding FROM fundamentals WHERE symbol=? ORDER BY date DESC LIMIT 1',
+            'SELECT shares_outstanding, sector FROM fundamentals WHERE symbol=? ORDER BY date DESC LIMIT 1',
             (symbol,)
         ).fetchone()
         shares_out = f2[0] if f2 and f2[0] else None
+        sector_name = f2[1] if f2 and f2[1] else ''
+
+        # Promoter % by sector (SEBON rules)
+        sector_lower = sector_name.lower()
+        if any(x in sector_lower for x in ['hydro', 'hotel', 'manufacturing', 'investment', 'others']):
+            promoter_pct = 0.51
+        elif any(x in sector_lower for x in ['bank', 'finance', 'microfinance', 'insurance', 'development']):
+            promoter_pct = 0.40
+        else:
+            promoter_pct = 0.51
+
+        # Check if still locked from unlock_dates
+        unlock_row = conn.execute(
+            'SELECT unlock_date, note FROM unlock_dates WHERE symbol=? ORDER BY unlock_date DESC LIMIT 1',
+            (symbol,)
+        ).fetchone()
+
+        from datetime import date as _date
+        today_str = str(_date.today())
+        still_locked = False
+        unlock_info = ''
+        if unlock_row:
+            unlock_date = unlock_row[0]
+            note = unlock_row[1] or ''
+            if 'STILL_LOCKED' in note and unlock_date > today_str:
+                still_locked = True
+                unlock_info = f'locked till {unlock_date}'
+            elif unlock_date <= today_str:
+                unlock_info = f'unlocked since {unlock_date}'
+            else:
+                unlock_info = f'unlocks {unlock_date}'
+
+        # Calculate real tradeable float
+        if shares_out:
+            if still_locked:
+                locked_shares = shares_out * promoter_pct
+                tradeable_float = shares_out - locked_shares
+                lock_col = 'yellow'
+            else:
+                locked_shares = 0
+                tradeable_float = shares_out
+                lock_col = 'green'
+
+            console.print(f'  Total Listed Shares: [white]{shares_out:,.0f}[/white]')
+            if still_locked:
+                console.print(f'  Promoter Locked: [{lock_col}]{locked_shares:,.0f} (~{promoter_pct*100:.0f}%) — {unlock_info}[/{lock_col}]')
+                console.print(f'  Real Tradeable Float: [cyan]{tradeable_float:,.0f} shares[/cyan]')
+            else:
+                console.print(f'  Lock-in Status: [green]UNLOCKED ({unlock_info})[/green]')
+                console.print(f'  Real Tradeable Float: [green]{tradeable_float:,.0f} shares (all tradeable)[/green]')
+        else:
+            tradeable_float = None
 
         # Recent volume from broker_activity
         vol_rows = conn.execute(
@@ -2633,30 +2685,40 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
             (symbol,)
         ).fetchall()
 
-        if shares_out:
-            console.print(f'  Total Listed Shares: [white]{shares_out:,.0f}[/white]')
-
         if vol_rows:
             vols = [r[1] for r in vol_rows if r[1]]
             avg_vol = sum(vols) / len(vols) if vols else 0
             latest_vol = vols[0] if vols else 0
             vol_ratio = latest_vol / avg_vol if avg_vol > 0 else 1
 
+            # Volume ratio scoring (improved)
+            if vol_ratio >= 3.0: supply_score += 30
+            elif vol_ratio >= 2.0: supply_score += 20
+            elif vol_ratio >= 1.5: supply_score += 10
+            elif vol_ratio < 0.8: supply_score -= 10
+            elif vol_ratio < 0.5: supply_score -= 20
+
             vol_col = 'green' if vol_ratio >= 1.5 else 'yellow' if vol_ratio >= 0.8 else 'red'
             console.print(f'  Latest Day Volume: [{vol_col}]{latest_vol:,.0f}[/{vol_col}]')
             console.print(f'  Avg Volume (10d): [white]{avg_vol:,.0f}[/white]')
             console.print(f'  Volume Ratio: [{vol_col}]{vol_ratio:.1f}x avg[/{vol_col}] {"(HIGH demand)" if vol_ratio >= 1.5 else "(normal)" if vol_ratio >= 0.8 else "(LOW demand)"}')
 
-            if vol_ratio >= 2.0: supply_score += 25
-            elif vol_ratio >= 1.5: supply_score += 15
-            elif vol_ratio < 0.5: supply_score -= 20
+            # Float turnover using REAL tradeable float
+            base_shares = tradeable_float if tradeable_float else shares_out
+            if base_shares and avg_vol > 0:
+                float_pct = (avg_vol / base_shares) * 100
+                # Improved float scoring
+                if float_pct < 0.3: supply_score += 25
+                elif float_pct < 1.0: supply_score += 15
+                elif float_pct < 2.0: supply_score += 5
+                elif float_pct < 3.0: supply_score += 0
+                elif float_pct < 5.0: supply_score -= 10
+                else: supply_score -= 20
 
-            if shares_out and avg_vol > 0:
-                float_pct = (avg_vol / shares_out) * 100
+                float_label = 'extremely tight' if float_pct < 0.3 else 'tight' if float_pct < 1 else 'normal' if float_pct < 3 else 'heavy supply'
                 float_col = 'green' if float_pct < 1 else 'yellow' if float_pct < 3 else 'red'
-                console.print(f'  Daily Float Turnover: [{float_col}]{float_pct:.2f}% of shares[/{float_col}] {"(tight float)" if float_pct < 1 else "(normal)" if float_pct < 3 else "(heavy supply)"}')
-                if float_pct < 1: supply_score += 15
-                elif float_pct > 3: supply_score -= 15
+                float_base = 'real float' if still_locked else 'total shares'
+                console.print(f'  Daily Float Turnover: [{float_col}]{float_pct:.2f}% of {float_base}[/{float_col}] ({float_label})')
 
         supply_score = max(0, min(100, supply_score))
         s_verdict = 'TIGHT' if supply_score >= 65 else 'NORMAL' if supply_score >= 40 else 'HEAVY'
