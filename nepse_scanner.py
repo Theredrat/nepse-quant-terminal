@@ -4717,7 +4717,7 @@ def analyze_broker_trend(symbol=None, days=7, db_path="nepse_market_data.db"):
             elif score_history[-1] < score_history[0]:
                 console.print("   [v] Smart money sentiment deteriorating", style="red")
             else:
-                console.print("  → Sentiment flat over period", style="yellow")
+                console.print("  [=] Sentiment flat over period", style="yellow")
             avg = sum(score_history) / len(score_history)
             console.print(f"  Avg score over {len(score_history)} days: {avg:.0f}/100")
         conn.close()
