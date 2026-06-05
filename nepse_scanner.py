@@ -4743,7 +4743,7 @@ def analyze_broker_impact(days=30, top_n=20, db_path="nepse_market_data.db"):
         console.print()
         # Aggregate per broker
         rows = conn.execute("""
-            SELECT broker_id, broker_name,
+            SELECT broker_id,
                 COUNT(DISTINCT symbol) as stocks_traded,
                 COUNT(*) as total_appearances,
                 SUM(CASE WHEN net_val > 0 THEN 1 ELSE 0 END) as buy_days,
@@ -4753,7 +4753,8 @@ def analyze_broker_impact(days=30, top_n=20, db_path="nepse_market_data.db"):
                 AVG(ABS(net_val)) as avg_trade_size
             FROM broker_activity
             WHERE date IN ({})
-            GROUP BY broker_id, broker_name
+            AND broker_id GLOB '[0-9]*'
+            GROUP BY broker_id
             ORDER BY avg_trade_size DESC
         """.format(",".join(["?"]*len(dates))), dates).fetchall()
         conn.close()
@@ -4762,17 +4763,16 @@ def analyze_broker_impact(days=30, top_n=20, db_path="nepse_market_data.db"):
         # Score each broker: avg_trade_size * stocks_traded * appearances
         scored = []
         for r in rows:
-            bid, bname, stocks, apps, bdays, sdays, tbought, tsold, avg_size = r
+            bid, stocks, apps, bdays, sdays, tbought, tsold, avg_size = r
             impact = (avg_size / 1000000) * (stocks ** 0.5) * (apps ** 0.3)
             net = tbought - tsold
             bias = "BUYER" if tbought > tsold * 1.2 else "SELLER" if tsold > tbought * 1.2 else "NEUTRAL"
-            scored.append((bid, bname, stocks, apps, bdays, sdays, tbought, tsold, avg_size, impact, bias, net))
+            scored.append((bid, stocks, apps, bdays, sdays, tbought, tsold, avg_size, impact, bias, net))
         scored.sort(key=lambda x: x[9], reverse=True)
         scored = scored[:top_n]
         t = Table(show_header=True, header_style="bold cyan", box=None, padding=(0,2))
         t.add_column("#", width=3, justify="right")
         t.add_column("Broker", width=6, justify="right")
-        t.add_column("Name", width=28)
         t.add_column("Stocks", width=7, justify="right")
         t.add_column("Appear", width=7, justify="right")
         t.add_column("Avg Size", width=12, justify="right")
@@ -4780,10 +4780,10 @@ def analyze_broker_impact(days=30, top_n=20, db_path="nepse_market_data.db"):
         t.add_column("Total Sold", width=14, justify="right")
         t.add_column("Bias", width=10, justify="center")
         for rank, r in enumerate(scored, 1):
-            bid, bname, stocks, apps, bdays, sdays, tbought, tsold, avg_size, impact, bias, net = r
+            bid, stocks, apps, bdays, sdays, tbought, tsold, avg_size, impact, bias, net = r
             bc = "green" if bias == "BUYER" else "red" if bias == "SELLER" else "yellow"
             t.add_row(
-                str(rank), str(bid), bname[:28],
+                str(rank), str(bid),
                 str(stocks), str(apps),
                 _fmt_rs_val(avg_size),
                 _fmt_rs_val(tbought),
