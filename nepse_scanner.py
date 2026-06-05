@@ -4978,8 +4978,9 @@ def analyze_broker_date(symbol=None, date_str=None, db_path='nepse_market_data.d
             conn.close()
             return
         rows = conn.execute(
-            'SELECT broker_id, broker_name, buy_qty, sell_qty, net_qty, buy_val, sell_val, net_val '
+            'SELECT broker_id, buy_qty, sell_qty, net_qty, buy_val, sell_val, net_val '
             'FROM broker_activity WHERE symbol=? AND date=? '
+            'AND broker_id GLOB "[0-9]*" '
             'ORDER BY net_val DESC',
             (symbol, date_str)
         ).fetchall()
@@ -5000,7 +5001,6 @@ def analyze_broker_date(symbol=None, date_str=None, db_path='nepse_market_data.d
     t = Table(show_header=True, header_style='bold cyan', box=None, padding=(0, 2))
     t.add_column('#', style='dim', width=4)
     t.add_column('Broker ID', width=10)
-    t.add_column('Broker Name', width=35)
     t.add_column('Net Position', width=14, justify='right')
     t.add_column('Net Shares', width=12, justify='right')
     t.add_column('Avg Price', width=12, justify='right')
@@ -5010,14 +5010,14 @@ def analyze_broker_date(symbol=None, date_str=None, db_path='nepse_market_data.d
     total_sell_val = 0
     buyers = 0
     sellers = 0
-    for i, (bid, bname, bq, sq, nq, bv, sv, nv) in enumerate(rows, 1):
+    for i, (bid, bq, sq, nq, bv, sv, nv) in enumerate(rows, 1):
         net_style = 'green' if nv >= 0 else 'red'
         net_str = ('+' if nv >= 0 else '-') + _fmt(nv)
         nq_str = ('+' if nq >= 0 else '') + f'{nq:,}'
         total_vol = bq + sq
         avg_price = round((bv + sv) / total_vol, 1) if total_vol > 0 else 0
         avg_str = f'Rs {avg_price:,.1f}' if avg_price > 0 else '-'
-        t.add_row(str(i), str(bid), str(bname or ''),
+        t.add_row(str(i), str(bid),
             f'[{net_style}]{net_str}[/{net_style}]',
             f'[{net_style}]{nq_str}[/{net_style}]',
             avg_str, _fmt(bv), _fmt(sv))
