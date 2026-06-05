@@ -1973,6 +1973,7 @@ def parse_args():
     p.add_argument('--movers-only', action='store_true')
     p.add_argument('--legend',      action='store_true')
     p.add_argument('--guide',       action='store_true', dest='buy_sell_guide')
+    p.add_argument('--full-report',  metavar='SYMBOL', dest='full_report', default=None)
     p.add_argument('--portfolio',   nargs='*', metavar='SYMBOL', help='Position sizing + correlation for a set of stocks')
     p.add_argument('--corr',        action='store_true', help='Sector correlation heatmap')
     p.add_argument('--size',        nargs=2, metavar=('SYMBOL','AMOUNT'), help='Volatility-adjusted sizing e.g. --size AKJCL 100000')
@@ -2471,6 +2472,352 @@ def cmd_preopen(symbols=None):
     if not_found:
         print(f"  Not found in DB: {', '.join(not_found)}")
     print()
+
+def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
+    """Option 35 - Full Stock Report: Fundamentals + Supply + Brokers + Technical + Verdict"""
+    from rich.table import Table
+    from rich.rule import Rule
+    from rich.panel import Panel
+    import sqlite3
+
+    if not symbol:
+        console.print()
+        symbol = input('  Enter stock symbol (e.g. NABIL): ').strip().upper()
+    if not symbol:
+        console.print('  Missing symbol.', style='yellow')
+        return
+
+    console.print()
+    console.rule(f'[bold cyan]Full Stock Report — {symbol}[/bold cyan]', style='cyan')
+    console.print()
+
+    conn = sqlite3.connect(db_path)
+    total_score = 0
+    max_score = 0
+    section_verdicts = []
+
+    # ─────────────────────────────────────────
+    # SECTION 1 — FUNDAMENTALS
+    # ─────────────────────────────────────────
+    console.rule('[bold yellow]Section 1 — Fundamentals[/bold yellow]', style='yellow')
+    console.print()
+    fund_score = 0
+    try:
+        f = conn.execute(
+            'SELECT eps, book_value_per_share, pe_ratio, pb_ratio, roe, market_cap, sector, shares_outstanding '
+            'FROM fundamentals WHERE symbol=? ORDER BY date DESC LIMIT 1',
+            (symbol,)
+        ).fetchone()
+
+        quarters = conn.execute(
+            'SELECT fiscal_year, quarter, eps, book_value, net_profit FROM quarterly_earnings '
+            'WHERE symbol=? AND eps IS NOT NULL ORDER BY fiscal_year DESC, quarter DESC LIMIT 4',
+            (symbol,)
+        ).fetchall()
+
+        if f:
+            eps, bv, pe, pb, roe, mcap, sector, shares = f
+            console.print(f'  Sector: [cyan]{sector}[/cyan]')
+            console.print(f'  Market Cap: [white]{_fmt_rs_val(mcap) if mcap else "N/A"}[/white]')
+            console.print()
+
+            # EPS trend
+            if len(quarters) >= 2:
+                eps_curr = quarters[0][2]
+                eps_prev = quarters[1][2]
+                if eps_curr and eps_prev:
+                    eps_chg = ((eps_curr - eps_prev) / abs(eps_prev)) * 100
+                    eps_col = 'green' if eps_chg > 0 else 'red'
+                    eps_arrow = '+' if eps_chg > 0 else ''
+                    console.print(f'  EPS: [{eps_col}]Rs {eps_curr:.2f} ({eps_arrow}{eps_chg:.1f}% vs last quarter)[/{eps_col}]')
+                    if eps_chg > 10: fund_score += 25
+                    elif eps_chg > 0: fund_score += 15
+                    else: fund_score -= 10
+                else:
+                    console.print(f'  EPS: Rs {eps:.2f}' if eps else '  EPS: N/A')
+            elif eps:
+                console.print(f'  EPS: Rs {eps:.2f}')
+                if eps > 0: fund_score += 10
+
+            # Book Value trend
+            if len(quarters) >= 2 and quarters[0][3] and quarters[1][3]:
+                bv_curr = quarters[0][3]
+                bv_prev = quarters[1][3]
+                bv_chg = ((bv_curr - bv_prev) / abs(bv_prev)) * 100
+                bv_col = 'green' if bv_chg > 0 else 'red'
+                bv_arrow = '+' if bv_chg > 0 else ''
+                console.print(f'  Book Value: [{bv_col}]Rs {bv_curr:.2f} ({bv_arrow}{bv_chg:.1f}% vs last quarter)[/{bv_col}]')
+                if bv_chg > 0: fund_score += 15
+            elif bv:
+                console.print(f'  Book Value: Rs {bv:.2f}')
+                if bv > 0: fund_score += 10
+
+            # PE and ROE
+            if pe:
+                pe_col = 'green' if pe < 20 else 'yellow' if pe < 35 else 'red'
+                console.print(f'  PE Ratio: [{pe_col}]{pe:.1f}x[/{pe_col}] {"(cheap)" if pe < 20 else "(fair)" if pe < 35 else "(expensive)"}')
+                if pe < 20: fund_score += 20
+                elif pe < 35: fund_score += 10
+            if roe:
+                roe_col = 'green' if roe > 15 else 'yellow' if roe > 8 else 'red'
+                console.print(f'  ROE: [{roe_col}]{roe:.1f}%[/{roe_col}] {"(strong)" if roe > 15 else "(moderate)" if roe > 8 else "(weak)"}')
+                if roe > 15: fund_score += 15
+                elif roe > 8: fund_score += 8
+
+            fund_score = max(0, min(100, fund_score))
+            f_verdict = 'STRONG' if fund_score >= 60 else 'MODERATE' if fund_score >= 35 else 'WEAK'
+            f_col = 'green' if fund_score >= 60 else 'yellow' if fund_score >= 35 else 'red'
+            console.print()
+            console.print(f'  Fundamentals Score: [{f_col}]{fund_score}/100 — {f_verdict}[/{f_col}]')
+            section_verdicts.append(('Fundamentals', fund_score, f_verdict, f_col))
+            total_score += fund_score
+            max_score += 100
+        else:
+            console.print(f'  No fundamental data for {symbol}. Run option 34 first.', style='yellow')
+            section_verdicts.append(('Fundamentals', 0, 'NO DATA', 'dim'))
+            max_score += 100
+    except Exception as e:
+        console.print(f'  Error: {e}', style='red')
+        max_score += 100
+
+    # ─────────────────────────────────────────
+    # SECTION 2 — SUPPLY POWER
+    # ─────────────────────────────────────────
+    console.print()
+    console.rule('[bold yellow]Section 2 — Supply Power[/bold yellow]', style='yellow')
+    console.print()
+    supply_score = 50
+    try:
+        f2 = conn.execute(
+            'SELECT shares_outstanding FROM fundamentals WHERE symbol=? ORDER BY date DESC LIMIT 1',
+            (symbol,)
+        ).fetchone()
+        shares_out = f2[0] if f2 and f2[0] else None
+
+        # Recent volume from broker_activity
+        vol_rows = conn.execute(
+            'SELECT date, SUM(buy_qty) as total_vol FROM broker_activity '
+            'WHERE symbol=? AND broker_id GLOB "[0-9]*" GROUP BY date ORDER BY date DESC LIMIT 10',
+            (symbol,)
+        ).fetchall()
+
+        if shares_out:
+            console.print(f'  Total Listed Shares: [white]{shares_out:,.0f}[/white]')
+
+        if vol_rows:
+            vols = [r[1] for r in vol_rows if r[1]]
+            avg_vol = sum(vols) / len(vols) if vols else 0
+            latest_vol = vols[0] if vols else 0
+            vol_ratio = latest_vol / avg_vol if avg_vol > 0 else 1
+
+            vol_col = 'green' if vol_ratio >= 1.5 else 'yellow' if vol_ratio >= 0.8 else 'red'
+            console.print(f'  Latest Day Volume: [{vol_col}]{latest_vol:,.0f}[/{vol_col}]')
+            console.print(f'  Avg Volume (10d): [white]{avg_vol:,.0f}[/white]')
+            console.print(f'  Volume Ratio: [{vol_col}]{vol_ratio:.1f}x avg[/{vol_col}] {"(HIGH demand)" if vol_ratio >= 1.5 else "(normal)" if vol_ratio >= 0.8 else "(LOW demand)"}')
+
+            if vol_ratio >= 2.0: supply_score += 25
+            elif vol_ratio >= 1.5: supply_score += 15
+            elif vol_ratio < 0.5: supply_score -= 20
+
+            if shares_out and avg_vol > 0:
+                float_pct = (avg_vol / shares_out) * 100
+                float_col = 'green' if float_pct < 1 else 'yellow' if float_pct < 3 else 'red'
+                console.print(f'  Daily Float Turnover: [{float_col}]{float_pct:.2f}% of shares[/{float_col}] {"(tight float)" if float_pct < 1 else "(normal)" if float_pct < 3 else "(heavy supply)"}')
+                if float_pct < 1: supply_score += 15
+                elif float_pct > 3: supply_score -= 15
+
+        supply_score = max(0, min(100, supply_score))
+        s_verdict = 'TIGHT' if supply_score >= 65 else 'NORMAL' if supply_score >= 40 else 'HEAVY'
+        s_col = 'green' if supply_score >= 65 else 'yellow' if supply_score >= 40 else 'red'
+        console.print()
+        console.print(f'  Supply Score: [{s_col}]{supply_score}/100 — {s_verdict} supply[/{s_col}]')
+        section_verdicts.append(('Supply Power', supply_score, s_verdict, s_col))
+        total_score += supply_score
+        max_score += 100
+    except Exception as e:
+        console.print(f'  Error: {e}', style='red')
+        max_score += 100
+
+    # ─────────────────────────────────────────
+    # SECTION 3 — TOP BROKER ACTIVITY
+    # ─────────────────────────────────────────
+    console.print()
+    console.rule('[bold yellow]Section 3 — Top Broker Activity[/bold yellow]', style='yellow')
+    console.print()
+    broker_score = 50
+    try:
+        # Top holders from broker_holdings
+        holders = conn.execute(
+            'SELECT broker_id, hold_vol, avg_buy FROM broker_holdings '
+            'WHERE symbol=? ORDER BY hold_vol DESC LIMIT 5',
+            (symbol,)
+        ).fetchall()
+        if holders:
+            console.print('  [bold]Top Holders:[/bold]')
+            for h in holders:
+                console.print(f'    Broker {h[0]} — holds {h[1]:,.0f} shares (avg buy Rs {h[2]:,.1f})')
+            console.print()
+
+        # Recent broker activity trend
+        dates = conn.execute(
+            'SELECT DISTINCT date FROM broker_activity WHERE symbol=? '
+            'AND broker_id GLOB "[0-9]*" ORDER BY date DESC LIMIT 5',
+            (symbol,)
+        ).fetchall()
+        dates = [d[0] for d in dates]
+
+        buy_days = 0
+        sell_days = 0
+        for d in dates:
+            net = conn.execute(
+                'SELECT SUM(net_val) FROM broker_activity WHERE symbol=? AND date=? AND broker_id GLOB "[0-9]*"',
+                (symbol, d)
+            ).fetchone()[0] or 0
+            if net > 0: buy_days += 1
+            else: sell_days += 1
+
+        bd_col = 'green' if buy_days > sell_days else 'red'
+        console.print(f'  Last {len(dates)} days: [{bd_col}]{buy_days} buy days, {sell_days} sell days[/{bd_col}]')
+
+        # Net buyers from DB
+        _all = conn.execute(
+            'SELECT broker_id, SUM(CASE WHEN net_val>0 THEN net_val ELSE 0 END) as tb, '
+            'SUM(CASE WHEN net_val<0 THEN ABS(net_val) ELSE 0 END) as ts '
+            'FROM broker_activity WHERE broker_id GLOB "[0-9]*" GROUP BY broker_id',
+        ).fetchall()
+        _net_buyers = set(str(r[0]) for r in sorted(_all, key=lambda x: x[1]-x[2], reverse=True)[:8] if r[1] > r[2])
+
+        # Check if known net buyers active in this stock
+        recent = conn.execute(
+            'SELECT broker_id, SUM(net_val) as nv FROM broker_activity '
+            'WHERE symbol=? AND broker_id GLOB "[0-9]*" '
+            'AND date IN ({}) GROUP BY broker_id'.format(','.join(['?']*len(dates))),
+            [symbol] + dates
+        ).fetchall()
+
+        active_buyers = [str(r[0]) for r in recent if str(r[0]) in _net_buyers and r[1] > 0]
+        if active_buyers:
+            console.print(f'  [green]Known NET BUYERS active: Broker {", ".join(active_buyers)} — STRONG signal[/green]')
+            broker_score += 30
+        else:
+            console.print('  [dim]No known market-wide net buyers active recently[/dim]')
+
+        if buy_days > sell_days: broker_score += 20
+        else: broker_score -= 20
+
+        broker_score = max(0, min(100, broker_score))
+        b_verdict = 'ACCUMULATING' if broker_score >= 65 else 'NEUTRAL' if broker_score >= 40 else 'DISTRIBUTING'
+        b_col = 'green' if broker_score >= 65 else 'yellow' if broker_score >= 40 else 'red'
+        console.print()
+        console.print(f'  Broker Score: [{b_col}]{broker_score}/100 — {b_verdict}[/{b_col}]')
+        section_verdicts.append(('Broker Activity', broker_score, b_verdict, b_col))
+        total_score += broker_score
+        max_score += 100
+    except Exception as e:
+        console.print(f'  Error: {e}', style='red')
+        max_score += 100
+
+    # ─────────────────────────────────────────
+    # SECTION 4 — TECHNICAL / MOMENTUM
+    # ─────────────────────────────────────────
+    console.print()
+    console.rule('[bold yellow]Section 4 — Technical / Momentum[/bold yellow]', style='yellow')
+    console.print()
+    tech_score = 50
+    try:
+        # Momentum from broker_activity (17f style)
+        all_dates = conn.execute(
+            'SELECT DISTINCT date FROM broker_activity WHERE symbol=? '
+            'AND broker_id GLOB "[0-9]*" ORDER BY date DESC LIMIT 7',
+            (symbol,)
+        ).fetchall()
+        all_dates = [d[0] for d in all_dates]
+
+        consec = 0
+        for d in all_dates:
+            row = conn.execute(
+                'SELECT SUM(net_val), COUNT(CASE WHEN net_val>0 THEN 1 END), COUNT(*) '
+                'FROM broker_activity WHERE symbol=? AND date=? AND broker_id GLOB "[0-9]*"',
+                (symbol, d)
+            ).fetchone()
+            if row and row[0] and row[0] > 0:
+                consec += 1
+            else:
+                break
+
+        consec_col = 'green' if consec >= 3 else 'yellow' if consec >= 1 else 'red'
+        console.print(f'  Consecutive buy days: [{consec_col}]{consec}[/{consec_col}]')
+        if consec >= 4: tech_score += 30
+        elif consec >= 2: tech_score += 15
+        elif consec == 0: tech_score -= 20
+
+        # Support/Resistance from floorsheet
+        sr_rows = conn.execute(
+            'SELECT buy_qty, sell_qty, buy_val, sell_val FROM broker_activity '
+            'WHERE symbol=? AND broker_id GLOB "[0-9]*" ORDER BY date DESC LIMIT 1',
+            (symbol,)
+        ).fetchone()
+
+        if sr_rows:
+            bq, sq, bv, sv = sr_rows
+            total_q = (bq or 0) + (sq or 0)
+            if total_q > 0:
+                buy_pct = (bq or 0) / total_q * 100
+                bp_col = 'green' if buy_pct > 60 else 'yellow' if buy_pct > 40 else 'red'
+                console.print(f'  Latest session buy ratio: [{bp_col}]{buy_pct:.0f}% buying[/{bp_col}]')
+                if buy_pct > 65: tech_score += 15
+                elif buy_pct < 35: tech_score -= 15
+
+        tech_score = max(0, min(100, tech_score))
+        t_verdict = 'BULLISH' if tech_score >= 65 else 'NEUTRAL' if tech_score >= 40 else 'BEARISH'
+        t_col = 'green' if tech_score >= 65 else 'yellow' if tech_score >= 40 else 'red'
+        console.print()
+        console.print(f'  Technical Score: [{t_col}]{tech_score}/100 — {t_verdict}[/{t_col}]')
+        section_verdicts.append(('Technical', tech_score, t_verdict, t_col))
+        total_score += tech_score
+        max_score += 100
+    except Exception as e:
+        console.print(f'  Error: {e}', style='red')
+        max_score += 100
+
+    conn.close()
+
+    # ─────────────────────────────────────────
+    # FINAL VERDICT
+    # ─────────────────────────────────────────
+    console.print()
+    console.rule('[bold cyan]Final Verdict[/bold cyan]', style='cyan')
+    console.print()
+
+    # Summary table
+    t = Table(show_header=True, header_style='bold cyan', box=None, padding=(0,2))
+    t.add_column('Section', width=20)
+    t.add_column('Score', width=10, justify='right')
+    t.add_column('Verdict', width=20)
+    for name, score, verdict, col in section_verdicts:
+        t.add_row(name, f'[{col}]{score}/100[/{col}]', f'[{col}]{verdict}[/{col}]')
+    console.print(t)
+    console.print()
+
+    final_pct = (total_score / max_score * 100) if max_score > 0 else 0
+    if final_pct >= 70:
+        final_verdict = '[bold green]STRONG BUY — All signals aligned. Good entry opportunity.[/bold green]'
+    elif final_pct >= 57:
+        final_verdict = '[bold green]BUY / ACCUMULATE — Most signals positive. Consider entering.[/bold green]'
+    elif final_pct >= 45:
+        final_verdict = '[bold yellow]HOLD / WATCH — Mixed signals. Wait for more confirmation.[/bold yellow]'
+    elif final_pct >= 35:
+        final_verdict = '[bold yellow]CAUTION — More negatives than positives. Avoid new entry.[/bold yellow]'
+    else:
+        final_verdict = '[bold red]AVOID / SELL — Weak fundamentals, distribution, bearish trend.[/bold red]'
+
+    console.print(f'  Overall Score: [bold]{total_score}/{max_score} ({final_pct:.0f}%)[/bold]')
+    console.print()
+    console.print(f'  {final_verdict}')
+    console.print()
+    console.print('  [dim]Research only. Not financial advice. Paper trade first.[/dim]')
+    console.print()
+
 
 def main():
     args = parse_args()

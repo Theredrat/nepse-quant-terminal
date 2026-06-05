@@ -93,7 +93,10 @@ echo   --- REPORTS ---
 echo   19. Full Scan + Save Report
 echo   20. Power Sell + Save Report
 echo.
-echo   --- HELP ---
+echo   --- FULL ANALYSIS ---
+  echo   35. Full Stock Report  (one-stop buy/sell decision)
+  echo.
+  echo   --- HELP ---
 echo   21. Signal Legend / Help
   echo   21b. Buy/Sell Decision Guide
 echo   0.  Exit
@@ -129,6 +132,7 @@ if "%choice%"=="19" python nepse_scanner.py --report & goto AGAIN
 if "%choice%"=="20" python nepse_scanner.py --powersell --report & goto AGAIN
 if "%choice%"=="21" python nepse_scanner.py --legend & goto AGAIN
 if "%choice%"=="21b" python nepse_scanner.py --guide & goto AGAIN
+if "%choice%"=="35" goto FULL_REPORT
 if "%choice%"=="22" start python nepse_alerts.py & goto AGAIN
 if "%choice%"=="23" python nepse_scanner.py --corr & goto AGAIN
 if "%choice%"=="24" python nepse_scanner.py --portfolio & goto AGAIN
@@ -276,8 +280,14 @@ echo Running smart quarterly scraper...
 python backend\quant_pro\smart_scraper.py
 goto AGAIN
 
+:FULL_REPORT
+set /p symbol=  Enter stock symbol (e.g. NABIL):
+python nepse_scanner.py --full-report %symbol%
+goto AGAIN
+
 :AGAIN
 echo.
 echo  ============================================
 pause
 goto MENU
+
