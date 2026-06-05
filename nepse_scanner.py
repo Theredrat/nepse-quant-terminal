@@ -2830,6 +2830,9 @@ def main():
     elif getattr(args, "buy_sell_guide", False):
         print_buy_sell_guide()
         return
+    elif getattr(args, 'full_report', None):
+        analyze_full_stock_report(args.full_report)
+        return
     if getattr(args, "unlock", None) and args.unlock[0].lower() in ("add","delete","list","upcoming"):
         _unlock_db()
         analyze_unlock(args.unlock)
