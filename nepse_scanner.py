@@ -2757,21 +2757,23 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
         elif consec == 0: tech_score -= 20
 
         # Support/Resistance from floorsheet
-        sr_rows = conn.execute(
-            'SELECT buy_qty, sell_qty, buy_val, sell_val FROM broker_activity '
-            'WHERE symbol=? AND broker_id GLOB "[0-9]*" ORDER BY date DESC LIMIT 1',
-            (symbol,)
-        ).fetchone()
-
-        if sr_rows:
-            bq, sq, bv, sv = sr_rows
-            total_q = (bq or 0) + (sq or 0)
-            if total_q > 0:
-                buy_pct = (bq or 0) / total_q * 100
-                bp_col = 'green' if buy_pct > 60 else 'yellow' if buy_pct > 40 else 'red'
-                console.print(f'  Latest session buy ratio: [{bp_col}]{buy_pct:.0f}% buying[/{bp_col}]')
-                if buy_pct > 65: tech_score += 15
-                elif buy_pct < 35: tech_score -= 15
+        if all_dates:
+            latest_date = all_dates[0]
+            sr_rows = conn.execute(
+                'SELECT SUM(buy_qty), SUM(sell_qty) FROM broker_activity '
+                'WHERE symbol=? AND date=? AND broker_id GLOB "[0-9]*"',
+                (symbol, latest_date)
+            ).fetchone()
+            if sr_rows and sr_rows[0]:
+                bq = sr_rows[0] or 0
+                sq = sr_rows[1] or 0
+                total_q = bq + sq
+                if total_q > 0:
+                    buy_pct = bq / total_q * 100
+                    bp_col = 'green' if buy_pct > 60 else 'yellow' if buy_pct > 40 else 'red'
+                    console.print(f'  Latest session buy ratio: [{bp_col}]{buy_pct:.0f}% buying ({latest_date})[/{bp_col}]')
+                    if buy_pct > 65: tech_score += 15
+                    elif buy_pct < 35: tech_score -= 15
 
         tech_score = max(0, min(100, tech_score))
         t_verdict = 'BULLISH' if tech_score >= 65 else 'NEUTRAL' if tech_score >= 40 else 'BEARISH'
