@@ -5037,7 +5037,21 @@ def analyze_broker_date(symbol=None, date_str=None, db_path='nepse_market_data.d
     # Smart Money Analysis
     console.print()
     console.rule('[bold cyan]Smart Money Analysis[/bold cyan]')
-    lw = {'34':'Vision Sec','41':'Linch Stock','52':'Sundhara Sec','58':'Naasa Sec'}
+    # Detect top brokers for THIS specific stock from DB history
+    try:
+        import sqlite3 as _sq2
+        _conn2 = _sq2.connect(db_path)
+        _top = _conn2.execute('''
+            SELECT broker_id, SUM(buy_val) as tb, SUM(sell_val) as ts
+            FROM broker_activity WHERE symbol=?
+            AND broker_id GLOB '[0-9]*'
+            GROUP BY broker_id
+            ORDER BY (tb + ts) DESC LIMIT 10
+        ''', (sym,)).fetchall()
+        _conn2.close()
+        lw = {str(r[0]): f'Broker {r[0]}' for r in _top}
+    except Exception:
+        lw = {}
     smb = [r for r in rows if r[6] > 0]
     sms = [r for r in rows if r[6] < 0]
     smtb = max(smb, key=lambda x: x[6]) if smb else None
