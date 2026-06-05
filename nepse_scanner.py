@@ -2668,19 +2668,39 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
 
         buy_days = 0
         sell_days = 0
+        dominant_buy_days = 0
+        dominant_sell_days = 0
         for d in dates:
-            row = conn.execute(
-                'SELECT SUM(CASE WHEN net_val>0 THEN net_val ELSE 0 END), SUM(CASE WHEN net_val<0 THEN ABS(net_val) ELSE 0 END) '
+            # Broker count
+            counts = conn.execute(
+                'SELECT COUNT(CASE WHEN net_val>0 THEN 1 END), COUNT(CASE WHEN net_val<0 THEN 1 END) '
                 'FROM broker_activity WHERE symbol=? AND date=? AND broker_id GLOB "[0-9]*"',
                 (symbol, d)
             ).fetchone()
-            total_buy = row[0] or 0
-            total_sell = row[1] or 0
-            if total_buy > total_sell: buy_days += 1
+            nb = counts[0] or 0
+            ns = counts[1] or 0
+            if nb > ns: buy_days += 1
             else: sell_days += 1
 
+            # Dominant flow - biggest single player
+            dom = conn.execute(
+                'SELECT net_val FROM broker_activity WHERE symbol=? AND date=? '
+                'AND broker_id GLOB "[0-9]*" ORDER BY ABS(net_val) DESC LIMIT 1',
+                (symbol, d)
+            ).fetchone()
+            if dom and dom[0] and dom[0] > 0: dominant_buy_days += 1
+            else: dominant_sell_days += 1
+
         bd_col = 'green' if buy_days > sell_days else 'red'
-        console.print(f'  Last {len(dates)} days: [{bd_col}]{buy_days} buy days, {sell_days} sell days[/{bd_col}]')
+        console.print(f'  Broker count ({len(dates)} days): [{bd_col}]{buy_days} buy days, {sell_days} sell days[/{bd_col}]')
+        dom_col = 'green' if dominant_buy_days > dominant_sell_days else 'red'
+        console.print(f'  Dominant flow ({len(dates)} days): [{dom_col}]{dominant_buy_days} dominant buyer days, {dominant_sell_days} dominant seller days[/{dom_col}]')
+
+        # Score uses both
+        if buy_days > sell_days: broker_score += 15
+        else: broker_score -= 15
+        if dominant_buy_days > dominant_sell_days: broker_score += 10
+        else: broker_score -= 10
 
         # Net buyers from DB
         _all = conn.execute(
