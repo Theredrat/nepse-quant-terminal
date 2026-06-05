@@ -4793,14 +4793,14 @@ def analyze_broker_impact(days=30, top_n=20, db_path="nepse_market_data.db"):
         console.print(t)
         console.print()
         console.print("[bold]Top 5 Institutional Buyers:[/bold]")
-        buyers = [r for r in scored if r[10] == "BUYER"][:5]
+        buyers = [r for r in scored if r[9] == "BUYER"][:5]
         for r in buyers:
-            console.print(f"  [green]Broker {r[0]} ({r[1][:25]}) - avg {_fmt_rs_val(r[8])} per trade, {r[2]} stocks[/green]")
+            console.print(f"  [green]Broker {r[0]} - avg {_fmt_rs_val(r[7])} per trade, {r[1]} stocks, bias: {r[9]}[/green]")
         console.print()
         console.print("[bold]Top 5 Institutional Sellers:[/bold]")
-        sellers = [r for r in scored if r[10] == "SELLER"][:5]
+        sellers = [r for r in scored if r[9] == "SELLER"][:5]
         for r in sellers:
-            console.print(f"  [red]Broker {r[0]} ({r[1][:25]}) - avg {_fmt_rs_val(r[8])} per trade, {r[2]} stocks[/red]")
+            console.print(f"  [red]Broker {r[0]} - avg {_fmt_rs_val(r[7])} per trade, {r[1]} stocks, bias: {r[9]}[/red]")
         console.print()
     except Exception as e:
         console.print(f"  Error: {e}", style="red")
