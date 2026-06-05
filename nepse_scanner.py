@@ -2525,31 +2525,35 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
             if len(quarters) >= 2:
                 eps_curr = quarters[0][2]
                 eps_prev = quarters[1][2]
+                q_label = f'FY{quarters[0][0]} Q{quarters[0][1]}'
+                q_prev_label = f'FY{quarters[1][0]} Q{quarters[1][1]}'
                 if eps_curr and eps_prev:
                     eps_chg = ((eps_curr - eps_prev) / abs(eps_prev)) * 100
                     eps_col = 'green' if eps_chg > 0 else 'red'
                     eps_arrow = '+' if eps_chg > 0 else ''
-                    console.print(f'  EPS: [{eps_col}]Rs {eps_curr:.2f} ({eps_arrow}{eps_chg:.1f}% vs last quarter)[/{eps_col}]')
+                    console.print(f'  EPS: [{eps_col}]Rs {eps_curr:.2f} ({eps_arrow}{eps_chg:.1f}% vs {q_prev_label})[/{eps_col}] [dim]({q_label})[/dim]')
                     if eps_chg > 10: fund_score += 25
                     elif eps_chg > 0: fund_score += 15
                     else: fund_score -= 10
                 else:
-                    console.print(f'  EPS: Rs {eps:.2f}' if eps else '  EPS: N/A')
+                    console.print(f'  EPS: Rs {eps_curr:.2f} [dim]({q_label})[/dim]' if eps_curr else f'  EPS: Rs {eps:.2f} [dim](latest)[/dim]' if eps else '  EPS: N/A')
             elif eps:
-                console.print(f'  EPS: Rs {eps:.2f}')
+                console.print(f'  EPS: Rs {eps:.2f} [dim](latest available)[/dim]')
                 if eps > 0: fund_score += 10
 
             # Book Value trend
             if len(quarters) >= 2 and quarters[0][3] and quarters[1][3]:
                 bv_curr = quarters[0][3]
                 bv_prev = quarters[1][3]
+                q_label = f'FY{quarters[0][0]} Q{quarters[0][1]}'
+                q_prev_label = f'FY{quarters[1][0]} Q{quarters[1][1]}'
                 bv_chg = ((bv_curr - bv_prev) / abs(bv_prev)) * 100
                 bv_col = 'green' if bv_chg > 0 else 'red'
                 bv_arrow = '+' if bv_chg > 0 else ''
-                console.print(f'  Book Value: [{bv_col}]Rs {bv_curr:.2f} ({bv_arrow}{bv_chg:.1f}% vs last quarter)[/{bv_col}]')
+                console.print(f'  Book Value: [{bv_col}]Rs {bv_curr:.2f} ({bv_arrow}{bv_chg:.1f}% vs {q_prev_label})[/{bv_col}] [dim]({q_label})[/dim]')
                 if bv_chg > 0: fund_score += 15
             elif bv:
-                console.print(f'  Book Value: Rs {bv:.2f}')
+                console.print(f'  Book Value: Rs {bv:.2f} [dim](latest available)[/dim]')
                 if bv > 0: fund_score += 10
 
             # PE and ROE
@@ -2862,9 +2866,23 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
     else:
         final_verdict = '[bold red]AVOID / SELL — Weak fundamentals, distribution, bearish trend.[/bold red]'
 
+    # Trading vs Investing label
+    if fund_s >= 60 and broker_s >= 60:
+        trade_label = '[bold green]INVESTOR + TRADER stock — Strong fundamentals AND momentum[/bold green]'
+    elif fund_s >= 60 and broker_s < 60:
+        trade_label = '[bold cyan]INVESTOR stock — Good fundamentals but weak momentum. Long term hold.[/bold cyan]'
+    elif fund_s < 40 and broker_s >= 70:
+        trade_label = '[bold yellow]TRADER stock only — Weak fundamentals but strong momentum. Short term trade, set stop loss.[/bold yellow]'
+    elif fund_s < 40 and tech_s >= 60:
+        trade_label = '[bold yellow]SPECULATIVE TRADE — Price momentum only. High risk, tight stop loss required.[/bold yellow]'
+    else:
+        trade_label = '[dim]NEUTRAL — No strong edge for trading or investing right now.[/dim]'
+
     console.print(f'  Overall Score: [bold]{total_score}/{max_score} ({final_pct:.0f}%)[/bold]')
     console.print()
     console.print(f'  {final_verdict}')
+    console.print()
+    console.print(f'  {trade_label}')
     console.print()
     console.print('  [dim]Research only. Not financial advice. Paper trade first.[/dim]')
     console.print()
