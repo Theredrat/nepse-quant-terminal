@@ -2647,16 +2647,31 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
     broker_score = 50
     try:
         # Top holders from broker_holdings
+        # Calculate estimated current holders from broker_activity (dynamic, updates daily)
         holders = conn.execute(
-            'SELECT broker_id, hold_vol, avg_buy, imported_date FROM broker_holdings '
-            'WHERE symbol=? ORDER BY hold_vol DESC LIMIT 5',
+            '''SELECT broker_id,
+                SUM(buy_qty) as total_bought,
+                SUM(sell_qty) as total_sold,
+                SUM(buy_qty) - SUM(sell_qty) as net_held,
+                CASE WHEN SUM(buy_qty)>0 THEN SUM(buy_val)/SUM(buy_qty) ELSE 0 END as avg_buy
+            FROM broker_activity
+            WHERE symbol=? AND broker_id GLOB "[0-9]*"
+            GROUP BY broker_id
+            HAVING net_held > 0
+            ORDER BY net_held DESC LIMIT 5''',
             (symbol,)
         ).fetchall()
+        latest_date = conn.execute(
+            'SELECT MAX(date) FROM broker_activity WHERE symbol=? AND broker_id GLOB "[0-9]*"',
+            (symbol,)
+        ).fetchone()[0] or 'unknown'
         if holders:
-            data_date = holders[0][3] if holders[0][3] else 'unknown'
-            console.print(f'  [bold]Top Holders:[/bold] [dim](data as of {data_date})[/dim]')
+            console.print(f'  [bold]Top Estimated Holders:[/bold] [dim](calculated from all activity up to {latest_date})[/dim]')
             for h in holders:
-                console.print(f'    Broker {h[0]} — holds {h[1]:,.0f} shares (avg buy Rs {h[2]:,.1f})')
+                console.print(f'    Broker {h[0]} — est. holds {h[3]:,.0f} shares (avg buy Rs {h[4]:,.1f}, bought {h[1]:,.0f} sold {h[2]:,.0f})')
+            console.print()
+        else:
+            console.print(f'  [dim]No holder data available from broker activity[/dim]')
             console.print()
 
         # Recent broker activity trend
