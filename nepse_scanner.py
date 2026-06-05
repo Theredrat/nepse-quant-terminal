@@ -2244,7 +2244,7 @@ def analyze_corr():
         for v, p in pairs_green[:5]:
             console.print(f"     {p}  ({v:.2f})")
     else:
-        console.print("  [yellow]âš ï¸  No green pairs in NEPSE â€” all sectors are correlated[/yellow]")
+        console.print("  [yellow]⚠ï¸  No green pairs in NEPSE â€” all sectors are correlated[/yellow]")
         console.print("  [yellow]   Best available pairs (lowest correlation):[/yellow]")
         for v, p in pairs_yellow[:5]:
             console.print(f"     [green]{p}  ({v:.2f})[/green]")
@@ -2692,10 +2692,10 @@ def analyze_relative_strength():
         return f"[{color}]{sign}{v:.2f}%[/]"
 
     def _star(rs5):
-        if rs5 >= 5:   return "[bold green]â˜…â˜…â˜… Strong[/]"
-        if rs5 >= 2:   return "[green]â˜…â˜…  Leading[/]"
-        if rs5 >= 0.5: return "[cyan]â˜…   Outperform[/]"
-        if rs5 >= -1:  return "[dim]â€“   Inline[/]"
+        if rs5 >= 5:   return "[bold green]★★★ Strong[/]"
+        if rs5 >= 2:   return "[green]★★  Leading[/]"
+        if rs5 >= 0.5: return "[cyan]★   Outperform[/]"
+        if rs5 >= -1:  return "[dim]—   Inline[/]"
         return "[red]â–¼   Lagging[/]"
 
     tbl = Table(
@@ -2905,9 +2905,9 @@ def analyze_broker_rs():
     accum = rdf[rdf["net_qty"] > 0].sort_values("net_qty", ascending=False).head(20)
 
     def _rs_star(rs5):
-        if rs5 >= 5:  return "[bold green]â˜…â˜…â˜…[/]"
-        if rs5 >= 2:  return "[green]â˜…â˜… [/]"
-        return "[cyan]â˜…  [/]"
+        if rs5 >= 5:  return "[bold green]★★★[/]"
+        if rs5 >= 2:  return "[green]★★ [/]"
+        return "[cyan]★  [/]"
 
     tbl = Table(
         title="Top Broker Accumulators in High-RS Stocks",
@@ -2987,7 +2987,7 @@ def analyze_broker_rs():
         if s not in traded_syms or rdf[(rdf["symbol"]==s) & (rdf["net_qty"]>0)].empty
     ]
     if not_accumulated:
-        console.print(f"  [yellow]âš  RS leaders with NO net broker buying:[/] {', '.join(sorted(not_accumulated))}")
+        console.print(f"  [yellow]⚠ RS leaders with NO net broker buying:[/] {', '.join(sorted(not_accumulated))}")
         console.print("  [dim]Price outperformance without broker confirmation â€” treat with caution[/]\n")
 
     # Summary
@@ -3055,10 +3055,10 @@ def analyze_week52(db_path="nepse_market_data.db"):
     def _signal(row):
         at_high  = row["pct_from_high"] >= -1
         rs_good  = row["rs5"] > 1
-        if at_high and rs_good:   return "[bold green]â˜…â˜…â˜… BREAKOUT[/]"
-        if at_high:               return "[green]â˜…â˜…  At High[/]"
-        if rs_good:               return "[cyan]â˜…   RS+Near High[/]"
-        return "[dim]â€“   Near High[/]"
+        if at_high and rs_good:   return "[bold green]★★★ BREAKOUT[/]"
+        if at_high:               return "[green]★★  At High[/]"
+        if rs_good:               return "[cyan]★   RS+Near High[/]"
+        return "[dim]—   Near High[/]"
 
     tbl_high = Table(
         title="Near 52-Week High â€” Breakout Watch",
@@ -3171,7 +3171,7 @@ def analyze_week52(db_path="nepse_market_data.db"):
     ].sort_values(["pct_from_high", "rs5"], ascending=[False, False])
 
     if not conviction.empty:
-        console.print("\n  [bold green]â˜…â˜…â˜… Highest conviction setups (Near 52W High + Strong RS):[/]")
+        console.print("\n  [bold green]★★★ Highest conviction setups (Near 52W High + Strong RS):[/]")
         for _, row in conviction.head(5).iterrows():
             console.print(
                 f"    [cyan]{row['symbol']}[/] ({row['sector']}) â€” "
@@ -3685,7 +3685,7 @@ def analyze_value(filter_sector=None):
         scored = [x for x in all_scores if x['sector'] == sec and x['score'] > 0]
         if scored:
             top = max(scored, key=lambda x: x['score'])
-            stars = 'â˜…â˜…â˜…' if top['score'] >= 65 else 'â˜…â˜…' if top['score'] >= 45 else 'â˜…'
+            stars = '★★★' if top['score'] >= 65 else '★★' if top['score'] >= 45 else '★'
             sc_col = 'bold green' if top['score'] >= 65 else 'green' if top['score'] >= 45 else 'yellow'
             pb_str = f'PB {top["pb"]:.2f}x' if top['pb'] else ''
             roe_str = f'ROE {top["roe"]:.1f}%' if top['roe'] else ''
@@ -3697,7 +3697,7 @@ def analyze_value(filter_sector=None):
         top10 = sorted(all_scores, key=lambda x: x['score'], reverse=True)[:20]
         from rich.table import Table as _T
         from rich import box as _box
-        lb = _T(title='[bold yellow]â˜… Top 10 Value Picks â€” All Sectors[/]',
+        lb = _T(title='[bold yellow]★ Top 10 Value Picks â€” All Sectors[/]',
                 box=_box.SIMPLE_HEAVY, border_style='yellow', title_style='bold yellow')
         lb.add_column('#',      width=4,  justify='right')
         lb.add_column('Symbol', width=10, style='bold white', no_wrap=True)
