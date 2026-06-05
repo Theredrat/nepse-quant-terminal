@@ -2646,6 +2646,35 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
     console.print()
     broker_score = 50
     try:
+        # Show 17b - top holders
+        console.print('  [bold cyan]>> Top Broker Holders (17b):[/bold cyan]')
+        analyze_broker_holders(symbol=symbol, db_path=db_path)
+
+        # Show 17d - broker trend
+        console.print('  [bold cyan]>> Broker Trend last 7 days (17d):[/bold cyan]')
+        analyze_broker_trend(symbol=symbol, days=7, db_path=db_path)
+
+        # Show 17c - latest date activity
+        import sqlite3 as _sq
+        _c = _sq.connect(db_path)
+        _latest = _c.execute(
+            'SELECT MAX(date) FROM broker_activity WHERE symbol=? AND broker_id GLOB "[0-9]*"',
+            (symbol,)
+        ).fetchone()[0]
+        _c.close()
+        if _latest:
+            console.print(f'  [bold cyan]>> Latest Broker Activity (17c) — {_latest}:[/bold cyan]')
+            analyze_broker_date(symbol=symbol, date_str=_latest, db_path=db_path)
+
+        broker_score_done = True
+    except Exception as e:
+        console.print(f'  Error in broker section: {e}', style='red')
+        broker_score_done = False
+
+    if True:
+        broker_score_done = False  # reset to run score calc below
+    broker_score = 50
+    try:
         # Top holders from broker_holdings
         # Calculate estimated current holders from broker_activity (dynamic, updates daily)
         holders = conn.execute(
