@@ -4755,7 +4755,7 @@ def analyze_broker_impact(days=30, top_n=20, db_path="nepse_market_data.db"):
             WHERE date IN ({})
             AND broker_id GLOB '[0-9]*'
             GROUP BY broker_id
-            ORDER BY avg_trade_size DESC
+            ORDER BY (total_bought + total_sold) DESC
         """.format(",".join(["?"]*len(dates))), dates).fetchall()
         conn.close()
         if not rows:
@@ -4793,12 +4793,12 @@ def analyze_broker_impact(days=30, top_n=20, db_path="nepse_market_data.db"):
         console.print(t)
         console.print()
         console.print("[bold]Top 5 Institutional Buyers:[/bold]")
-        buyers = [r for r in scored if r[9] == "BUYER"][:5]
+        buyers = sorted([r for r in scored if r[9] == 'BUYER'], key=lambda x: x[5], reverse=True)[:5]
         for r in buyers:
             console.print(f"  [green]Broker {r[0]} - avg {_fmt_rs_val(r[7])} per trade, {r[1]} stocks, bias: {r[9]}[/green]")
         console.print()
         console.print("[bold]Top 5 Institutional Sellers:[/bold]")
-        sellers = [r for r in scored if r[9] == "SELLER"][:5]
+        sellers = sorted([r for r in scored if r[9] == 'SELLER'], key=lambda x: x[6], reverse=True)[:5]
         for r in sellers:
             console.print(f"  [red]Broker {r[0]} - avg {_fmt_rs_val(r[7])} per trade, {r[1]} stocks, bias: {r[9]}[/red]")
         console.print()
