@@ -1,7 +1,7 @@
 ﻿import os, time, logging, collections
 from datetime import datetime
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8926979126:AAFRdgGNAFDf_AouyqFOeXmc0FYC6ReE5GI")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8926979126:AAHj7R5fZfR8-lKa4lZ7xBeBn-PwemYaq8s")
 TELEGRAM_CHAT  = os.environ.get("TELEGRAM_CHAT",  "1923100963")
 RS_THRESHOLD   = 2.0
 NEAR_HIGH_PCT  = 5.0
