@@ -1,24 +1,24 @@
 ============================================================
-  NEPSE DAILY REPORT — 2026-06-05 11:27:40
+  NEPSE DAILY REPORT — 2026-06-05 13:46:11
 ============================================================
 
 WATCHLIST STATUS
 ----------------------------------------
-  NABIL      | Rs   538.00 | -0.15% | Vol: 2K
-  ADBL       | Rs   311.00 | -2.17% | Vol: 17K
-  NICA       | Rs   349.10 | -0.34% | Vol: 299
-  SBI        | Rs   396.50 | -0.60% | Vol: 6K
-  EBL        | Rs   708.00 | -0.14% | Vol: 340
-  NIFRA      | Rs   263.00 | +0.00% | Vol: 1K
-  UPPER      | Rs   203.20 | +0.10% | Vol: 2K
-  NHPC       | Rs   285.90 | -0.14% | Vol: 31K
-  RIDI       | Rs   355.00 | -0.95% | Vol: 10K
-  AKJCL      | Rs   416.80 | -1.91% | Vol: 136K
-  NLIC       | Rs   770.00 | -0.90% | Vol: 37
-  LICN       | Rs   820.00 | +0.00% | Vol: 299
-  NTC        | Rs   859.80 | +0.01% | Vol: 1K
-  CHCL       | Rs   500.00 | +0.00% | Vol: 1K
-  HIDCL      | Rs   269.50 | +1.24% | Vol: 931
+  NABIL      | Rs   535.50 | -0.61% | Vol: 24K
+  ADBL       | Rs   314.00 | -1.23% | Vol: 29K
+  NICA       | Rs   349.00 | -0.37% | Vol: 18K
+  SBI        | Rs   397.00 | -0.48% | Vol: 15K
+  EBL        | Rs   707.60 | -0.20% | Vol: 14K
+  NIFRA      | Rs   261.40 | -0.61% | Vol: 40K
+  UPPER      | Rs   204.00 | +0.49% | Vol: 32K
+  NHPC       | Rs   284.60 | -0.59% | Vol: 126K
+  RIDI       | Rs   355.10 | -0.92% | Vol: 126K
+  AKJCL      | Rs   415.00 | -2.33% | Vol: 828K
+  NLIC       | Rs   770.00 | -0.90% | Vol: 17K
+  LICN       | Rs   820.00 | +0.00% | Vol: 20K
+  NTC        | Rs   858.20 | -0.17% | Vol: 7K
+  CHCL       | Rs   496.50 | -0.70% | Vol: 20K
+  HIDCL      | Rs   266.00 | -0.08% | Vol: 23K
 
 ============================================================
 Research only. Not financial advice.
