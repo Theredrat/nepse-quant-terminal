@@ -4695,8 +4695,8 @@ def analyze_broker_trend(symbol=None, days=7, db_path="nepse_market_data.db"):
             for r2 in rows:
                 if r2[0] in whale_buyers: ss = min(100, ss + 8)
                 elif r2[0] in whale_sellers: ss = max(0, ss - 8)
-            buyer_name = f"{smb[0][0]} {smb[0][1][:18]} {_fmt_rs_val(abs(smb[0][2]))}" if smb else "—"
-            seller_name = f"{sms[0][0]} {sms[0][1][:18]} {_fmt_rs_val(abs(sms[0][2]))}" if sms else "—"
+            buyer_name = f"Broker {smb[0][0]} {_fmt_rs_val(abs(smb[0][2]))}" if smb else "—"
+            seller_name = f"Broker {sms[0][0]} {_fmt_rs_val(abs(sms[0][2]))}" if sms else "—"
             ssv = "BULL" if ss >= 70 else "BEAR" if ss <= 30 else "MIX"
             ssc = "green" if ss >= 70 else "red" if ss <= 30 else "yellow"
             net_flow = sum(r[2] for r in rows if r[2] > 0)
@@ -4720,7 +4720,6 @@ def analyze_broker_trend(symbol=None, days=7, db_path="nepse_market_data.db"):
                 console.print("  → Sentiment flat over period", style="yellow")
             avg = sum(score_history) / len(score_history)
             console.print(f"  Avg score over {len(score_history)} days: {avg:.0f}/100")
-        conn.close()
         conn.close()
         console.print()
     except Exception as e:
