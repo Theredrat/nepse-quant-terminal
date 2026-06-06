@@ -3169,7 +3169,7 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
             _valid_res = [l for l in _resistances if l > curr_p * 1.03]
             resistance = round(_valid_res[0], 1) if _valid_res else round(_resistances[0], 1) if _resistances else round(max(p[1] for p in prices_tp[:10]), 1)
             stop_loss  = round(support * 0.97, 1)
-            target     = round(resistance * 0.95, 1)
+            target     = round(resistance * 0.99, 1)  # just below resistance (1%)
 
             # Show all levels found
             console.print('  [bold]Key S/R Levels (cluster method):[/bold]')
@@ -3235,6 +3235,24 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
             else:
                 action_msg = f'[bold yellow]ACTION: WATCH -- set alert at Rs {support:,.1f} for better entry[/bold yellow]'
             console.print(f'  {action_msg}')
+
+            # Better Entry suggestion when R/R is poor
+            if rr < 1.5 and len(_supports) >= 2:
+                next_support  = round(_supports[1], 1)
+                better_stop   = round(next_support * 0.97, 1)
+                better_risk   = next_support - better_stop
+                better_reward = target - next_support
+                better_rr     = round(better_reward / better_risk, 2) if better_risk > 0 else 0
+                console.print()
+                console.print('  [bold cyan]Better Entry Zone:[/bold cyan]')
+                console.print(f'  [cyan]  Wait for price to drop to Rs {next_support:,.1f} (next support)[/cyan]')
+                console.print(f'  [cyan]  Entry:     Rs {next_support:,.1f}[/cyan]')
+                console.print(f'  [cyan]  Stop Loss: Rs {better_stop:,.1f}[/cyan]')
+                console.print(f'  [cyan]  Target:    Rs {target:,.1f}[/cyan]')
+                better_rr_col  = 'green' if better_rr >= 2 else 'yellow' if better_rr >= 1.5 else 'red'
+                better_rr_note = '(GOOD -- worth waiting for)' if better_rr >= 2 else '(MARGINAL)' if better_rr >= 1.5 else '(still poor -- skip stock)'
+                console.print(f'  [cyan]  R/R:       [{better_rr_col}]1:{better_rr} {better_rr_note}[/{better_rr_col}][/cyan]')
+                console.print(f'  [cyan]  Set price alert at Rs {next_support:,.1f}[/cyan]')
         else:
             console.print('  No price data for trade plan.', style='yellow')
     except Exception as e:
