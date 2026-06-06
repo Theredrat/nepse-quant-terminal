@@ -3626,16 +3626,20 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
         col = 'green' if avg>=2 else 'yellow' if avg>=-1 else 'red'
 
         # Character assessment
-        if avg_up > abs(avg_dn)*2:
-            char = 'Strong directional rally — up move dominates'
+        if avg_up > abs(avg_dn)*2 and avg >= 3:
+            char = f'Strong directional rally — up {avg_up:.1f}% dominates, minimal pullback'
+        elif avg_up > abs(avg_dn)*2 and avg < 3:
+            char = f'Big rally then reversal — up {avg_up:.1f}% but gains given back, volatile'
         elif abs(avg_dn) > avg_up*1.5:
-            char = 'Downside dominated — avoid dip buying'
+            char = f'Downside dominated — drops {avg_dn:.1f}% from open, bounces only {avg_up:.1f}%'
         elif avg_sw > 25:
-            char = f'High volatility quarter — {avg_sw:.0f}% swing, trade carefully'
+            char = f'Extreme volatility — {avg_sw:.0f}% total swing, both sides active'
         elif avg_sw < 12:
-            char = 'Low volatility — small moves both ways'
+            char = f'Low volatility — quiet quarter, only {avg_sw:.0f}% total range'
+        elif avg >= 2:
+            char = f'Bullish bias — up {avg_up:.1f}% vs dn {avg_dn:.1f}%, trend favors longs'
         else:
-            char = f'Mixed — up {avg_up:.1f}% / dn {avg_dn:.1f}% from open'
+            char = f'Mixed — up {avg_up:.1f}% / dn {avg_dn:.1f}% from open, no clear edge'
 
         # Action
         if avg >= 5:
@@ -3879,6 +3883,56 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
 
     console.print(nqtable)
     console.print()
+
+    # NQ insights
+    console.rule('[bold]Nepali FY Quarterly Trading Guide[/bold]')
+    console.print()
+    for nq in ['NQ1','NQ2','NQ3','NQ4']:
+        rets = [r for _,r in by_nq[nq]]
+        if not rets: continue
+        avg  = sum(rets)/len(rets)
+        wins = sum(1 for r in rets if r>0)
+        rng  = by_nq_range[nq]
+        avg_up = round(sum(r[2] for r in rng)/len(rng),1) if rng else 0
+        avg_dn = round(sum(r[3] for r in rng)/len(rng),1) if rng else 0
+        avg_sw = round(sum(r[1] for r in rng)/len(rng),1) if rng else 0
+        marker = ' <-- NOW' if nq==curr_nq else (' <- NEXT' if nq==next_nq else '')
+        col = 'green' if avg>=2 else 'yellow' if avg>=-1 else 'red'
+        label = nq_labels[nq]
+
+        if avg_up > abs(avg_dn)*2 and avg >= 3:
+            char = f'Strong directional rally — up {avg_up:.1f}% dominates, minimal pullback'
+        elif avg_up > abs(avg_dn)*2 and avg < 3:
+            char = f'Big rally then reversal — up {avg_up:.1f}% but gains given back, volatile'
+        elif abs(avg_dn) > avg_up*1.5:
+            char = f'Downside dominated — drops {avg_dn:.1f}% from open, bounces only {avg_up:.1f}%'
+        elif avg_sw > 25:
+            char = f'Extreme volatility — {avg_sw:.0f}% total swing, both sides active'
+        elif avg_sw < 12:
+            char = f'Low volatility — quiet quarter, only {avg_sw:.0f}% total range'
+        elif avg >= 2:
+            char = f'Bullish bias — up {avg_up:.1f}% vs dn {avg_dn:.1f}%, trend favors longs'
+        else:
+            char = f'Mixed — up {avg_up:.1f}% / dn {avg_dn:.1f}% from open, no clear edge'
+
+        if avg >= 5:
+            action = f'Deploy capital — strong seasonal tailwind. Rally avg +{avg_up:.1f}% from open.'
+        elif avg >= 2:
+            action = f'Lean bullish. Dip only {avg_dn:.1f}% before rallying {avg_up:.1f}% — tight stops work.'
+        elif avg >= -1:
+            if avg_up > abs(avg_dn):
+                action = f'Neutral but upside bias (+{avg_up:.1f}% up vs -{avg_dn:.1f}% dn) — selective entries only.'
+            else:
+                action = f'Neutral with downside risk (-{avg_dn:.1f}% dn vs +{avg_up:.1f}% up) — reduce size.'
+        elif avg >= -4:
+            action = f'Avoid new longs. Drops -{avg_dn:.1f}% from open, only recovers +{avg_up:.1f}%.'
+        else:
+            action = f'Stay in cash. Heavy selling quarter — down {avg_dn:.1f}% with {avg_sw:.0f}% total swing.'
+
+        console.print(f'  [{col}][bold]{nq} ({label}){marker}[/bold]  avg={avg:+.1f}%  ({wins}/{len(rets)} up)  swing={avg_sw:.1f}%[/{col}]')
+        console.print(f'    Character : {char}')
+        console.print(f'    Action    : [{col}]{action}[/{col}]')
+        console.print()
 
     # Current NQ advice
     curr_rets = [r for _,r in by_nq[curr_nq]]
