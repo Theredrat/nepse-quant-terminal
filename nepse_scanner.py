@@ -3575,6 +3575,83 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
         console.print(f'  Full years: {up_yrs}/{len(all_yr_rets)-1} up  |  avg annual return: {avg_yr:+.1f}%')
         console.print()
 
+    # === NEPALI FISCAL YEAR QUARTERLY SEASONALITY ===
+    console.rule('[bold]Nepali Fiscal Year Quarterly Seasonality[/bold]')
+    console.print()
+
+    def _nepali_q(month):
+        if month in (7,8,9):    return 'NQ1'
+        if month in (10,11,12): return 'NQ2'
+        if month in (1,2,3):    return 'NQ3'
+        return 'NQ4'
+
+    def _fiscal_year(date):
+        y, m = int(date[:4]), int(date[5:7])
+        return y if m >= 7 else y - 1
+
+    nq_data = defaultdict(list)
+    for d, c in nepse:
+        m = int(d[5:7])
+        key = f'{_fiscal_year(d)}-{_nepali_q(m)}'
+        nq_data[key].append(c)
+
+    by_nq = defaultdict(list)
+    for k in sorted(nq_data.keys()):
+        closes = nq_data[k]
+        if len(closes) >= 10:
+            ret = (closes[-1]-closes[0])/closes[0]*100
+            nq = k.split('-')[1]
+            fy = k.split('-')[0]
+            by_nq[nq].append((fy, ret))
+
+    curr_nq = _nepali_q(today.month)
+    next_nq = {'NQ1':'NQ2','NQ2':'NQ3','NQ3':'NQ4','NQ4':'NQ1'}[curr_nq]
+    nq_labels = {'NQ1':'Jul-Sep','NQ2':'Oct-Dec','NQ3':'Jan-Mar','NQ4':'Apr-Jun'}
+
+    nqtable = Table(show_header=True, header_style='bold cyan', box=None, padding=(0,1))
+    nqtable.add_column('Quarter',  width=14)
+    nqtable.add_column('Avg Ret',  justify='right', width=8)
+    nqtable.add_column('Up/Total', justify='center', width=9)
+    nqtable.add_column('Best',     justify='right', width=8)
+    nqtable.add_column('Worst',    justify='right', width=8)
+    nqtable.add_column('Signal',   width=12)
+    nqtable.add_column('History',  width=35)
+
+    for nq in ['NQ1','NQ2','NQ3','NQ4']:
+        rets = [r for _,r in by_nq[nq]]
+        if not rets: continue
+        avg   = sum(rets)/len(rets)
+        wins  = sum(1 for r in rets if r>0)
+        best  = max(rets)
+        worst = min(rets)
+        col   = 'green' if avg>=3 else 'yellow' if avg>=0 else 'red'
+        verdict = 'STRONG BUY' if avg>=8 else 'BUY' if avg>=3 else 'NEUTRAL' if avg>=-1 else 'AVOID' if avg>=-4 else 'STRONG AVOID'
+        marker = ' <-- NOW' if nq==curr_nq else (' <- NEXT' if nq==next_nq else '')
+        yr_detail = '  '.join(f'{fy}:{r:+.0f}%' for fy,r in sorted(by_nq[nq]))
+        nqtable.add_row(
+            f'[bold]{nq} ({nq_labels[nq]}){marker}[/bold]',
+            f'[{col}]{avg:+.1f}%[/{col}]',
+            f'[{col}]{wins}/{len(rets)}[/{col}]',
+            f'[green]{best:+.1f}%[/green]',
+            f'[red]{worst:+.1f}%[/red]',
+            f'[{col}]{verdict}[/{col}]',
+            f'[dim]{yr_detail}[/dim]',
+        )
+
+    console.print(nqtable)
+    console.print()
+
+    # Current NQ advice
+    curr_rets = [r for _,r in by_nq[curr_nq]]
+    curr_avg  = sum(curr_rets)/len(curr_rets) if curr_rets else 0
+    next_rets = [r for _,r in by_nq[next_nq]]
+    next_avg  = sum(next_rets)/len(next_rets) if next_rets else 0
+    col_now  = 'green' if curr_avg>=3 else 'yellow' if curr_avg>=-1 else 'red'
+    col_next = 'green' if next_avg>=3 else 'yellow' if next_avg>=-1 else 'red'
+    console.print(f'  Now  ({curr_nq} {nq_labels[curr_nq]}): [{col_now}]avg {curr_avg:+.1f}%[/{col_now}]')
+    console.print(f'  Next ({next_nq} {nq_labels[next_nq]}): [{col_next}]avg {next_avg:+.1f}%[/{col_next}]')
+    console.print()
+
 
 def analyze_market_phase(db_path='nepse_market_data.db'):
     """Option 37 - Market Phase Detector"""
