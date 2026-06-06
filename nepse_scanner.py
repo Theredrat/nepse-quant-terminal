@@ -3610,6 +3610,53 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
     console.print(qtable)
     console.print()
 
+    # Quarterly insights
+    console.rule('[bold]Quarterly Trading Guide[/bold]')
+    console.print()
+    for q in ['Q1','Q2','Q3','Q4']:
+        rets = [r for _,r in by_q[q]]
+        if not rets: continue
+        avg  = sum(rets)/len(rets)
+        wins = sum(1 for r in rets if r>0)
+        rng  = by_q_range[q]
+        avg_up = round(sum(r[2] for r in rng)/len(rng),1) if rng else 0
+        avg_dn = round(sum(r[3] for r in rng)/len(rng),1) if rng else 0
+        avg_sw = round(sum(r[1] for r in rng)/len(rng),1) if rng else 0
+        marker = ' <-- NOW' if q==curr_q else (' <- NEXT' if q==next_q else '')
+        col = 'green' if avg>=2 else 'yellow' if avg>=-1 else 'red'
+
+        # Character assessment
+        if avg_up > abs(avg_dn)*2:
+            char = 'Strong directional rally — up move dominates'
+        elif abs(avg_dn) > avg_up*1.5:
+            char = 'Downside dominated — avoid dip buying'
+        elif avg_sw > 25:
+            char = f'High volatility quarter — {avg_sw:.0f}% swing, trade carefully'
+        elif avg_sw < 12:
+            char = 'Low volatility — small moves both ways'
+        else:
+            char = f'Mixed — up {avg_up:.1f}% / dn {avg_dn:.1f}% from open'
+
+        # Action
+        if avg >= 5:
+            action = f'Deploy capital — strong seasonal tailwind. Rally avg +{avg_up:.1f}% from open.'
+        elif avg >= 2:
+            action = f'Lean bullish. Dip only {avg_dn:.1f}% before rallying {avg_up:.1f}% — tight stops work.'
+        elif avg >= -1:
+            if avg_up > abs(avg_dn):
+                action = f'Neutral but upside bias (+{avg_up:.1f}% up vs -{avg_dn:.1f}% dn) — selective entries only.'
+            else:
+                action = f'Neutral with downside risk (-{avg_dn:.1f}% dn vs +{avg_up:.1f}% up) — reduce size.'
+        elif avg >= -4:
+            action = f'Avoid new longs. Drops -{avg_dn:.1f}% from open, only recovers +{avg_up:.1f}%.'
+        else:
+            action = f'Stay in cash. Heavy selling quarter — down {avg_dn:.1f}% with {avg_sw:.0f}% total swing.'
+
+        console.print(f'  [{col}][bold]{q}{marker}[/bold]  avg={avg:+.1f}%  ({wins}/{len(rets)} up)  swing={avg_sw:.1f}%[/{col}]')
+        console.print(f'    Character : {char}')
+        console.print(f'    Action    : [{col}]{action}[/{col}]')
+        console.print()
+
     # === YEARLY SEASONALITY ===
     console.rule('[bold]Yearly Performance[/bold]')
     console.print()
@@ -3682,6 +3729,45 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
         up_yrs = sum(1 for _,r in all_yr_rets if r>0)
         avg_yr = sum(r for _,r in all_yr_rets)/len(all_yr_rets)
         console.print(f'  Full years: {up_yrs}/{len(all_yr_rets)-1} up  |  avg annual return: {avg_yr:+.1f}%')
+        console.print()
+
+    # Yearly insights
+    console.rule('[bold]Yearly Cycle Insights[/bold]')
+    console.print()
+    yr_list = sorted(yr_range.keys())
+    for yr in yr_list:
+        sw, up, dn = yr_range[yr]
+        closes_yr = [c for _,c in sorted(yearly.get(yr,[]))]
+        if len(closes_yr) < 5: continue
+        ret = (closes_yr[-1]-closes_yr[0])/closes_yr[0]*100
+        col = 'green' if ret>0 else 'red'
+        marker = ' <-- NOW' if yr==str(today.year) else ''
+
+        if up > abs(dn)*3:
+            char = f'One-way bull — rallied +{up:.1f}% with only -{dn:.1f}% drawdown'
+        elif abs(dn) > up*2:
+            char = f'One-way bear — dropped -{dn:.1f}% with only +{up:.1f}% bounce'
+        elif sw > 50:
+            char = f'Extreme volatility — {sw:.0f}% total swing, both sides active'
+        elif sw < 20:
+            char = f'Quiet year — only {sw:.0f}% total range'
+        else:
+            char = f'Two-sided — up {up:.1f}% / dn {dn:.1f}% from year open'
+
+        if ret >= 15:
+            action = f'Strong bull year. Enter early, hold through dips (only -{dn:.1f}%).'
+        elif ret >= 5:
+            action = f'Positive year. Selective entries work — avg rally +{up:.1f}% from open.'
+        elif ret >= -2:
+            action = f'Flat year. Trading range only — no trend following.'
+        elif ret >= -15:
+            action = f'Down year. Cash preservation beats stock holding.'
+        else:
+            action = f'Crash year. Heavy losses — staying out was the right call.'
+
+        console.print(f'  [{col}][bold]{yr}{marker}[/bold]  {ret:+.1f}%  swing={sw:.1f}%[/{col}]')
+        console.print(f'    Character : {char}')
+        console.print(f'    Action    : [{col}]{action}[/{col}]')
         console.print()
 
     # === NEPALI FISCAL YEAR QUARTERLY SEASONALITY ===
