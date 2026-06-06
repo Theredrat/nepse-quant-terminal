@@ -98,6 +98,7 @@ echo   --- FULL ANALYSIS ---
   echo   36. Best R/R Scanner   (stocks with good R/R at current price)
   echo   37. Market Phase        (Accumulation / Markup / Distribution / Markdown)
   echo   38. Seasonality          (best and worst months to trade NEPSE)
+  echo   39. Nepali Seasonality     (Baisakh-based true Nepali month analysis)
   echo.
   echo   --- HELP ---
 echo   21. Signal Legend / Help
@@ -140,6 +141,7 @@ if "%choice%"=="35" goto FULL_REPORT
 if "%choice%"=="36" goto BEST_RR
 if "%choice%"=="37" goto MARKET_PHASE
 if "%choice%"=="38" goto SEASONALITY
+if "%choice%"=="39" goto NEPALI_SEASON
 if "%choice%"=="22" start python nepse_alerts.py & goto AGAIN
 if "%choice%"=="23" python nepse_scanner.py --corr & goto AGAIN
 if "%choice%"=="24" python nepse_scanner.py --portfolio & goto AGAIN
@@ -298,6 +300,10 @@ goto AGAIN
 
 :MARKET_PHASE
 python nepse_scanner.py --market-phase
+goto AGAIN
+
+:NEPALI_SEASON
+python nepse_scanner.py --nepali-season
 goto AGAIN
 
 :SEASONALITY

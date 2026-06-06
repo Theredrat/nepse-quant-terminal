@@ -1977,6 +1977,7 @@ def parse_args():
     p.add_argument('--best-rr',       action='store_true', dest='best_rr', help='Best R/R scanner')
     p.add_argument('--market-phase',   action='store_true', dest='market_phase', help='Market phase detector')
     p.add_argument('--seasonality',    action='store_true', dest='seasonality', help='Seasonality analysis')
+    p.add_argument('--nepali-season', action='store_true', dest='nepali_season', help='Nepali calendar seasonality')
     p.add_argument('--portfolio',   nargs='*', metavar='SYMBOL', help='Position sizing + correlation for a set of stocks')
     p.add_argument('--corr',        action='store_true', help='Sector correlation heatmap')
     p.add_argument('--size',        nargs=2, metavar=('SYMBOL','AMOUNT'), help='Volatility-adjusted sizing e.g. --size AKJCL 100000')
@@ -4197,6 +4198,323 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
     console.print()
 
 
+def analyze_nepali_seasonality(db_path='nepse_market_data.db'):
+    """Option 39 - Nepali Calendar Month Seasonality (Baisakh-based)"""
+    import sqlite3
+    from datetime import date, timedelta
+    from collections import defaultdict
+    from rich.console import Console
+    from rich.table import Table
+    from rich.rule import Rule
+
+    console = Console()
+
+    # === BS DATE CONVERTER ===
+    baisakh_start = {
+        2077: (2020, 4, 13), 2078: (2021, 4, 14), 2079: (2022, 4, 14),
+        2080: (2023, 4, 14), 2081: (2024, 4, 13), 2082: (2025, 4, 14),
+        2083: (2026, 4, 14),
+    }
+    bs_month_days = {
+        2077: [31,31,31,32,31,31,30,29,30,29,30,30],
+        2078: [31,31,32,31,31,31,30,29,30,29,30,30],
+        2079: [31,32,31,32,31,30,30,29,30,29,30,30],
+        2080: [31,31,31,32,31,31,30,29,30,29,30,30],
+        2081: [31,31,32,31,31,31,30,29,30,29,30,30],
+        2082: [31,32,31,32,31,30,30,29,30,29,30,30],
+        2083: [31,31,31,32,31,31,30,29,30,29,30,30],
+    }
+    bs_month_names = {
+        1:'Baisakh',2:'Jestha',3:'Ashadh',4:'Shrawan',5:'Bhadra',6:'Ashwin',
+        7:'Kartik',8:'Mangsir',9:'Poush',10:'Magh',11:'Falgun',12:'Chaitra'
+    }
+    # Nepali quarter groupings (true Nepali calendar)
+    # NQ1=Baisakh-Jestha-Ashadh, NQ2=Shrawan-Bhadra-Ashwin
+    # NQ3=Kartik-Mangsir-Poush, NQ4=Magh-Falgun-Chaitra
+    nq_map = {1:'NQ1',2:'NQ1',3:'NQ1',4:'NQ2',5:'NQ2',6:'NQ2',
+              7:'NQ3',8:'NQ3',9:'NQ3',10:'NQ4',11:'NQ4',12:'NQ4'}
+    nq_labels = {
+        'NQ1':'Baisakh-Jestha-Ashadh (Apr-Jul)',
+        'NQ2':'Shrawan-Bhadra-Ashwin (Jul-Oct)',
+        'NQ3':'Kartik-Mangsir-Poush  (Oct-Jan)',
+        'NQ4':'Magh-Falgun-Chaitra   (Jan-Apr)',
+    }
+
+    def gregorian_to_bs(greg_date):
+        for bs_yr in sorted(baisakh_start.keys(), reverse=True):
+            g = baisakh_start[bs_yr]
+            start = date(g[0], g[1], g[2])
+            if greg_date >= start:
+                days = (greg_date - start).days
+                for m_idx, mdays in enumerate(bs_month_days.get(bs_yr, [])):
+                    if days < mdays:
+                        return bs_yr, m_idx + 1
+                    days -= mdays
+                return bs_yr + 1, 1
+        return None, None
+
+    # === LOAD DATA ===
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT date, close, high, low FROM stock_prices "
+        "WHERE symbol='NEPSE' AND close>0 ORDER BY date"
+    ).fetchall()
+    conn.close()
+
+    if not rows:
+        console.print('[red]No NEPSE data found.[/red]')
+        return
+
+    today = date.today()
+    curr_bs_yr, curr_bs_m = gregorian_to_bs(today)
+
+    # === MAP EACH ROW TO BS MONTH ===
+    by_bs = defaultdict(list)   # (bs_yr, bs_m) -> [(date, close, high, low)]
+    for r in rows:
+        try:
+            d = date.fromisoformat(r['date'])
+            bs_yr, bs_m = gregorian_to_bs(d)
+            if bs_yr and bs_m:
+                by_bs[(bs_yr, bs_m)].append((r['date'], r['close'], r['high'], r['low']))
+        except:
+            pass
+
+    # === AGGREGATE BY BS MONTH NUMBER ===
+    by_m = defaultdict(list)      # bs_m -> [(bs_yr, ret)]
+    by_m_hl = defaultdict(list)   # bs_m -> [(bs_yr, swing, up, dn)]
+
+    for (bs_yr, bs_m) in sorted(by_bs.keys()):
+        entries = by_bs[(bs_yr, bs_m)]
+        if len(entries) < 5:
+            continue
+        open_c  = entries[0][1]
+        close_c = entries[-1][1]
+        high_c  = max(r[2] for r in entries)
+        low_c   = min(r[3] for r in entries if r[3] > 0)
+        ret     = (close_c - open_c) / open_c * 100
+        swing   = (high_c - low_c) / low_c * 100
+        up_move = (high_c - open_c) / open_c * 100
+        dn_move = (open_c - low_c) / open_c * 100
+        by_m[bs_m].append((bs_yr, ret))
+        by_m_hl[bs_m].append((bs_yr, swing, up_move, dn_move))
+
+    # === AGGREGATE BY NQ ===
+    by_nq = defaultdict(list)
+    by_nq_hl = defaultdict(list)
+    for bs_m in range(1, 13):
+        nq = nq_map[bs_m]
+        for yr, ret in by_m[bs_m]:
+            by_nq[nq].append((yr, ret))
+        for yr, sw, up, dn in by_m_hl[bs_m]:
+            by_nq_hl[nq].append((yr, sw, up, dn))
+
+    # === HEADER ===
+    console.rule(f'[bold cyan]Option 39 - NEPSE Nepali Calendar Seasonality[/bold cyan]')
+    console.print()
+    console.print(f'  [dim]Each month = Baisakh 1 to Baisakh last (true BS calendar boundaries)[/dim]')
+    console.print(f'  [dim]Current: BS {curr_bs_yr} {bs_month_names.get(curr_bs_m,"?")} | Data: 2078-2083[/dim]')
+    console.print()
+
+    # === MONTHLY TABLE ===
+    console.rule('[bold]Monthly Seasonality (Nepali Calendar)[/bold]')
+    console.print()
+
+    table = Table(show_header=True, header_style='bold cyan', box=None, padding=(0,1))
+    table.add_column('Month',     width=10)
+    table.add_column('Avg Ret',   justify='right', width=8)
+    table.add_column('Up/Total',  justify='center', width=9)
+    table.add_column('Best',      justify='right', width=8)
+    table.add_column('Worst',     justify='right', width=8)
+    table.add_column('Signal',    width=8)
+    table.add_column('Swing(rng)',justify='center', width=15)
+    table.add_column('Up Move',   justify='right', width=8)
+    table.add_column('Dn Move',   justify='right', width=8)
+
+    ranked = []
+    for bs_m in range(1, 13):
+        rets = by_m[bs_m]
+        if not rets:
+            continue
+        avg   = sum(r for _,r in rets) / len(rets)
+        wins  = sum(1 for _,r in rets if r > 0)
+        best  = max(r for _,r in rets)
+        worst = min(r for _,r in rets)
+        rng   = by_m_hl[bs_m]
+        avg_sw = sum(r[1] for r in rng)/len(rng) if rng else 0
+        min_sw = min(r[1] for r in rng) if rng else 0
+        max_sw = max(r[1] for r in rng) if rng else 0
+        avg_up = sum(r[2] for r in rng)/len(rng) if rng else 0
+        avg_dn = sum(r[3] for r in rng)/len(rng) if rng else 0
+        col    = 'green' if avg >= 2 else 'yellow' if avg >= 0 else 'red'
+        sig    = 'STR.BUY' if avg>=5 and wins==len(rets) else 'BUY' if avg>=2 else 'NTRL' if avg>=-1 else 'AVOID' if avg>=-3 else 'STR.AVD'
+        marker = ' <--' if bs_m == curr_bs_m else ''
+        sw_str = f'{avg_sw:.1f}%({min_sw:.0f}-{max_sw:.0f}%)'
+        table.add_row(
+            f'[bold]{bs_month_names[bs_m]}{marker}[/bold]',
+            f'[{col}]{avg:+.1f}%[/{col}]',
+            f'[{col}]{wins}/{len(rets)}[/{col}]',
+            f'[green]{best:+.1f}%[/green]',
+            f'[red]{worst:+.1f}%[/red]',
+            f'[{col}]{sig}[/{col}]',
+            f'[yellow]{sw_str}[/yellow]',
+            f'[green]+{avg_up:.1f}%[/green]',
+            f'[red]-{avg_dn:.1f}%[/red]',
+        )
+        ranked.append((avg, bs_m, avg_up, avg_dn, avg_sw, wins, len(rets)))
+
+    console.print(table)
+    console.print()
+
+    # === RANKED ===
+    console.rule('[bold]Ranked by Average Return[/bold]')
+    console.print()
+    ranked_sorted = sorted(ranked, reverse=True)
+    console.print('  [bold green]Best months to invest:[/bold green]')
+    for avg, bs_m, up, dn, sw, wins, total in ranked_sorted[:3]:
+        col = 'green' if avg >= 2 else 'yellow'
+        console.print(f'    [{col}]{bs_month_names[bs_m]}: avg {avg:+.1f}%  ({wins}/{total} up)  up={up:.1f}%  dn={dn:.1f}%[/{col}]')
+    console.print()
+    console.print('  [bold red]Worst months — stay in cash:[/bold red]')
+    for avg, bs_m, up, dn, sw, wins, total in ranked_sorted[-3:]:
+        console.print(f'    [red]{bs_month_names[bs_m]}: avg {avg:+.1f}%  ({wins}/{total} up)  up={up:.1f}%  dn={dn:.1f}%[/red]')
+    console.print()
+
+    # === WHAT TO DO THIS MONTH ===
+    console.rule(f'[bold]What To Do in {bs_month_names.get(curr_bs_m,"?")}[/bold]')
+    console.print()
+    curr_rets = by_m[curr_bs_m]
+    if curr_rets:
+        curr_avg = sum(r for _,r in curr_rets) / len(curr_rets)
+        curr_rng = by_m_hl[curr_bs_m]
+        c_up = sum(r[2] for r in curr_rng)/len(curr_rng) if curr_rng else 0
+        c_dn = sum(r[3] for r in curr_rng)/len(curr_rng) if curr_rng else 0
+        c_sw = sum(r[1] for r in curr_rng)/len(curr_rng) if curr_rng else 0
+        c_col = 'green' if curr_avg >= 2 else 'yellow' if curr_avg >= -1 else 'red'
+        if c_up > abs(c_dn)*2 and curr_avg >= 3:
+            c_char = f'Strong one-way rally — up {c_up:.1f}% with only -{c_dn:.1f}% dip'
+        elif c_up > abs(c_dn)*2 and curr_avg < 3:
+            c_char = f'Big rally then reversal — up {c_up:.1f}% but gains given back'
+        elif abs(c_dn) > c_up*1.5:
+            c_char = f'Downside dominated — drops {c_dn:.1f}% from open, bounces {c_up:.1f}%'
+        elif c_sw > 15:
+            c_char = f'High volatility — {c_sw:.1f}% swing, choppy both ways'
+        else:
+            c_char = f'Mixed — up {c_up:.1f}% / dn {c_dn:.1f}% from open'
+        console.print(f'  Character : [{c_col}]{c_char}[/{c_col}]')
+        console.print(f'  Swing     : [yellow]{c_sw:.1f}%[/yellow]  Up={c_up:.1f}%  Dn={c_dn:.1f}%')
+        console.print()
+        if curr_avg >= 5:
+            console.print(f'  [bold green]{bs_month_names[curr_bs_m]} is historically the strongest month.[/bold green]')
+            console.print('  [green]-> Deploy capital now — seasonal tailwind strong[/green]')
+        elif curr_avg >= 2:
+            console.print(f'  [bold green]{bs_month_names[curr_bs_m]} is a positive month historically.[/bold green]')
+            console.print('  [green]-> Lean bullish — seasonal tailwind[/green]')
+        elif curr_avg >= -1:
+            console.print(f'  [bold yellow]{bs_month_names[curr_bs_m]} is neutral historically.[/bold yellow]')
+            console.print('  [yellow]-> No seasonal edge — rely on option 37 market phase[/yellow]')
+        elif curr_avg >= -3:
+            console.print(f'  [bold red]{bs_month_names[curr_bs_m]} is a weak month.[/bold red]')
+            console.print('  [red]-> Reduce position sizes, tighten stops[/red]')
+        else:
+            console.print(f'  [bold red]{bs_month_names[curr_bs_m]} is historically the worst period.[/bold red]')
+            console.print('  [red]-> Stay in cash — seasonal headwind strong[/red]')
+    console.print()
+
+    # === NQ QUARTERLY TABLE ===
+    console.rule('[bold]Nepali Calendar Quarterly Seasonality[/bold]')
+    console.print()
+    curr_nq = nq_map[curr_bs_m]
+    nq_order = ['NQ1','NQ2','NQ3','NQ4']
+    curr_idx = nq_order.index(curr_nq)
+    next_nq  = nq_order[(curr_idx+1) % 4]
+
+    nqtable = Table(show_header=True, header_style='bold cyan', box=None, padding=(0,1))
+    nqtable.add_column('Quarter',        width=22)
+    nqtable.add_column('Avg Ret',        justify='right', width=8)
+    nqtable.add_column('W/T',            justify='center', width=5)
+    nqtable.add_column('Best',           justify='right', width=7)
+    nqtable.add_column('Worst',          justify='right', width=7)
+    nqtable.add_column('Signal',         width=8)
+    nqtable.add_column('Swing(rng)',     justify='center', width=14)
+    nqtable.add_column('Up',             justify='right', width=6)
+    nqtable.add_column('Dn',             justify='right', width=6)
+
+    for nq in nq_order:
+        rets = by_nq[nq]
+        if not rets: continue
+        avg   = sum(r for _,r in rets) / len(rets)
+        wins  = sum(1 for _,r in rets if r > 0)
+        best  = max(r for _,r in rets)
+        worst = min(r for _,r in rets)
+        rng   = by_nq_hl[nq]
+        avg_sw = sum(r[1] for r in rng)/len(rng) if rng else 0
+        min_sw = min(r[1] for r in rng) if rng else 0
+        max_sw = max(r[1] for r in rng) if rng else 0
+        avg_up = sum(r[2] for r in rng)/len(rng) if rng else 0
+        avg_dn = sum(r[3] for r in rng)/len(rng) if rng else 0
+        col    = 'green' if avg >= 2 else 'yellow' if avg >= -1 else 'red'
+        sig    = 'STR.BUY' if avg>=5 else 'BUY' if avg>=2 else 'NTRL' if avg>=-1 else 'AVOID' if avg>=-4 else 'STR.AVD'
+        marker = ' <-NOW' if nq==curr_nq else (' <-NXT' if nq==next_nq else '')
+        sw_str = f'{avg_sw:.1f}%({min_sw:.0f}-{max_sw:.0f}%)'
+        nqtable.add_row(
+            f'[bold]{nq}{marker}[/bold]',
+            f'[{col}]{avg:+.1f}%[/{col}]',
+            f'[{col}]{wins}/{len(rets)}[/{col}]',
+            f'[green]{best:+.1f}%[/green]',
+            f'[red]{worst:+.1f}%[/red]',
+            f'[{col}]{sig}[/{col}]',
+            f'[yellow]{sw_str}[/yellow]',
+            f'[green]+{avg_up:.1f}%[/green]',
+            f'[red]-{avg_dn:.1f}%[/red]',
+        )
+
+    console.print(nqtable)
+    console.print()
+
+    # === NQ TRADING GUIDE ===
+    console.rule('[bold]Nepali Quarter Trading Guide[/bold]')
+    console.print()
+    for nq in nq_order:
+        rets = by_nq[nq]
+        if not rets: continue
+        avg   = sum(r for _,r in rets) / len(rets)
+        wins  = sum(1 for _,r in rets if r > 0)
+        rng   = by_nq_hl[nq]
+        avg_up = round(sum(r[2] for r in rng)/len(rng),1) if rng else 0
+        avg_dn = round(sum(r[3] for r in rng)/len(rng),1) if rng else 0
+        avg_sw = round(sum(r[1] for r in rng)/len(rng),1) if rng else 0
+        marker = ' <-- NOW' if nq==curr_nq else (' <- NEXT' if nq==next_nq else '')
+        col    = 'green' if avg >= 2 else 'yellow' if avg >= -1 else 'red'
+        if avg_up > abs(avg_dn)*2 and avg >= 3:
+            char = f'Strong directional rally — up {avg_up:.1f}% dominates'
+        elif avg_up > abs(avg_dn)*2 and avg < 3:
+            char = f'Big rally then reversal — up {avg_up:.1f}% but gains given back'
+        elif abs(avg_dn) > avg_up*1.5:
+            char = f'Downside dominated — drops {avg_dn:.1f}% from open'
+        elif avg_sw > 25:
+            char = f'Extreme volatility — {avg_sw:.0f}% total swing'
+        else:
+            char = f'Mixed — up {avg_up:.1f}% / dn {avg_dn:.1f}% from open'
+        if avg >= 5:
+            action = f'Deploy capital — strong tailwind. Rally avg +{avg_up:.1f}% from open.'
+        elif avg >= 2:
+            action = f'Lean bullish. Dip only {avg_dn:.1f}% before rallying {avg_up:.1f}%.'
+        elif avg >= -1:
+            action = f'Neutral — selective entries only. Up {avg_up:.1f}% vs dn {avg_dn:.1f}%.'
+        elif avg >= -4:
+            action = f'Avoid longs. Drops {avg_dn:.1f}%, recovers only {avg_up:.1f}%.'
+        else:
+            action = f'Stay cash. Heavy selling — {avg_dn:.1f}% down, {avg_sw:.0f}% swing.'
+        console.print(f'  [{col}][bold]{nq}{marker}[/bold]  ({nq_labels[nq]})  avg={avg:+.1f}%  ({wins}/{len(rets)} up)[/{col}]')
+        console.print(f'    Character : {char}')
+        console.print(f'    Action    : [{col}]{action}[/{col}]')
+        console.print()
+
+    console.print('  [dim]Research only. Not financial advice. Paper trade first.[/dim]')
+    console.print()
+
+
 def analyze_market_phase(db_path='nepse_market_data.db'):
     """Option 37 - Market Phase Detector"""
     from rich.console import Console
@@ -4542,6 +4860,9 @@ def main():
         return
     elif getattr(args, 'seasonality', False):
         analyze_seasonality()
+        return
+    elif getattr(args, 'nepali_season', False):
+        analyze_nepali_seasonality()
         return
     if getattr(args, "unlock", None) and args.unlock[0].lower() in ("add","delete","list","upcoming"):
         _unlock_db()
