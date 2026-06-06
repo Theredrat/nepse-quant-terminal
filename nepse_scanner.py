@@ -2884,55 +2884,129 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
     # ─────────────────────────────────────────
     # SECTION 4 — TECHNICAL / MOMENTUM
     # ─────────────────────────────────────────
+    # SECTION 4 — TECHNICAL / MOMENTUM
+    # ─────────────────────────────────────────
     console.print()
     console.rule('[bold yellow]Section 4 — Technical / Momentum[/bold yellow]', style='yellow')
     console.print()
     tech_score = 50
     try:
-        # Momentum from broker_activity (17f style)
+        # ── Price Analysis from stock_prices ──
+        prices = conn.execute(
+            'SELECT date, close, high, low, volume FROM stock_prices '
+            'WHERE symbol=? AND close > 0 ORDER BY date DESC LIMIT 25',
+            (symbol,)
+        ).fetchall()
+
+        if prices:
+            curr_price = prices[0][1]
+            curr_date = prices[0][0]
+
+            yr = conn.execute(
+                'SELECT MAX(high), MIN(low) FROM stock_prices '
+                'WHERE symbol=? AND date >= date(?, "-365 days") AND close > 0',
+                (symbol, curr_date)
+            ).fetchone()
+            wk52_high = yr[0] or curr_price
+            wk52_low = yr[1] or curr_price
+            yr_range = wk52_high - wk52_low
+            price_pos = ((curr_price - wk52_low) / yr_range * 100) if yr_range > 0 else 50
+            pos_col = 'green' if price_pos < 40 else 'yellow' if price_pos < 70 else 'red'
+            console.print(f'  Current Price: [bold]Rs {curr_price:,.1f}[/bold]')
+            console.print(f'  52W High: [red]Rs {wk52_high:,.1f}[/red]  |  52W Low: [green]Rs {wk52_low:,.1f}[/green]')
+            pos_note = "(near 52W low — potential opportunity)" if price_pos < 25 else "(near 52W high — caution)" if price_pos > 80 else "(mid range)"
+            console.print(f'  Price Position: [{pos_col}]{price_pos:.0f}% from 52W low[/{pos_col}] {pos_note}')
+            if price_pos < 25: tech_score += 20
+            elif price_pos > 85: tech_score -= 15
+            elif price_pos > 60: tech_score += 5
+
+            valid_prices = [p[1] for p in prices[:7] if p[1] and p[1] > 0]
+            if len(valid_prices) >= 3:
+                up_days = sum(1 for i in range(len(valid_prices)-1) if valid_prices[i] > valid_prices[i+1])
+                down_days = len(valid_prices) - 1 - up_days
+                trend_col = 'green' if up_days > down_days else 'red' if down_days > up_days else 'yellow'
+                trend_str = 'UPTREND' if up_days > down_days else 'DOWNTREND' if down_days > up_days else 'SIDEWAYS'
+                recent_str = ' -> '.join([f'Rs {c:,.0f}' for c in valid_prices[:4]])
+                console.print(f'  Price Trend (5d): [{trend_col}]{trend_str}[/{trend_col}] — {recent_str}')
+                if up_days > down_days: tech_score += 15
+                elif down_days > up_days: tech_score -= 15
+
+            valid_closes = [p[1] for p in prices if p[1] and p[1] > 0]
+            if len(valid_closes) >= 5:
+                ma20 = sum(valid_closes[:20]) / min(20, len(valid_closes))
+                ma_col = 'green' if curr_price >= ma20 else 'red'
+                ma_str = 'ABOVE' if curr_price >= ma20 else 'BELOW'
+                pct_from_ma = ((curr_price - ma20) / ma20) * 100
+                console.print(f'  20-day MA: Rs {ma20:,.1f} — [{ma_col}]price {ma_str} MA ({pct_from_ma:+.1f}%)[/{ma_col}]')
+                if curr_price >= ma20: tech_score += 10
+                else: tech_score -= 10
+
+            vols = [p[4] for p in prices[:10] if p[4] and p[4] > 0]
+            if len(vols) >= 3:
+                avg_vol = sum(vols[1:]) / len(vols[1:])
+                vol_ratio = vols[0] / avg_vol if avg_vol > 0 else 1
+                vol_col = 'green' if vol_ratio >= 1.5 else 'yellow' if vol_ratio >= 0.7 else 'red'
+                vol_note = "(HIGH demand)" if vol_ratio >= 1.5 else "(low demand)" if vol_ratio < 0.7 else "(normal)"
+                console.print(f'  Volume: {vols[0]:,.0f} vs avg {avg_vol:,.0f} — [{vol_col}]{vol_ratio:.1f}x {vol_note}[/{vol_col}]')
+                if vol_ratio >= 1.5: tech_score += 10
+                elif vol_ratio < 0.5: tech_score -= 10
+        else:
+            console.print('  No price data available.', style='yellow')
+
+        console.print()
+
+        # ── RS vs Sector ──
+        try:
+            rs_data = _calc_relative_strength(db_path=db_path)
+            rs_row = next((r for r in rs_data if r['symbol'] == symbol), None)
+            if rs_row:
+                rs5 = rs_row.get('rs_5d', 0) or 0
+                rs20 = rs_row.get('rs_20d', 0) or 0
+                rs_col = 'green' if rs5 > 0 else 'red'
+                rs20_col = 'green' if rs20 > 0 else 'red'
+                console.print(f'  RS vs Sector (5d): [{rs_col}]{rs5:+.1f}%[/{rs_col}]  |  RS vs Sector (20d): [{rs20_col}]{rs20:+.1f}%[/{rs20_col}]')
+                if rs5 > 2: tech_score += 15
+                elif rs5 > 0: tech_score += 8
+                elif rs5 < -2: tech_score -= 15
+                elif rs5 < 0: tech_score -= 8
+            else:
+                console.print('  RS vs Sector: [dim]not enough data[/dim]')
+        except Exception:
+            pass
+
+        console.print()
+
+        # ── Broker Momentum ──
         all_dates = conn.execute(
             'SELECT DISTINCT date FROM broker_activity WHERE symbol=? '
             'AND broker_id GLOB "[0-9]*" ORDER BY date DESC LIMIT 7',
             (symbol,)
         ).fetchall()
         all_dates = [d[0] for d in all_dates]
-
         consec = 0
+        momentum_scores = []
         for d in all_dates:
             counts = conn.execute(
-                'SELECT COUNT(CASE WHEN net_val>0 THEN 1 END), COUNT(CASE WHEN net_val<0 THEN 1 END) '
+                'SELECT COUNT(CASE WHEN net_val>0 THEN 1 END), COUNT(CASE WHEN net_val<0 THEN 1 END), COUNT(*) '
                 'FROM broker_activity WHERE symbol=? AND date=? AND broker_id GLOB "[0-9]*"',
                 (symbol, d)
             ).fetchone()
-            if (counts[0] or 0) > (counts[1] or 0):
-                consec += 1
-            else:
-                break
+            nb = counts[0] or 0
+            ns = counts[1] or 0
+            total = counts[2] or 1
+            momentum_scores.append(int((nb / total) * 100))
+            if nb > ns: consec += 1
+            else: break
 
+        avg_momentum = sum(momentum_scores) / len(momentum_scores) if momentum_scores else 50
         consec_col = 'green' if consec >= 3 else 'yellow' if consec >= 1 else 'red'
-        console.print(f'  Consecutive buy days: [{consec_col}]{consec}[/{consec_col}]')
-        if consec >= 4: tech_score += 30
-        elif consec >= 2: tech_score += 15
-        elif consec == 0: tech_score -= 20
-
-        # Support/Resistance from floorsheet
-        if all_dates:
-            latest_date = all_dates[0]
-            sr_rows = conn.execute(
-                'SELECT SUM(buy_qty), SUM(sell_qty) FROM broker_activity '
-                'WHERE symbol=? AND date=? AND broker_id GLOB "[0-9]*"',
-                (symbol, latest_date)
-            ).fetchone()
-            if sr_rows and sr_rows[0]:
-                bq = sr_rows[0] or 0
-                sq = sr_rows[1] or 0
-                total_q = bq + sq
-                if total_q > 0:
-                    buy_pct = bq / total_q * 100
-                    bp_col = 'green' if buy_pct > 60 else 'yellow' if buy_pct > 40 else 'red'
-                    console.print(f'  Latest session buy ratio: [{bp_col}]{buy_pct:.0f}% buying ({latest_date})[/{bp_col}]')
-                    if buy_pct > 65: tech_score += 15
-                    elif buy_pct < 35: tech_score -= 15
+        mom_col = 'green' if avg_momentum >= 60 else 'yellow' if avg_momentum >= 40 else 'red'
+        console.print(f'  Broker Momentum: [{consec_col}]{consec} consecutive buy days[/{consec_col}]  |  Avg score: [{mom_col}]{avg_momentum:.0f}/100[/{mom_col}]')
+        if consec >= 4: tech_score += 20
+        elif consec >= 2: tech_score += 10
+        elif consec == 0: tech_score -= 15
+        if avg_momentum >= 60: tech_score += 5
+        elif avg_momentum < 40: tech_score -= 5
 
         tech_score = max(0, min(100, tech_score))
         t_verdict = 'BULLISH' if tech_score >= 65 else 'NEUTRAL' if tech_score >= 40 else 'BEARISH'
@@ -2943,7 +3017,7 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
         total_score += tech_score
         max_score += 100
     except Exception as e:
-        console.print(f'  Error: {e}', style='red')
+        console.print(f'  Error in Section 4: {e}', style='red')
         max_score += 100
 
     conn.close()
