@@ -1976,6 +1976,7 @@ def parse_args():
     p.add_argument('--full-report',  metavar='SYMBOL', dest='full_report', default=None)
     p.add_argument('--best-rr',       action='store_true', dest='best_rr', help='Best R/R scanner')
     p.add_argument('--market-phase',   action='store_true', dest='market_phase', help='Market phase detector')
+    p.add_argument('--seasonality',    action='store_true', dest='seasonality', help='Seasonality analysis')
     p.add_argument('--portfolio',   nargs='*', metavar='SYMBOL', help='Position sizing + correlation for a set of stocks')
     p.add_argument('--corr',        action='store_true', help='Sector correlation heatmap')
     p.add_argument('--size',        nargs=2, metavar=('SYMBOL','AMOUNT'), help='Volatility-adjusted sizing e.g. --size AKJCL 100000')
@@ -3319,6 +3320,160 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
     console.print()
 
 
+def analyze_seasonality(db_path='nepse_market_data.db'):
+    """Option 38 - Seasonality Analysis"""
+    from rich.console import Console
+    from rich.rule import Rule
+    from rich.table import Table
+    console = Console()
+    import sqlite3
+    from collections import defaultdict
+    from datetime import datetime
+
+    console.print()
+    console.rule('[bold yellow]Option 38 — NEPSE Seasonality (2021-2026)[/bold yellow]', style='yellow')
+    console.print()
+
+    conn = sqlite3.connect(db_path)
+    nepse = conn.execute(
+        "SELECT date, close FROM stock_prices WHERE symbol='NEPSE' AND close>0 ORDER BY date"
+    ).fetchall()
+    conn.close()
+
+    if len(nepse) < 100:
+        console.print('  Not enough NEPSE data.', style='red')
+        return
+
+    month_names = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+
+    # Monthly cumulative returns
+    monthly = defaultdict(list)
+    for d, c in nepse:
+        monthly[d[:7]].append(c)
+
+    by_month = defaultdict(list)
+    for ym, closes in sorted(monthly.items()):
+        if len(closes) >= 5:
+            ret = (closes[-1] - closes[0]) / closes[0] * 100
+            by_month[int(ym[5:7])].append((ym[:4], ret))
+
+    # Current month
+    today = datetime.now()
+    curr_month = today.month
+    curr_month_name = month_names[curr_month]
+    next_month = (curr_month % 12) + 1
+    next_month_name = month_names[next_month]
+
+    # === DISPLAY ===
+    # Current + next month highlight
+    console.rule(f'[bold]Current Month: {curr_month_name}  |  Next Month: {next_month_name}[/bold]')
+    console.print()
+
+    for m in [curr_month, next_month]:
+        rets = [r for _, r in by_month[m]]
+        if not rets: continue
+        avg = sum(rets)/len(rets)
+        wins = sum(1 for r in rets if r > 0)
+        best = max(rets)
+        worst = min(rets)
+        col = 'green' if avg >= 2 else 'yellow' if avg >= 0 else 'red'
+        verdict = 'STRONG BUY' if avg>=5 and wins==len(rets) else 'BUY' if avg>=2 else 'NEUTRAL' if avg>=-1 else 'AVOID' if avg>=-4 else 'STRONG AVOID'
+        console.print(f'  [bold]{month_names[m]}[/bold]  avg=[{col}]{avg:+.1f}%[/{col}]  up={wins}/{len(rets)}  best={best:+.1f}%  worst={worst:+.1f}%  -> [{col}]{verdict}[/{col}]')
+        # Year breakdown
+        for yr, r in sorted(by_month[m]):
+            r_col = 'green' if r > 0 else 'red'
+            bar = ('█' if r>0 else '▓') * min(int(abs(r)/2), 20)
+            console.print(f'    [{r_col}]{yr}: {r:+.1f}%  {bar}[/{r_col}]')
+        console.print()
+
+    # Full year calendar
+    console.rule('[bold]Full Year Seasonal Calendar[/bold]')
+    console.print()
+
+    table = Table(show_header=True, header_style='bold cyan', box=None, padding=(0,1))
+    table.add_column('Month',   width=5)
+    table.add_column('Avg Ret', justify='right', width=8)
+    table.add_column('Up/Total', justify='center', width=9)
+    table.add_column('Best',    justify='right', width=8)
+    table.add_column('Worst',   justify='right', width=8)
+    table.add_column('Signal',  width=14)
+    table.add_column('Bar',     width=22)
+
+    for m in range(1, 13):
+        rets = [r for _, r in by_month[m]]
+        if not rets: continue
+        avg  = sum(rets)/len(rets)
+        wins = sum(1 for r in rets if r > 0)
+        best = max(rets)
+        worst= min(rets)
+        col  = 'green' if avg >= 2 else 'yellow' if avg >= 0 else 'red'
+        verdict = 'STRONG BUY' if avg>=5 and wins==len(rets) else 'BUY' if avg>=2 else 'NEUTRAL' if avg>=-1 else 'AVOID' if avg>=-3 else 'STRONG AVOID'
+        bar_len = min(int(abs(avg)/1), 20)
+        bar = ('█' if avg>0 else '▓') * bar_len
+        marker = ' <--' if m == curr_month else ''
+        table.add_row(
+            f'[bold]{month_names[m]}{marker}[/bold]',
+            f'[{col}]{avg:+.1f}%[/{col}]',
+            f'[{col}]{wins}/{len(rets)}[/{col}]',
+            f'[green]{best:+.1f}%[/green]',
+            f'[red]{worst:+.1f}%[/red]',
+            f'[{col}]{verdict}[/{col}]',
+            f'[{col}]{bar}[/{col}]',
+        )
+
+    console.print(table)
+    console.print()
+
+    # Best/worst summary
+    sorted_months = sorted(range(1,13), key=lambda m: sum(r for _,r in by_month[m])/len(by_month[m]) if by_month[m] else 0, reverse=True)
+    console.rule('[bold]Ranked by Average Return[/bold]')
+    console.print()
+    console.print('  [green]Best months to be invested:[/green]')
+    for m in sorted_months[:3]:
+        rets = [r for _,r in by_month[m]]
+        avg = sum(rets)/len(rets)
+        wins = sum(1 for r in rets if r>0)
+        console.print(f'    [green]{month_names[m]:>3}: avg {avg:+.1f}%  ({wins}/{len(rets)} up)[/green]')
+    console.print()
+    console.print('  [red]Worst months — stay in cash:[/red]')
+    for m in sorted_months[-3:]:
+        rets = [r for _,r in by_month[m]]
+        avg = sum(rets)/len(rets)
+        wins = sum(1 for r in rets if r>0)
+        console.print(f'    [red]{month_names[m]:>3}: avg {avg:+.1f}%  ({wins}/{len(rets)} up)[/red]')
+    console.print()
+
+    # Actionable advice
+    curr_rets = [r for _,r in by_month[curr_month]]
+    curr_avg  = sum(curr_rets)/len(curr_rets) if curr_rets else 0
+    console.rule(f'[bold]What To Do in {curr_month_name}[/bold]')
+    console.print()
+    if curr_avg >= 5:
+        console.print(f'  [bold green]{curr_month_name} is historically the strongest month.[/bold green]')
+        console.print('  [green]-> Deploy capital now — seasonal tailwind is strong[/green]')
+        console.print('  [green]-> Look for breakouts — market tends to rally hard[/green]')
+        console.print('  [green]-> Run option 36 daily for R/R setups[/green]')
+    elif curr_avg >= 2:
+        console.print(f'  [bold green]{curr_month_name} is a positive month historically.[/bold green]')
+        console.print('  [green]-> Lean bullish — seasonal tailwind[/green]')
+        console.print('  [green]-> Take setups from option 36 with confidence[/green]')
+    elif curr_avg >= -1:
+        console.print(f'  [bold yellow]{curr_month_name} is neutral historically.[/bold yellow]')
+        console.print('  [yellow]-> No seasonal edge — rely on option 37 market phase[/yellow]')
+        console.print('  [yellow]-> Be selective, normal position sizes[/yellow]')
+    elif curr_avg >= -3:
+        console.print(f'  [bold red]{curr_month_name} is a weak month historically.[/bold red]')
+        console.print('  [red]-> Reduce position sizes[/red]')
+        console.print('  [red]-> Tighten stop losses[/red]')
+        console.print('  [red]-> Only enter if option 37 shows ACCUMULATION or better[/red]')
+    else:
+        console.print(f'  [bold red]{curr_month_name} is historically the worst period.[/bold red]')
+        console.print('  [red]-> Stay in cash — seasonal headwind is strong[/red]')
+        console.print('  [red]-> Do not buy dips — they tend to get worse[/red]')
+        console.print('  [red]-> Wait for next month[/red]')
+    console.print()
+
+
 def analyze_market_phase(db_path='nepse_market_data.db'):
     """Option 37 - Market Phase Detector"""
     from rich.console import Console
@@ -3661,6 +3816,9 @@ def main():
         return
     elif getattr(args, 'market_phase', False):
         analyze_market_phase()
+        return
+    elif getattr(args, 'seasonality', False):
+        analyze_seasonality()
         return
     if getattr(args, "unlock", None) and args.unlock[0].lower() in ("add","delete","list","upcoming"):
         _unlock_db()
