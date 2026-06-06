@@ -137,7 +137,7 @@ if "%choice%"=="21b" python nepse_scanner.py --guide & goto AGAIN
 if "%choice%"=="35" goto FULL_REPORT
 
 if "%choice%"=="36" goto BEST_RR
-if "%choice%"=="37" python nepse_scanner.py --market-phase ^& goto AGAIN
+if "%choice%"=="37" goto MARKET_PHASE
 if "%choice%"=="22" start python nepse_alerts.py & goto AGAIN
 if "%choice%"=="23" python nepse_scanner.py --corr & goto AGAIN
 if "%choice%"=="24" python nepse_scanner.py --portfolio & goto AGAIN
@@ -292,6 +292,10 @@ goto AGAIN
 
 :BEST_RR
 python nepse_scanner.py --best-rr
+goto AGAIN
+
+:MARKET_PHASE
+python nepse_scanner.py --market-phase
 goto AGAIN
 
 :AGAIN
