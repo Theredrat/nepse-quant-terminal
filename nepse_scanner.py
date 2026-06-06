@@ -3268,6 +3268,379 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
     conn.close()
 
     # ─────────────────────────────────────────
+    # SECTION 6 — SEASONALITY CONTEXT
+    # ─────────────────────────────────────────
+    console.print()
+    console.rule('[bold yellow]Section 6 — Seasonality Context[/bold yellow]', style='yellow')
+    console.print()
+    try:
+        from datetime import date as _date
+        from collections import defaultdict as _dd
+        import sqlite3 as _sq
+
+        # BS converter
+        _baisakh_start = {
+            2077:(2020,4,13),2078:(2021,4,14),2079:(2022,4,14),
+            2080:(2023,4,14),2081:(2024,4,13),2082:(2025,4,14),2083:(2026,4,14),
+        }
+        _bs_month_days = {
+            2077:[31,31,31,32,31,31,30,29,30,29,30,30],
+            2078:[31,31,32,31,31,31,30,29,30,29,30,30],
+            2079:[31,32,31,32,31,30,30,29,30,29,30,30],
+            2080:[31,31,31,32,31,31,30,29,30,29,30,30],
+            2081:[31,31,32,31,31,31,30,29,30,29,30,30],
+            2082:[31,32,31,32,31,30,30,29,30,29,30,30],
+            2083:[31,31,31,32,31,31,30,29,30,29,30,30],
+        }
+        _bs_names = {1:'Baisakh',2:'Jestha',3:'Ashadh',4:'Shrawan',5:'Bhadra',
+                     6:'Ashwin',7:'Kartik',8:'Mangsir',9:'Poush',10:'Magh',
+                     11:'Falgun',12:'Chaitra'}
+        _greg_names = {1:'Jan',2:'Feb',3:'Mar',4:'Apr',5:'May',6:'Jun',
+                       7:'Jul',8:'Aug',9:'Sep',10:'Oct',11:'Nov',12:'Dec'}
+
+        def _to_bs(d):
+            for yr in sorted(_baisakh_start.keys(), reverse=True):
+                g = _baisakh_start[yr]
+                s = _date(g[0],g[1],g[2])
+                if d >= s:
+                    days = (d-s).days
+                    for mi,md in enumerate(_bs_month_days.get(yr,[])):
+                        if days < md: return yr, mi+1
+                        days -= md
+                    return yr+1,1
+            return None,None
+
+        def _sig(avg):
+            if avg >= 5:  return 'STR.BUY','green'
+            if avg >= 2:  return 'BUY','green'
+            if avg >= -1: return 'NTRL','yellow'
+            if avg >= -3: return 'AVOID','red'
+            return 'STR.AVD','red'
+
+        def _char(up, dn, avg):
+            if up > abs(dn)*2 and avg >= 3:
+                return f'Rally +{up:.1f}% dip -{dn:.1f}%'
+            elif up > abs(dn)*2 and avg < 3:
+                return f'Rally+fade +{up:.1f}%'
+            elif abs(dn) > up*1.5:
+                return f'Drop -{dn:.1f}% / bounce +{up:.1f}%'
+            else:
+                return f'Mixed +{up:.1f}% / -{dn:.1f}%'
+
+        _today = _date.today()
+        _curr_gm  = _today.month
+        _next_gm  = (_curr_gm % 12) + 1
+        _bs_yr, _curr_bm = _to_bs(_today)
+        _next_bm  = (_curr_bm % 12) + 1
+
+        # Load NEPSE data
+        _c1 = _sq.connect(db_path)
+        _nepse = _c1.execute(
+            "SELECT date,close,high,low FROM stock_prices "
+            "WHERE symbol='NEPSE' AND close>0 ORDER BY date"
+        ).fetchall()
+        # Load stock data
+        _stock = _c1.execute(
+            "SELECT date,close,high,low FROM stock_prices "
+            "WHERE symbol=? AND close>0 ORDER BY date", (symbol,)
+        ).fetchall()
+        _c1.close()
+
+        def _build_greg(rows):
+            _by = _dd(list)
+            for d_str,c,h,l in rows:
+                d = _date.fromisoformat(d_str)
+                _by[(d.year,d.month)].append((c,h,l))
+            _rets = _dd(list)
+            _hl   = _dd(list)
+            for (yr,m),entries in _by.items():
+                if len(entries)<5: continue
+                oc=entries[0][0]; cc=entries[-1][0]
+                hh=max(e[1] for e in entries)
+                ll=min(e[2] for e in entries if e[2]>0)
+                _rets[m].append((cc-oc)/oc*100)
+                _hl[m].append(((hh-oc)/oc*100,(oc-ll)/oc*100))
+            return _rets, _hl
+
+        def _build_bs(rows):
+            _by = _dd(list)
+            for d_str,c,h,l in rows:
+                d = _date.fromisoformat(d_str)
+                by,bm = _to_bs(d)
+                if by and bm:
+                    _by[(by,bm)].append((c,h,l))
+            _rets = _dd(list)
+            _hl   = _dd(list)
+            for (yr,m),entries in _by.items():
+                if len(entries)<5: continue
+                oc=entries[0][0]; cc=entries[-1][0]
+                hh=max(e[1] for e in entries)
+                ll=min(e[2] for e in entries if e[2]>0)
+                _rets[m].append((cc-oc)/oc*100)
+                _hl[m].append(((hh-oc)/oc*100,(oc-ll)/oc*100))
+            return _rets, _hl
+
+        def _stats(rets, hl, m):
+            r = rets[m]
+            if not r: return None
+            avg  = sum(r)/len(r)
+            wins = sum(1 for x in r if x>0)
+            h    = hl[m]
+            up   = sum(x[0] for x in h)/len(h) if h else 0
+            dn   = sum(x[1] for x in h)/len(h) if h else 0
+            return avg, wins, len(r), up, dn
+
+        # Build all 4 datasets
+        _ng_rets, _ng_hl = _build_greg(_nepse)
+        _nb_rets, _nb_hl = _build_bs(_nepse)
+        _sg_rets, _sg_hl = _build_greg(_stock)
+        _sb_rets, _sb_hl = _build_bs(_stock)
+
+        console.print(f'  [bold]Today:[/bold] {_today}  |  '
+                      f'Gregorian: [cyan]{_greg_names[_curr_gm]}[/cyan]  |  '
+                      f'BS: [cyan]{_bs_names[_curr_bm]}[/cyan]')
+        console.print()
+
+        # ── Table ──
+        _t = Table(show_header=True, header_style='bold cyan', box=None, padding=(0,1))
+        _t.add_column('System',   width=6)
+        _t.add_column('Month',    width=13)
+        _t.add_column('NEPSE',    justify='right', width=12)
+        _t.add_column('Sig',      width=8)
+        _t.add_column('Character',width=28)
+        _t.add_column(f'{symbol}', justify='right', width=12)
+        _t.add_column('Sig ',     width=8)
+
+        for _sys, _gm, _bm in [('NOW', _curr_gm, _curr_bm), ('NEXT', _next_gm, _next_bm)]:
+            # Gregorian row
+            _ng = _stats(_ng_rets, _ng_hl, _gm)
+            _sg = _stats(_sg_rets, _sg_hl, _gm)
+            if _ng:
+                _na,_nw,_nt,_nu,_nd = _ng
+                _nsig,_ncol = _sig(_na)
+                _nchar = _char(_nu,_nd,_na)
+                _n_str = f'[{_ncol}]{_na:+.1f}% {_nw}/{_nt}[/{_ncol}]'
+                _ns_str= f'[{_ncol}]{_nsig}[/{_ncol}]'
+            else:
+                _nchar='N/A'; _n_str='N/A'; _ns_str='N/A'; _ncol='dim'
+            if _sg:
+                _sa,_sw,_st,_su,_sd = _sg
+                _ssig,_scol = _sig(_sa)
+                _s_str = f'[{_scol}]{_sa:+.1f}% {_sw}/{_st}[/{_scol}]'
+                _ss_str= f'[{_scol}]{_ssig}[/{_scol}]'
+            else:
+                _s_str='[dim]N/A[/dim]'; _ss_str='[dim]N/A[/dim]'
+            _t.add_row(
+                f'[cyan]GREG[/cyan]',
+                f'[bold]{_greg_names[_gm]}({_sys})[/bold]',
+                _n_str, _ns_str, f'[dim]{_nchar}[/dim]',
+                _s_str, _ss_str,
+            )
+
+            # BS row
+            _nb = _stats(_nb_rets, _nb_hl, _bm)
+            _sb = _stats(_sb_rets, _sb_hl, _bm)
+            if _nb:
+                _na,_nw,_nt,_nu,_nd = _nb
+                _nsig,_ncol = _sig(_na)
+                _nchar = _char(_nu,_nd,_na)
+                _n_str = f'[{_ncol}]{_na:+.1f}% {_nw}/{_nt}[/{_ncol}]'
+                _ns_str= f'[{_ncol}]{_nsig}[/{_ncol}]'
+            else:
+                _nchar='N/A'; _n_str='N/A'; _ns_str='N/A'; _ncol='dim'
+            if _sb:
+                _sa,_sw,_st,_su,_sd = _sb
+                _ssig,_scol = _sig(_sa)
+                _s_str = f'[{_scol}]{_sa:+.1f}% {_sw}/{_st}[/{_scol}]'
+                _ss_str= f'[{_scol}]{_ssig}[/{_scol}]'
+            else:
+                _s_str='[dim]N/A[/dim]'; _ss_str='[dim]N/A[/dim]'
+            _t.add_row(
+                f'[magenta]BS[/magenta]',
+                f'[bold]{_bs_names[_bm]}({_sys})[/bold]',
+                _n_str, _ns_str, f'[dim]{_nchar}[/dim]',
+                _s_str, _ss_str,
+            )
+            # Spacer between NOW and NEXT
+            if _sys == 'NOW':
+                _t.add_row('','','','','','','')
+
+        console.print(_t)
+        console.print()
+
+        # ── Seasonal verdict combining both systems ──
+        _ng_c = _stats(_ng_rets, _ng_hl, _curr_gm)
+        _nb_c = _stats(_nb_rets, _nb_hl, _curr_bm)
+        _sg_c = _stats(_sg_rets, _sg_hl, _curr_gm)
+        _sb_c = _stats(_sb_rets, _sb_hl, _curr_bm)
+
+        _n_g_avg = _ng_c[0] if _ng_c else 0
+        _n_b_avg = _nb_c[0] if _nb_c else 0
+        _s_g_avg = _sg_c[0] if _sg_c else 0
+        _s_b_avg = _sb_c[0] if _sb_c else 0
+
+        # Agreement score — both systems agree = stronger signal
+        _nepse_bull  = (_n_g_avg >= 2) + (_n_b_avg >= 2)
+        _nepse_bear  = (_n_g_avg <= -2) + (_n_b_avg <= -2)
+        _stock_bull  = (_s_g_avg >= 2) + (_s_b_avg >= 2)
+        _stock_bear  = (_s_g_avg <= -2) + (_s_b_avg <= -2)
+
+        if _nepse_bull == 2 and _stock_bull >= 1:
+            _sv = '[bold green]STRONG TAILWIND — both calendars show NEPSE bullish this period[/bold green]'
+            _ss = 85
+        elif _nepse_bull >= 1 and _stock_bull >= 1:
+            _sv = '[bold green]TAILWIND — at least one calendar bullish for both NEPSE and stock[/bold green]'
+            _ss = 70
+        elif _nepse_bull == 2 and _stock_bear >= 1:
+            _sv = '[bold yellow]MIXED — NEPSE strong but stock weak this period[/bold yellow]'
+            _ss = 45
+        elif _nepse_bear == 2 and _stock_bear >= 1:
+            _sv = '[bold red]STRONG HEADWIND — both calendars show weakness this period[/bold red]'
+            _ss = 15
+        elif _nepse_bear >= 1 or _stock_bear >= 1:
+            _sv = '[bold yellow]CAUTION — at least one calendar showing weakness[/bold yellow]'
+            _ss = 40
+        else:
+            _sv = '[bold yellow]NEUTRAL — no strong seasonal edge either way[/bold yellow]'
+            _ss = 50
+
+        # Agreement note
+        _greg_agree = ('Greg: NEPSE ' + ('+' if _n_g_avg>=0 else '') + f'{_n_g_avg:.1f}% / '
+                      + symbol + ' ' + ('+' if _s_g_avg>=0 else '') + f'{_s_g_avg:.1f}%')
+        _bs_agree   = ('BS:   NEPSE ' + ('+' if _n_b_avg>=0 else '') + f'{_n_b_avg:.1f}% / '
+                      + symbol + ' ' + ('+' if _s_b_avg>=0 else '') + f'{_s_b_avg:.1f}%')
+
+        # ── QUARTERLY ──
+        console.print()
+        console.rule('[dim]Quarterly Seasonality[/dim]')
+        console.print()
+
+        def _build_greg_q(rows):
+            _by = _dd(list)
+            for d_str,c,h,l in rows:
+                d = _date.fromisoformat(d_str)
+                q = f'Q{(d.month-1)//3+1}'
+                _by[(d.year,q)].append((c,h,l))
+            _rets = _dd(list)
+            for (yr,q),entries in _by.items():
+                if len(entries)<10: continue
+                oc=entries[0][0]; cc=entries[-1][0]
+                _rets[q].append((cc-oc)/oc*100)
+            return _rets
+
+        def _build_bs_q(rows):
+            _nq_map = {1:'NQ1',2:'NQ1',3:'NQ1',4:'NQ2',5:'NQ2',6:'NQ2',
+                       7:'NQ3',8:'NQ3',9:'NQ3',10:'NQ4',11:'NQ4',12:'NQ4'}
+            _by = _dd(list)
+            for d_str,c,h,l in rows:
+                d = _date.fromisoformat(d_str)
+                by,bm = _to_bs(d)
+                if by and bm:
+                    nq = _nq_map[bm]
+                    _by[(by,nq)].append((c,h,l))
+            _rets = _dd(list)
+            for (yr,nq),entries in _by.items():
+                if len(entries)<10: continue
+                oc=entries[0][0]; cc=entries[-1][0]
+                _rets[nq].append((cc-oc)/oc*100)
+            return _rets
+
+        _ng_qrets = _build_greg_q(_nepse)
+        _nb_qrets = _build_bs_q(_nepse)
+        _sg_qrets = _build_greg_q(_stock)
+        _sb_qrets = _build_bs_q(_stock)
+
+        # Current/next quarter
+        _curr_gq  = f'Q{(_today.month-1)//3+1}'
+        _next_gq  = f'Q{((_today.month-1)//3+1)%4+1}'
+        _nq_map2  = {1:'NQ1',2:'NQ1',3:'NQ1',4:'NQ2',5:'NQ2',6:'NQ2',
+                     7:'NQ3',8:'NQ3',9:'NQ3',10:'NQ4',11:'NQ4',12:'NQ4'}
+        _nq_next_map = {'NQ1':'NQ2','NQ2':'NQ3','NQ3':'NQ4','NQ4':'NQ1'}
+        _curr_bq  = _nq_map2[_curr_bm]
+        _next_bq  = _nq_next_map[_curr_bq]
+
+        def _qstats(rets, q):
+            r = rets[q]
+            if not r: return None
+            avg  = sum(r)/len(r)
+            wins = sum(1 for x in r if x>0)
+            return avg, wins, len(r)
+
+        _qt = Table(show_header=True, header_style='bold cyan', box=None, padding=(0,1))
+        _qt.add_column('System', width=6)
+        _qt.add_column('Quarter', width=12)
+        _qt.add_column('NEPSE', justify='right', width=12)
+        _qt.add_column('Sig', width=8)
+        _qt.add_column(f'{symbol}', justify='right', width=12)
+        _qt.add_column('Sig ', width=8)
+
+        for _sys2, _gq, _bq in [('NOW', _curr_gq, _curr_bq), ('NEXT', _next_gq, _next_bq)]:
+            # Greg quarter
+            _ngs = _qstats(_ng_qrets, _gq)
+            _sgs = _qstats(_sg_qrets, _gq)
+            if _ngs:
+                _na,_nw,_nt = _ngs
+                _nsig,_ncol = _sig(_na)
+                _n_str = f'[{_ncol}]{_na:+.1f}% {_nw}/{_nt}[/{_ncol}]'
+                _ns_str= f'[{_ncol}]{_nsig}[/{_ncol}]'
+            else:
+                _n_str='N/A'; _ns_str='N/A'
+            if _sgs:
+                _sa,_sw,_st = _sgs
+                _ssig,_scol = _sig(_sa)
+                _s_str = f'[{_scol}]{_sa:+.1f}% {_sw}/{_st}[/{_scol}]'
+                _ss_str= f'[{_scol}]{_ssig}[/{_scol}]'
+            else:
+                _s_str='[dim]N/A[/dim]'; _ss_str='[dim]N/A[/dim]'
+            _qt.add_row(
+                '[cyan]GREG[/cyan]',
+                f'[bold]{_gq}({_sys2})[/bold]',
+                _n_str, _ns_str, _s_str, _ss_str,
+            )
+            # BS quarter
+            _nbs = _qstats(_nb_qrets, _bq)
+            _sbs = _qstats(_sb_qrets, _bq)
+            if _nbs:
+                _na,_nw,_nt = _nbs
+                _nsig,_ncol = _sig(_na)
+                _n_str = f'[{_ncol}]{_na:+.1f}% {_nw}/{_nt}[/{_ncol}]'
+                _ns_str= f'[{_ncol}]{_nsig}[/{_ncol}]'
+            else:
+                _n_str='N/A'; _ns_str='N/A'
+            if _sbs:
+                _sa,_sw,_st = _sbs
+                _ssig,_scol = _sig(_sa)
+                _s_str = f'[{_scol}]{_sa:+.1f}% {_sw}/{_st}[/{_scol}]'
+                _ss_str= f'[{_scol}]{_ssig}[/{_scol}]'
+            else:
+                _s_str='[dim]N/A[/dim]'; _ss_str='[dim]N/A[/dim]'
+            _qt.add_row(
+                '[magenta]BS[/magenta]',
+                f'[bold]{_bq}({_sys2})[/bold]',
+                _n_str, _ns_str, _s_str, _ss_str,
+            )
+            if _sys2 == 'NOW':
+                _qt.add_row('','','','','','')
+
+        console.print(_qt)
+        console.print()
+
+        console.print(f'  Verdict  : {_sv}')
+        console.print(f'  [dim]{_greg_agree}[/dim]')
+        console.print(f'  [dim]{_bs_agree}[/dim]')
+        console.print()
+
+        _seas_col = 'green' if _ss>=70 else 'yellow' if _ss>=40 else 'red'
+        _sv_clean = _sv.split(']')[1].split('[')[0].strip() if ']' in _sv else _sv
+        section_verdicts.append(('Seasonality', _ss, _sv_clean, _seas_col))
+        max_score   += 100
+        total_score += _ss
+
+    except Exception as e:
+        console.print(f'  [red]Seasonality error: {e}[/red]')
+        console.print()
+
+    # ─────────────────────────────────────────
     # FINAL VERDICT
     # ─────────────────────────────────────────
     console.print()
@@ -3278,7 +3651,7 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
     t = Table(show_header=True, header_style='bold cyan', box=None, padding=(0,2))
     t.add_column('Section', width=20)
     t.add_column('Score', width=10, justify='right')
-    t.add_column('Verdict', width=20)
+    t.add_column('Verdict', width=30)
     for name, score, verdict, col in section_verdicts:
         t.add_row(name, f'[{col}]{score}/100[/{col}]', f'[{col}]{verdict}[/{col}]')
     console.print(t)
