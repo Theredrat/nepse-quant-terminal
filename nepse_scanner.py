@@ -3530,8 +3530,14 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
                 q = f'Q{(d.month-1)//3+1}'
                 _by[(d.year,q)].append((c,h,l))
             _rets = _dd(list)
+            _curr_gq2 = f'Q{(_date.today().month-1)//3+1}'
+            _curr_gyr2 = _date.today().year
+            _first_gq2 = f'Q{(_date(2021,5,25).month-1)//3+1}'
+            _first_gyr2 = _date(2021,5,25).year
             for (yr,q),entries in _by.items():
                 if len(entries)<10: continue
+                if (yr,q) == (_curr_gyr2, _curr_gq2): continue
+                if (yr,q) == (_first_gyr2, _first_gq2): continue
                 oc=entries[0][0]; cc=entries[-1][0]
                 _rets[q].append((cc-oc)/oc*100)
             return _rets
@@ -3547,8 +3553,16 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
                     nq = _nq_map[bm]
                     _by[(by,nq)].append((c,h,l))
             _rets = _dd(list)
+            _nq_map2 = {1:'NQ1',2:'NQ1',3:'NQ1',4:'NQ2',5:'NQ2',6:'NQ2',
+                        7:'NQ3',8:'NQ3',9:'NQ3',10:'NQ4',11:'NQ4',12:'NQ4'}
+            _curr_bq2  = _nq_map2[_to_bs(_date.today())[1]]
+            _curr_byr2 = _to_bs(_date.today())[0]
+            _first_bq2  = _nq_map2[_to_bs(_date(2021,5,25))[1]]
+            _first_byr2 = _to_bs(_date(2021,5,25))[0]
             for (yr,nq),entries in _by.items():
                 if len(entries)<10: continue
+                if (yr,nq) == (_curr_byr2, _curr_bq2): continue
+                if (yr,nq) == (_first_byr2, _first_bq2): continue
                 oc=entries[0][0]; cc=entries[-1][0]
                 _rets[nq].append((cc-oc)/oc*100)
             return _rets
