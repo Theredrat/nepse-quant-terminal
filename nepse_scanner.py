@@ -5950,16 +5950,61 @@ def analyze_broker_date(symbol=None, date_str=None, db_path='nepse_market_data.d
                 console.print(f'  Broker {hid:>3} (holds ~{held:,.0f} shares): {status}')
 
             console.print()
-            # Verdict
+
+            # Check if market-wide net sellers are also selling this stock today
+            import sqlite3 as _sq4
+            _conn4 = _sq4.connect(db_path)
+            _all2 = _conn4.execute('''
+                SELECT broker_id,
+                    SUM(CASE WHEN net_val>0 THEN net_val ELSE 0 END) as tb,
+                    SUM(CASE WHEN net_val<0 THEN ABS(net_val) ELSE 0 END) as ts
+                FROM broker_activity WHERE broker_id GLOB "[0-9]*"
+                GROUP BY broker_id
+            ''').fetchall()
+            _conn4.close()
+            _mkt_sellers = set(str(r[0]) for r in _all2 if r[2] > r[1])
+
+            # Smart money sellers = market-wide net sellers selling this stock today, not in holders
+            _smart_selling = [(str(r[0]), r[6]) for r in rows
+                if str(r[0]) in _mkt_sellers and r[6] < 0 and str(r[0]) not in _holder_ids]
+            _smart_selling.sort(key=lambda x: x[1])
+
+            if _smart_selling:
+                console.print('  [bold]Other net sellers active today:[/bold]')
+                for bid, nv in _smart_selling[:5]:
+                    console.print(f'    [red]Broker {bid} (net seller market-wide) selling Rs {abs(nv)/1e6:.2f}M today[/red]')
+                total_smart_sell  = sum(abs(nv) for _, nv in _smart_selling)
+                total_holder_buy  = sum(r[6] for r in rows if str(r[0]) in _holder_ids and r[6] > 0)
+                net_smart = total_holder_buy - total_smart_sell
+                net_col   = 'green' if net_smart > 0 else 'red'
+                console.print()
+                console.print(f'  Your holders buying:   [green]Rs {total_holder_buy/1e6:.2f}M[/green]')
+                console.print(f'  Net sellers selling:   [red]Rs {total_smart_sell/1e6:.2f}M[/red]')
+                console.print(f'  Net flow:              [{net_col}]Rs {net_smart/1e6:.2f}M[/{net_col}] {"(holders winning)" if net_smart > 0 else "(sellers winning)"}')
+                console.print()
+
+            # Final verdict
             if _selling_holders:
                 console.print(f'  [bold red]ALERT: Your holders selling — Broker {", ".join(_selling_holders)} flipping![/bold red]')
                 console.print('  [red]-> Consider reducing position. Run 17d to check trend.[/red]')
+            elif _smart_selling and _buying_holders:
+                total_smart_sell = sum(abs(nv) for _, nv in _smart_selling)
+                total_holder_buy = sum(r[6] for r in rows if str(r[0]) in _holder_ids and r[6] > 0)
+                if total_smart_sell > total_holder_buy * 1.5:
+                    console.print('  [bold yellow]CAUTION: Net sellers outweigh your holders buying[/bold yellow]')
+                    console.print('  [yellow]-> Hold but tighten stop loss. Watch tomorrow.[/yellow]')
+                else:
+                    console.print('  [bold green]HOLD: Your holders accumulating despite net sellers[/bold green]')
+                    console.print('  [green]-> Normal tug of war. Hold position, watch tomorrow.[/green]')
+            elif _smart_selling and not _buying_holders:
+                console.print('  [bold red]WARNING: Net sellers active, your holders inactive today[/bold red]')
+                console.print('  [red]-> Watch tomorrow. If holders stay inactive 2+ days, consider reducing.[/red]')
             elif _buying_holders:
-                console.print(f'  [bold green]GOOD: Your holders still accumulating — Broker {", ".join(_buying_holders)}[/bold green]')
+                console.print(f'  [bold green]GOOD: Your holders accumulating — Broker {", ".join(_buying_holders)}[/bold green]')
                 console.print('  [green]-> Hold position. Institutions still confident.[/green]')
             else:
-                console.print('  [yellow]Your top holders not active today — neutral signal.[/yellow]')
-                console.print('  [dim]-> Watch tomorrow. Absence could mean waiting or done.[/dim]')
+                console.print('  [yellow]Top holders not active today — neutral signal.[/yellow]')
+                console.print('  [dim]-> Watch tomorrow.[/dim]')
             console.print()
     except Exception as _e:
         pass
