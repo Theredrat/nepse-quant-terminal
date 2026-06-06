@@ -3390,14 +3390,43 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
     console.rule('[bold]Full Year Seasonal Calendar[/bold]')
     console.print()
 
+    # Build high/low range data per month from DB
+    import sqlite3 as _sq
+    _conn = _sq.connect(db_path)
+    _nepse_hl = _conn.execute(
+        "SELECT date, high, low, close FROM stock_prices "
+        "WHERE symbol='NEPSE' AND close>0 ORDER BY date"
+    ).fetchall()
+    _conn.close()
+
+    _monthly_hl = defaultdict(list)
+    for _d, _h, _l, _c in _nepse_hl:
+        _monthly_hl[_d[:7]].append((_h, _l, _c))
+
+    by_month_range = defaultdict(list)
+    for ym in sorted(_monthly_hl.keys()):
+        rows = _monthly_hl[ym]
+        if len(rows) < 5: continue
+        ph  = max(r[0] for r in rows)
+        pl  = min(r[1] for r in rows if r[1] > 0)
+        fc  = rows[0][2]
+        lc  = rows[-1][2]
+        swing   = (ph-pl)/pl*100
+        up_move = (ph-fc)/fc*100
+        dn_move = (fc-pl)/fc*100
+        m = int(ym[5:7])
+        by_month_range[m].append((ym[:4], swing, up_move, dn_move))
+
     table = Table(show_header=True, header_style='bold cyan', box=None, padding=(0,1))
-    table.add_column('Month',   width=5)
-    table.add_column('Avg Ret', justify='right', width=8)
+    table.add_column('Month',    width=6)
+    table.add_column('Avg Ret',  justify='right', width=8)
     table.add_column('Up/Total', justify='center', width=9)
-    table.add_column('Best',    justify='right', width=8)
-    table.add_column('Worst',   justify='right', width=8)
-    table.add_column('Signal',  width=14)
-    table.add_column('Bar',     width=22)
+    table.add_column('Best',     justify='right', width=8)
+    table.add_column('Worst',    justify='right', width=8)
+    table.add_column('Signal',   width=14)
+    table.add_column('Swing(min-max)', justify='center', width=16)
+    table.add_column('Up Move',  justify='right', width=9)
+    table.add_column('Dn Move',  justify='right', width=9)
 
     for m in range(1, 13):
         rets = [r for _, r in by_month[m]]
@@ -3408,9 +3437,20 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
         worst= min(rets)
         col  = 'green' if avg >= 2 else 'yellow' if avg >= 0 else 'red'
         verdict = 'STRONG BUY' if avg>=5 and wins==len(rets) else 'BUY' if avg>=2 else 'NEUTRAL' if avg>=-1 else 'AVOID' if avg>=-3 else 'STRONG AVOID'
-        bar_len = min(int(abs(avg)/1), 20)
-        bar = ('█' if avg>0 else '▓') * bar_len
         marker = ' <--' if m == curr_month else ''
+
+        rng = by_month_range[m]
+        if rng:
+            avg_swing = sum(r[1] for r in rng)/len(rng)
+            min_swing = min(r[1] for r in rng)
+            max_swing = max(r[1] for r in rng)
+            avg_up    = sum(r[2] for r in rng)/len(rng)
+            avg_dn    = sum(r[3] for r in rng)/len(rng)
+            swing_str = f'{avg_swing:.1f}%({min_swing:.0f}-{max_swing:.0f}%)'
+        else:
+            swing_str = 'N/A'
+            avg_up = avg_dn = 0
+
         table.add_row(
             f'[bold]{month_names[m]}{marker}[/bold]',
             f'[{col}]{avg:+.1f}%[/{col}]',
@@ -3418,7 +3458,9 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
             f'[green]{best:+.1f}%[/green]',
             f'[red]{worst:+.1f}%[/red]',
             f'[{col}]{verdict}[/{col}]',
-            f'[{col}]{bar}[/{col}]',
+            f'[yellow]{swing_str}[/yellow]',
+            f'[green]+{avg_up:.1f}%[/green]',
+            f'[red]-{avg_dn:.1f}%[/red]',
         )
 
     console.print(table)
