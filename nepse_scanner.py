@@ -3418,7 +3418,7 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
         by_month_range[m].append((ym[:4], swing, up_move, dn_move))
 
     table = Table(show_header=True, header_style='bold cyan', box=None, padding=(0,1))
-    table.add_column('Month',    width=6)
+    table.add_column('Month',    width=10)
     table.add_column('Avg Ret',  justify='right', width=8)
     table.add_column('Up/Total', justify='center', width=9)
     table.add_column('Best',     justify='right', width=8)
@@ -3533,6 +3533,31 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
             q = k[-2:]
             by_q[q].append((k[:4], ret))
 
+    # Quarterly range from HL data
+    import sqlite3 as _sq2
+    _conn2 = _sq2.connect(db_path)
+    _hl2 = _conn2.execute(
+        "SELECT date, high, low, close FROM stock_prices "
+        "WHERE symbol='NEPSE' AND close>0 ORDER BY date"
+    ).fetchall()
+    _conn2.close()
+    _qhl = defaultdict(list)
+    for _d, _h, _l, _c in _hl2:
+        _m = int(_d[5:7]); _qq = f'Q{(_m-1)//3+1}'
+        _qhl[f'{_d[:4]}-{_qq}'].append((_h, _l, _c))
+    by_q_range = defaultdict(list)
+    for _k in sorted(_qhl.keys()):
+        _rows = _qhl[_k]
+        if len(_rows) < 10: continue
+        _ph = max(r[0] for r in _rows)
+        _pl = min(r[1] for r in _rows if r[1]>0)
+        _fc = _rows[0][2]; _lc = _rows[-1][2]
+        _swing = (_ph-_pl)/_pl*100
+        _up    = (_ph-_fc)/_fc*100
+        _dn    = (_fc-_pl)/_fc*100
+        _qq = _k.split('-')[1]
+        by_q_range[_qq].append((_k[:4], _swing, _up, _dn))
+
     curr_q = f'Q{(today.month-1)//3+1}'
     next_q = f'Q{((today.month-1)//3+1)%4+1}'
 
@@ -3543,6 +3568,9 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
     qtable.add_column('Best',  justify='right', width=8)
     qtable.add_column('Worst', justify='right', width=8)
     qtable.add_column('Signal', width=12)
+    qtable.add_column('Swing(min-max)', justify='center', width=16)
+    qtable.add_column('Up Move', justify='right', width=9)
+    qtable.add_column('Dn Move', justify='right', width=9)
     qtable.add_column('Years', width=30)
 
     for q in ['Q1','Q2','Q3','Q4']:
@@ -3556,6 +3584,16 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
         verdict = 'STRONG BUY' if avg>=8 else 'BUY' if avg>=3 else 'NEUTRAL' if avg>=-1 else 'AVOID' if avg>=-4 else 'STRONG AVOID'
         marker = ' <--' if q == curr_q else (' next' if q == next_q else '')
         yr_detail = '  '.join(f'{yr}:{r:+.0f}%' for yr,r in sorted(by_q[q]))
+        rng_q = by_q_range[q]
+        if rng_q:
+            avg_sw_q = sum(r[1] for r in rng_q)/len(rng_q)
+            min_sw_q = min(r[1] for r in rng_q)
+            max_sw_q = max(r[1] for r in rng_q)
+            avg_up_q = sum(r[2] for r in rng_q)/len(rng_q)
+            avg_dn_q = sum(r[3] for r in rng_q)/len(rng_q)
+            sw_str_q = f'{avg_sw_q:.1f}%({min_sw_q:.0f}-{max_sw_q:.0f}%)'
+        else:
+            sw_str_q = 'N/A'; avg_up_q = avg_dn_q = 0
         qtable.add_row(
             f'[bold]{q}{marker}[/bold]',
             f'[{col}]{avg:+.1f}%[/{col}]',
@@ -3563,6 +3601,9 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
             f'[green]{best:+.1f}%[/green]',
             f'[red]{worst:+.1f}%[/red]',
             f'[{col}]{verdict}[/{col}]',
+            f'[yellow]{sw_str_q}[/yellow]',
+            f'[green]+{avg_up_q:.1f}%[/green]',
+            f'[red]-{avg_dn_q:.1f}%[/red]',
             f'[dim]{yr_detail}[/dim]',
         )
 
@@ -3577,29 +3618,55 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
     for d, c in nepse:
         yearly[d[:4]].append((d, c))
 
+    # Yearly range from HL data
+    import sqlite3 as _sq3
+    _conn3 = _sq3.connect(db_path)
+    _hl3 = _conn3.execute(
+        "SELECT date, high, low, close FROM stock_prices "
+        "WHERE symbol='NEPSE' AND close>0 ORDER BY date"
+    ).fetchall()
+    _conn3.close()
+    _yhl = defaultdict(list)
+    for _d, _h, _l, _c in _hl3:
+        _yhl[_d[:4]].append((_h, _l, _c))
+    yr_range = {}
+    for _yr, _rows in _yhl.items():
+        if len(_rows) < 5: continue
+        _ph = max(r[0] for r in _rows)
+        _pl = min(r[1] for r in _rows if r[1]>0)
+        _fc = _rows[0][2]
+        yr_range[_yr] = (
+            (_ph-_pl)/_pl*100,
+            (_ph-_fc)/_fc*100,
+            (_fc-_pl)/_fc*100,
+        )
+
     ytable = Table(show_header=True, header_style='bold cyan', box=None, padding=(0,1))
-    ytable.add_column('Year',  width=6)
-    ytable.add_column('Start', justify='right', width=8)
-    ytable.add_column('End',   justify='right', width=8)
-    ytable.add_column('Return', justify='right', width=8)
-    ytable.add_column('Days',  justify='right', width=6)
-    ytable.add_column('Bar',   width=25)
+    ytable.add_column('Year',    width=10)
+    ytable.add_column('Start',   justify='right', width=8)
+    ytable.add_column('End',     justify='right', width=8)
+    ytable.add_column('Return',  justify='right', width=8)
+    ytable.add_column('Days',    justify='right', width=6)
+    ytable.add_column('Swing',   justify='center', width=8)
+    ytable.add_column('Up Move', justify='right', width=9)
+    ytable.add_column('Dn Move', justify='right', width=9)
 
     for yr in sorted(yearly.keys()):
         closes = [c for _, c in sorted(yearly[yr])]
         if len(closes) < 5: continue
         ret = (closes[-1]-closes[0])/closes[0]*100
         col = 'green' if ret>0 else 'red'
-        bar_len = min(int(abs(ret)/2), 20)
-        bar = ('█' if ret>0 else '▓') * bar_len
         marker = ' <--' if yr == str(today.year) else ''
+        sw, up, dn = yr_range.get(yr, (0,0,0))
         ytable.add_row(
             f'[bold]{yr}{marker}[/bold]',
             f'{closes[0]:,.1f}',
             f'{closes[-1]:,.1f}',
             f'[{col}]{ret:+.1f}%[/{col}]',
             str(len(closes)),
-            f'[{col}]{bar}[/{col}]',
+            f'[yellow]{sw:.1f}%[/yellow]',
+            f'[green]+{up:.1f}%[/green]',
+            f'[red]-{dn:.1f}%[/red]',
         )
 
     console.print(ytable)
@@ -3650,14 +3717,45 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
     next_nq = {'NQ1':'NQ2','NQ2':'NQ3','NQ3':'NQ4','NQ4':'NQ1'}[curr_nq]
     nq_labels = {'NQ1':'Jul-Sep','NQ2':'Oct-Dec','NQ3':'Jan-Mar','NQ4':'Apr-Jun'}
 
+    # NQ range from HL data
+    import sqlite3 as _sq4
+    _conn4 = _sq4.connect(db_path)
+    _hl4 = _conn4.execute(
+        "SELECT date, high, low, close FROM stock_prices "
+        "WHERE symbol='NEPSE' AND close>0 ORDER BY date"
+    ).fetchall()
+    _conn4.close()
+    _nqhl = defaultdict(list)
+    for _d, _h, _l, _c in _hl4:
+        _mm = int(_d[5:7])
+        _nqk = f'{_fiscal_year(_d)}-{_nepali_q(_mm)}'
+        _nqhl[_nqk].append((_h, _l, _c))
+    by_nq_range = defaultdict(list)
+    for _k in sorted(_nqhl.keys()):
+        _rows = _nqhl[_k]
+        if len(_rows) < 10: continue
+        _ph = max(r[0] for r in _rows)
+        _pl = min(r[1] for r in _rows if r[1]>0)
+        _fc = _rows[0][2]
+        _nq = _k.split('-')[1]
+        by_nq_range[_nq].append((
+            _k[:4],
+            (_ph-_pl)/_pl*100,
+            (_ph-_fc)/_fc*100,
+            (_fc-_pl)/_fc*100,
+        ))
+
     nqtable = Table(show_header=True, header_style='bold cyan', box=None, padding=(0,1))
-    nqtable.add_column('Quarter',  width=22)
-    nqtable.add_column('Avg Ret',  justify='right', width=8)
-    nqtable.add_column('Up/Total', justify='center', width=9)
-    nqtable.add_column('Best',     justify='right', width=8)
-    nqtable.add_column('Worst',    justify='right', width=8)
-    nqtable.add_column('Signal',   width=12)
-    nqtable.add_column('History',  width=35)
+    nqtable.add_column('Quarter',       width=22)
+    nqtable.add_column('Avg Ret',       justify='right', width=8)
+    nqtable.add_column('Up/Total',      justify='center', width=9)
+    nqtable.add_column('Best',          justify='right', width=8)
+    nqtable.add_column('Worst',         justify='right', width=8)
+    nqtable.add_column('Signal',        width=12)
+    nqtable.add_column('Swing(min-max)',justify='center', width=16)
+    nqtable.add_column('Up Move',       justify='right', width=9)
+    nqtable.add_column('Dn Move',       justify='right', width=9)
+    nqtable.add_column('History',       width=35)
 
     for nq in ['NQ1','NQ2','NQ3','NQ4']:
         rets = [r for _,r in by_nq[nq]]
@@ -3670,6 +3768,16 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
         verdict = 'STRONG BUY' if avg>=8 else 'BUY' if avg>=3 else 'NEUTRAL' if avg>=-1 else 'AVOID' if avg>=-4 else 'STRONG AVOID'
         marker = ' <-- NOW' if nq==curr_nq else (' <- NEXT' if nq==next_nq else '')
         yr_detail = '  '.join(f'{fy}:{r:+.0f}%' for fy,r in sorted(by_nq[nq]))
+        rng_nq = by_nq_range[nq]
+        if rng_nq:
+            avg_sw_nq = sum(r[1] for r in rng_nq)/len(rng_nq)
+            min_sw_nq = min(r[1] for r in rng_nq)
+            max_sw_nq = max(r[1] for r in rng_nq)
+            avg_up_nq = sum(r[2] for r in rng_nq)/len(rng_nq)
+            avg_dn_nq = sum(r[3] for r in rng_nq)/len(rng_nq)
+            sw_str_nq = f'{avg_sw_nq:.1f}%({min_sw_nq:.0f}-{max_sw_nq:.0f}%)'
+        else:
+            sw_str_nq = 'N/A'; avg_up_nq = avg_dn_nq = 0
         nqtable.add_row(
             f'[bold]{nq} ({nq_labels[nq]}){marker}[/bold]',
             f'[{col}]{avg:+.1f}%[/{col}]',
@@ -3677,6 +3785,9 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
             f'[green]{best:+.1f}%[/green]',
             f'[red]{worst:+.1f}%[/red]',
             f'[{col}]{verdict}[/{col}]',
+            f'[yellow]{sw_str_nq}[/yellow]',
+            f'[green]+{avg_up_nq:.1f}%[/green]',
+            f'[red]-{avg_dn_nq:.1f}%[/red]',
             f'[dim]{yr_detail}[/dim]',
         )
 
