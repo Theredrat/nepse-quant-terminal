@@ -3609,7 +3609,7 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
     nq_labels = {'NQ1':'Jul-Sep','NQ2':'Oct-Dec','NQ3':'Jan-Mar','NQ4':'Apr-Jun'}
 
     nqtable = Table(show_header=True, header_style='bold cyan', box=None, padding=(0,1))
-    nqtable.add_column('Quarter',  width=14)
+    nqtable.add_column('Quarter',  width=22)
     nqtable.add_column('Avg Ret',  justify='right', width=8)
     nqtable.add_column('Up/Total', justify='center', width=9)
     nqtable.add_column('Best',     justify='right', width=8)
