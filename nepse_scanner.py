@@ -3137,11 +3137,48 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
         ).fetchall()
 
         if prices_tp:
-            curr_p     = prices_tp[0][3]
-            support    = min(p[2] for p in prices_tp[:5])
-            resistance = max(p[1] for p in prices_tp[:10])
+            curr_p = prices_tp[0][3]
+            zone   = curr_p * 0.02
+
+            # Build real S/R clusters — levels touched 2+ times
+            _levels = []
+            for _p in prices_tp:
+                _levels.append(_p[1])  # high
+                _levels.append(_p[2])  # low
+
+            _used = set()
+            _clusters = []
+            for _i, _v1 in enumerate(_levels):
+                if _i in _used: continue
+                _grp = [_v1]
+                _idx = [_i]
+                for _j, _v2 in enumerate(_levels):
+                    if _j != _i and _j not in _used and abs(_v1-_v2) <= zone:
+                        _grp.append(_v2)
+                        _idx.append(_j)
+                if len(_grp) >= 2:
+                    _clusters.append(sum(_grp)/len(_grp))
+                    _used.update(_idx)
+
+            _supports    = sorted([l for l in _clusters if l < curr_p], reverse=True)
+            _resistances = sorted([l for l in _clusters if l > curr_p])
+
+            support    = round(_supports[0], 1)    if _supports    else round(min(p[2] for p in prices_tp[:5]), 1)
+            resistance = round(_resistances[0], 1) if _resistances else round(max(p[1] for p in prices_tp[:10]), 1)
             stop_loss  = round(support * 0.97, 1)
             target     = round(resistance * 0.95, 1)
+
+            # Show all levels found
+            console.print('  [bold]Key S/R Levels (cluster method):[/bold]')
+            if _supports:
+                for _l in _supports[:3]:
+                    _tag = ' <- STOP ZONE' if abs(_l - support) < 1 else ''
+                    console.print(f'  [green]  Support:    Rs {_l:,.1f}{_tag}[/green]')
+            if _resistances:
+                for _l in _resistances[:3]:
+                    _tag = ' <- TARGET ZONE' if abs(_l - resistance) < 1 else ''
+                    console.print(f'  [red]  Resistance: Rs {_l:,.1f}{_tag}[/red]')
+            console.print()
             risk       = curr_p - stop_loss
             reward     = target - curr_p
             rr         = round(reward / risk, 2) if risk > 0 else 0
