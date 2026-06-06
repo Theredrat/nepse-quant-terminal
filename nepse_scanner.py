@@ -3473,6 +3473,108 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
         console.print('  [red]-> Wait for next month[/red]')
     console.print()
 
+    # === QUARTERLY SEASONALITY ===
+    console.rule('[bold]Quarterly Seasonality (Calendar Year)[/bold]')
+    console.print()
+
+    quarterly = defaultdict(list)
+    for d, c in nepse:
+        m = int(d[5:7])
+        q = (m-1)//3 + 1
+        key = f'{d[:4]}-Q{q}'
+        quarterly[key].append(c)
+
+    by_q = defaultdict(list)
+    for k, closes in sorted(quarterly.items()):
+        if len(closes) >= 10:
+            ret = (closes[-1]-closes[0])/closes[0]*100
+            q = k[-2:]
+            by_q[q].append((k[:4], ret))
+
+    curr_q = f'Q{(today.month-1)//3+1}'
+    next_q = f'Q{((today.month-1)//3+1)%4+1}'
+
+    qtable = Table(show_header=True, header_style='bold cyan', box=None, padding=(0,1))
+    qtable.add_column('Quarter', width=10)
+    qtable.add_column('Avg Ret', justify='right', width=8)
+    qtable.add_column('Up/Total', justify='center', width=9)
+    qtable.add_column('Best',  justify='right', width=8)
+    qtable.add_column('Worst', justify='right', width=8)
+    qtable.add_column('Signal', width=12)
+    qtable.add_column('Years', width=30)
+
+    for q in ['Q1','Q2','Q3','Q4']:
+        rets = [r for _,r in by_q[q]]
+        if not rets: continue
+        avg  = sum(rets)/len(rets)
+        wins = sum(1 for r in rets if r>0)
+        best = max(rets)
+        worst= min(rets)
+        col  = 'green' if avg>=3 else 'yellow' if avg>=0 else 'red'
+        verdict = 'STRONG BUY' if avg>=8 else 'BUY' if avg>=3 else 'NEUTRAL' if avg>=-1 else 'AVOID' if avg>=-4 else 'STRONG AVOID'
+        marker = ' <--' if q == curr_q else (' next' if q == next_q else '')
+        yr_detail = '  '.join(f'{yr}:{r:+.0f}%' for yr,r in sorted(by_q[q]))
+        qtable.add_row(
+            f'[bold]{q}{marker}[/bold]',
+            f'[{col}]{avg:+.1f}%[/{col}]',
+            f'[{col}]{wins}/{len(rets)}[/{col}]',
+            f'[green]{best:+.1f}%[/green]',
+            f'[red]{worst:+.1f}%[/red]',
+            f'[{col}]{verdict}[/{col}]',
+            f'[dim]{yr_detail}[/dim]',
+        )
+
+    console.print(qtable)
+    console.print()
+
+    # === YEARLY SEASONALITY ===
+    console.rule('[bold]Yearly Performance[/bold]')
+    console.print()
+
+    yearly = defaultdict(list)
+    for d, c in nepse:
+        yearly[d[:4]].append(c)
+
+    ytable = Table(show_header=True, header_style='bold cyan', box=None, padding=(0,1))
+    ytable.add_column('Year',  width=6)
+    ytable.add_column('Start', justify='right', width=8)
+    ytable.add_column('End',   justify='right', width=8)
+    ytable.add_column('Return', justify='right', width=8)
+    ytable.add_column('Days',  justify='right', width=6)
+    ytable.add_column('Bar',   width=25)
+
+    for yr in sorted(yearly.keys()):
+        closes = [c for _, c in sorted(yearly[yr])]
+        if len(closes) < 5: continue
+        ret = (closes[-1]-closes[0])/closes[0]*100
+        col = 'green' if ret>0 else 'red'
+        bar_len = min(int(abs(ret)/2), 20)
+        bar = ('█' if ret>0 else '▓') * bar_len
+        marker = ' <--' if yr == str(today.year) else ''
+        ytable.add_row(
+            f'[bold]{yr}{marker}[/bold]',
+            f'{closes[0]:,.1f}',
+            f'{closes[-1]:,.1f}',
+            f'[{col}]{ret:+.1f}%[/{col}]',
+            str(len(closes)),
+            f'[{col}]{bar}[/{col}]',
+        )
+
+    console.print(ytable)
+    console.print()
+
+    # Year summary
+    all_yr_rets = []
+    for yr in sorted(yearly.keys()):
+        closes = [c for _,c in sorted(yearly[yr])]
+        if len(closes)>=20:
+            all_yr_rets.append((yr, (closes[-1]-closes[0])/closes[0]*100))
+    if all_yr_rets:
+        up_yrs = sum(1 for _,r in all_yr_rets if r>0)
+        avg_yr = sum(r for _,r in all_yr_rets)/len(all_yr_rets)
+        console.print(f'  Full years: {up_yrs}/{len(all_yr_rets)-1} up  |  avg annual return: {avg_yr:+.1f}%')
+        console.print()
+
 
 def analyze_market_phase(db_path='nepse_market_data.db'):
     """Option 37 - Market Phase Detector"""
