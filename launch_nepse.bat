@@ -96,6 +96,7 @@ echo.
 echo   --- FULL ANALYSIS ---
   echo   35. Full Stock Report  (one-stop buy/sell decision)
   echo   36. Best R/R Scanner   (stocks with good R/R at current price)
+  echo   37. Market Phase        (Accumulation / Markup / Distribution / Markdown)
   echo.
   echo   --- HELP ---
 echo   21. Signal Legend / Help
@@ -136,6 +137,7 @@ if "%choice%"=="21b" python nepse_scanner.py --guide & goto AGAIN
 if "%choice%"=="35" goto FULL_REPORT
 
 if "%choice%"=="36" goto BEST_RR
+if "%choice%"=="37" python nepse_scanner.py --market-phase ^& goto AGAIN
 if "%choice%"=="22" start python nepse_alerts.py & goto AGAIN
 if "%choice%"=="23" python nepse_scanner.py --corr & goto AGAIN
 if "%choice%"=="24" python nepse_scanner.py --portfolio & goto AGAIN

@@ -1975,6 +1975,7 @@ def parse_args():
     p.add_argument('--guide',       action='store_true', dest='buy_sell_guide')
     p.add_argument('--full-report',  metavar='SYMBOL', dest='full_report', default=None)
     p.add_argument('--best-rr',       action='store_true', dest='best_rr', help='Best R/R scanner')
+    p.add_argument('--market-phase',   action='store_true', dest='market_phase', help='Market phase detector')
     p.add_argument('--portfolio',   nargs='*', metavar='SYMBOL', help='Position sizing + correlation for a set of stocks')
     p.add_argument('--corr',        action='store_true', help='Sector correlation heatmap')
     p.add_argument('--size',        nargs=2, metavar=('SYMBOL','AMOUNT'), help='Volatility-adjusted sizing e.g. --size AKJCL 100000')
@@ -3318,6 +3319,197 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
     console.print()
 
 
+def analyze_market_phase(db_path='nepse_market_data.db'):
+    """Option 37 - Market Phase Detector"""
+    from rich.console import Console
+    from rich.rule import Rule
+    from rich.table import Table
+    console = Console()
+    import sqlite3
+
+    console.print()
+    console.rule('[bold yellow]Option 37 — Market Phase Detector[/bold yellow]', style='yellow')
+    console.print()
+
+    conn = sqlite3.connect(db_path)
+
+    # === SIGNAL 1: NEPSE TREND ===
+    nepse = conn.execute(
+        "SELECT date, close FROM stock_prices WHERE symbol='NEPSE' AND close>0 ORDER BY date DESC LIMIT 50"
+    ).fetchall()
+    nepse_dates  = [r[0] for r in nepse]
+    nepse_closes = [r[1] for r in nepse]
+    curr_nepse = nepse_closes[0] if nepse_closes else 0
+    ma20 = sum(nepse_closes[:20])/20 if len(nepse_closes)>=20 else curr_nepse
+    ma50 = sum(nepse_closes[:50])/50 if len(nepse_closes)>=50 else curr_nepse
+    trend_5d = round((nepse_closes[0]-nepse_closes[min(4,len(nepse_closes)-1)])/nepse_closes[min(4,len(nepse_closes)-1)]*100,1) if len(nepse_closes)>=2 else 0
+    nepse_score = 0
+    if curr_nepse > ma20: nepse_score += 25
+    if ma20 > ma50:       nepse_score += 25
+    nepse_note = 'last available' if nepse_dates[0] < '2026-06-01' else 'current'
+
+    # === SIGNAL 2: BREADTH (5 days) ===
+    dates = conn.execute(
+        "SELECT DISTINCT date FROM stock_prices WHERE symbol!='NEPSE' ORDER BY date DESC LIMIT 7"
+    ).fetchall()
+    dates = [d[0] for d in dates]
+    adv_total = dec_total = 0
+    daily_breadth = []
+    for i in range(min(5,len(dates)-1)):
+        d1,d2 = dates[i],dates[i+1]
+        a = conn.execute(
+            "SELECT COUNT(*) FROM stock_prices t1 JOIN stock_prices t2 ON t1.symbol=t2.symbol "
+            "AND t2.date=? WHERE t1.date=? AND t1.close>t2.close",(d2,d1)
+        ).fetchone()[0]
+        d = conn.execute(
+            "SELECT COUNT(*) FROM stock_prices t1 JOIN stock_prices t2 ON t1.symbol=t2.symbol "
+            "AND t2.date=? WHERE t1.date=? AND t1.close<t2.close",(d2,d1)
+        ).fetchone()[0]
+        adv_total+=a; dec_total+=d
+        daily_breadth.append((d1,a,d))
+    breadth_ratio = round(adv_total/(adv_total+dec_total)*100) if (adv_total+dec_total)>0 else 50
+    breadth_score = 25 if breadth_ratio>=55 else 15 if breadth_ratio>=45 else 0
+
+    # === SIGNAL 3: % STOCKS ABOVE 20MA ===
+    all_syms = [s[0] for s in conn.execute(
+        "SELECT DISTINCT symbol FROM stock_prices WHERE date=? AND symbol!='NEPSE' AND close>0",
+        (dates[0],)
+    ).fetchall()]
+    above20=total20=0
+    for sym in all_syms:
+        p = conn.execute(
+            "SELECT close FROM stock_prices WHERE symbol=? AND close>0 ORDER BY date DESC LIMIT 20",
+            (sym,)
+        ).fetchall()
+        if len(p)>=20:
+            if p[0][0] > sum(x[0] for x in p)/20: above20+=1
+            total20+=1
+    pct_above = round(above20/total20*100) if total20 else 0
+    above_score = 25 if pct_above>=55 else 15 if pct_above>=45 else 0
+
+    # === SIGNAL 4: SMART MONEY DOMINANCE ===
+    sm_buy_days=0
+    for d in dates[:5]:
+        rows = conn.execute("SELECT net_val FROM broker_activity WHERE date=?",(d,)).fetchall()
+        vals = [r[0] for r in rows]
+        t5b = sum(sorted([v for v in vals if v>0],reverse=True)[:5])
+        t5s = sum(sorted([abs(v) for v in vals if v<0],reverse=True)[:5])
+        if t5b > t5s: sm_buy_days+=1
+    sm_score = 25 if sm_buy_days>=4 else 15 if sm_buy_days>=3 else 5 if sm_buy_days>=2 else 0
+
+    conn.close()
+
+    # === TOTAL SCORE & PHASE ===
+    total = nepse_score + breadth_score + above_score + sm_score
+
+    if total >= 80:
+        phase='MARKUP';        phase_col='green';  phase_note='Strong uptrend — buy breakouts, ride momentum'
+    elif total >= 60:
+        phase='ACCUMULATION';  phase_col='cyan';   phase_note='Institutions building positions — look for setups'
+    elif total >= 40:
+        phase='TRANSITION';    phase_col='yellow'; phase_note='Mixed signals — be selective, reduce size'
+    elif total >= 20:
+        phase='DISTRIBUTION';  phase_col='orange'; phase_note='Institutions selling — avoid new entries'
+    else:
+        phase='MARKDOWN';      phase_col='red';    phase_note='Downtrend — stay in cash, wait for reversal'
+
+    # === DISPLAY ===
+    console.print(f'  Latest data: {dates[0]}')
+    console.print()
+
+    # Phase banner
+    console.print(f'  [bold {phase_col}]{"="*50}[/bold {phase_col}]')
+    console.print(f'  [bold {phase_col}]  MARKET PHASE: {phase}  ({total}/100)[/bold {phase_col}]')
+    console.print(f'  [bold {phase_col}]{"="*50}[/bold {phase_col}]')
+    console.print()
+    console.print(f'  [{phase_col}]{phase_note}[/{phase_col}]')
+    console.print()
+
+    # Signal breakdown
+    console.rule('[bold]Signal Breakdown[/bold]')
+    console.print()
+
+    # NEPSE trend
+    n_col = 'green' if nepse_score>=40 else 'yellow' if nepse_score>=20 else 'red'
+    console.print(f'  [bold]1. NEPSE Index ({nepse_note})[/bold]')
+    console.print(f'     Index:  {curr_nepse:,.1f}  |  MA20: {ma20:,.1f}  |  MA50: {ma50:,.1f}')
+    console.print(f'     5d change: {trend_5d:+.1f}%')
+    above_ma = curr_nepse > ma20
+    golden = ma20 > ma50
+    console.print(f'     Price vs MA20: [{"green" if above_ma else "red"}]{"ABOVE" if above_ma else "BELOW"}[/{"green" if above_ma else "red"}]  |  MA20 vs MA50: [{"green" if golden else "red"}]{"GOLDEN CROSS" if golden else "DEATH CROSS"}[/{"green" if golden else "red"}]')
+    console.print(f'     Score: [{n_col}]{nepse_score}/50[/{n_col}]')
+    console.print()
+
+    # Breadth
+    b_col = 'green' if breadth_score>=20 else 'yellow' if breadth_score>=15 else 'red'
+    console.print(f'  [bold]2. Market Breadth (5-day)[/bold]')
+    for d,a,dec in daily_breadth:
+        bar = '▲'*min(a//20,10) + '▼'*min(dec//20,10)
+        b_c = 'green' if a>dec else 'red'
+        console.print(f'     {d}: [{b_c}]+{a} / -{dec}[/{b_c}]')
+    console.print(f'     Advance ratio: [{b_col}]{breadth_ratio}% ({"bullish" if breadth_ratio>=55 else "neutral" if breadth_ratio>=45 else "bearish"})[/{b_col}]')
+    console.print(f'     Score: [{b_col}]{breadth_score}/25[/{b_col}]')
+    console.print()
+
+    # % above 20MA
+    a_col = 'green' if above_score>=20 else 'yellow' if above_score>=15 else 'red'
+    console.print(f'  [bold]3. Stocks Above 20-day MA[/bold]')
+    bar_len = pct_above // 5
+    bar = '█'*bar_len + '░'*(20-bar_len)
+    console.print(f'     [{a_col}]{bar} {pct_above}%[/{a_col}]  ({above20}/{total20} stocks)')
+    status = 'broad participation' if pct_above>=55 else 'mixed' if pct_above>=45 else 'narrow — weak market'
+    console.print(f'     [{a_col}]{status}[/{a_col}]')
+    console.print(f'     Score: [{a_col}]{above_score}/25[/{a_col}]')
+    console.print()
+
+    # Smart money
+    s_col = 'green' if sm_score>=20 else 'yellow' if sm_score>=15 else 'red'
+    console.print(f'  [bold]4. Smart Money Dominance (5-day)[/bold]')
+    console.print(f'     Buy-dominant days: [{s_col}]{sm_buy_days}/5[/{s_col}]')
+    sm_note = 'accumulating' if sm_buy_days>=4 else 'mixed' if sm_buy_days>=2 else 'distributing'
+    console.print(f'     Smart money: [{s_col}]{sm_note}[/{s_col}]')
+    console.print(f'     Score: [{s_col}]{sm_score}/25[/{s_col}]')
+    console.print()
+
+    # Trading guidance
+    console.rule('[bold]What To Do Now[/bold]')
+    console.print()
+    if phase == 'MARKUP':
+        console.print('  [green]-> Buy breakouts above resistance with volume[/green]')
+        console.print('  [green]-> Trail stop losses, let winners run[/green]')
+        console.print('  [green]-> Focus on sector leaders[/green]')
+    elif phase == 'ACCUMULATION':
+        console.print('  [cyan]-> Look for stocks at support with broker accumulation[/cyan]')
+        console.print('  [cyan]-> Run option 36 daily — good R/R setups appearing[/cyan]')
+        console.print('  [cyan]-> Build positions slowly, keep stops tight[/cyan]')
+    elif phase == 'TRANSITION':
+        console.print('  [yellow]-> Be very selective — only highest quality setups[/yellow]')
+        console.print('  [yellow]-> Reduce position sizes by 50%[/yellow]')
+        console.print('  [yellow]-> Run option 35 before any entry[/yellow]')
+    elif phase == 'DISTRIBUTION':
+        console.print('  [yellow]-> Avoid new entries[/yellow]')
+        console.print('  [yellow]-> Start reducing existing positions[/yellow]')
+        console.print('  [yellow]-> Watch for holders selling in option 17c[/yellow]')
+    else:  # MARKDOWN
+        console.print('  [red]-> Stay in cash — do not buy dips[/red]')
+        console.print('  [red]-> Wait for breadth to improve above 50%[/red]')
+        console.print('  [red]-> Wait for % above 20MA to cross 50%[/red]')
+        console.print('  [red]-> Only act when smart money buy days >= 3/5[/red]')
+    console.print()
+
+    # Recovery signals to watch
+    if phase in ('MARKDOWN','DISTRIBUTION'):
+        console.rule('[bold cyan]Recovery Signals To Watch[/bold cyan]')
+        console.print()
+        need_breadth = 55 - breadth_ratio
+        need_above   = 55 - pct_above
+        need_sm      = 3 - sm_buy_days
+        console.print(f'  Breadth needs: +{max(0,need_breadth)}% more advances (currently {breadth_ratio}%, need 55%)')
+        console.print(f'  Above 20MA needs: +{max(0,need_above)}% more stocks (currently {pct_above}%, need 55%)')
+        console.print(f'  Smart money needs: {max(0,need_sm)} more buy days (currently {sm_buy_days}/5, need 3+)')
+        console.print()
+
+
 def analyze_best_rr(db_path='nepse_market_data.db'):
     """Option 36 - Best R/R Scanner: finds stocks with good R/R at current price"""
     from rich.console import Console
@@ -3466,6 +3658,9 @@ def main():
         return
     elif getattr(args, 'best_rr', False):
         analyze_best_rr()
+        return
+    elif getattr(args, 'market_phase', False):
+        analyze_market_phase()
         return
     if getattr(args, "unlock", None) and args.unlock[0].lower() in ("add","delete","list","upcoming"):
         _unlock_db()
