@@ -2955,13 +2955,13 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
 
         console.print()
 
-        # ── RS vs Sector ──
+        # ── RS vs Sector + RSI ──
         try:
             rs_data = _calc_relative_strength(db_path=db_path)
             rs_row = next((r for r in rs_data if r['symbol'] == symbol), None)
             if rs_row:
-                rs5 = rs_row.get('rs_5d', 0) or 0
-                rs20 = rs_row.get('rs_20d', 0) or 0
+                rs5 = rs_row.get('rs5', 0) or 0
+                rs20 = rs_row.get('rs20', 0) or 0
                 rs_col = 'green' if rs5 > 0 else 'red'
                 rs20_col = 'green' if rs20 > 0 else 'red'
                 console.print(f'  RS vs Sector (5d): [{rs_col}]{rs5:+.1f}%[/{rs_col}]  |  RS vs Sector (20d): [{rs20_col}]{rs20:+.1f}%[/{rs20_col}]')
@@ -2971,6 +2971,28 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
                 elif rs5 < 0: tech_score -= 8
             else:
                 console.print('  RS vs Sector: [dim]not enough data[/dim]')
+        except Exception:
+            pass
+
+        # ── RSI(14) ──
+        try:
+            rsi_prices = conn.execute(
+                'SELECT close FROM stock_prices WHERE symbol=? AND close > 0 ORDER BY date DESC LIMIT 20',
+                (symbol,)
+            ).fetchall()
+            if len(rsi_prices) >= 10:
+                rsi_closes = [p[0] for p in reversed(rsi_prices)]
+                gains = [max(rsi_closes[i]-rsi_closes[i-1], 0) for i in range(1, len(rsi_closes))]
+                losses = [max(rsi_closes[i-1]-rsi_closes[i], 0) for i in range(1, len(rsi_closes))]
+                avg_gain = sum(gains[-14:]) / min(14, len(gains)) if gains else 0
+                avg_loss = sum(losses[-14:]) / min(14, len(losses)) if losses else 1
+                rsi = 100 - (100 / (1 + avg_gain / avg_loss)) if avg_loss > 0 else 100
+                rsi_col = 'red' if rsi > 70 else 'green' if rsi < 30 else 'yellow'
+                rsi_note = '— OVERBOUGHT (consider selling)' if rsi > 70 else '— OVERSOLD (potential bounce)' if rsi < 30 else '— NEUTRAL'
+                console.print(f'  RSI(14): [{rsi_col}]{rsi:.1f}[/{rsi_col}] {rsi_note}')
+                if rsi < 30: tech_score += 15
+                elif rsi > 70: tech_score -= 15
+                elif rsi < 45: tech_score += 5
         except Exception:
             pass
 
@@ -3013,6 +3035,23 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
         t_col = 'green' if tech_score >= 65 else 'yellow' if tech_score >= 40 else 'red'
         console.print()
         console.print(f'  Technical Score: [{t_col}]{tech_score}/100 — {t_verdict}[/{t_col}]')
+
+        # Smart interpretation
+        try:
+            broker_s_temp = next((s for n,s,v,c in section_verdicts if n == 'Broker Activity'), 50)
+            if broker_s_temp >= 70 and tech_score < 50:
+                console.print('  [dim]-> Price falling but brokers accumulating — classic dip buying. Wait for price to stabilize.[/dim]')
+            elif broker_s_temp >= 70 and tech_score >= 65:
+                console.print('  [dim]-> Both price momentum and broker accumulation aligned — strong entry signal.[/dim]')
+            elif broker_s_temp < 40 and tech_score >= 65:
+                console.print('  [dim]-> Price rising but institutions not buying — momentum only, high risk.[/dim]')
+            elif tech_score < 35 and broker_s_temp < 40:
+                console.print('  [dim]-> Price falling and brokers selling — avoid, wait for reversal signal.[/dim]')
+            elif 'rsi' in dir() and rsi < 30:
+                console.print('  [dim]-> RSI oversold — price may bounce soon. Watch for broker accumulation.[/dim]')
+        except Exception:
+            pass
+
         section_verdicts.append(('Technical', tech_score, t_verdict, t_col))
         total_score += tech_score
         max_score += 100
