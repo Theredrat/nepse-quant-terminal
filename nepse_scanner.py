@@ -5904,6 +5904,66 @@ def analyze_broker_date(symbol=None, date_str=None, db_path='nepse_market_data.d
     console.print(f'  [{flow_col}]{flow_dir}: {_fmt(abs(net_flow))}[/{flow_col}]')
     console.print()
 
+    # ── My Holders Watch ──
+    try:
+        import sqlite3 as _sq3
+        _conn3 = _sq3.connect(db_path)
+        # Get top 5 estimated holders from all broker_activity
+        _holders = _conn3.execute(
+            '''SELECT broker_id,
+                SUM(buy_qty) - SUM(sell_qty) as net_held
+            FROM broker_activity
+            WHERE symbol=? AND broker_id GLOB "[0-9]*"
+            GROUP BY broker_id
+            HAVING net_held > 0
+            ORDER BY net_held DESC LIMIT 5''',
+            (symbol,)
+        ).fetchall()
+        _conn3.close()
+
+        if _holders:
+            _holder_ids = set(str(h[0]) for h in _holders)
+            # Check which holders are buying or selling today
+            _buying_holders  = [str(r[0]) for r in rows if str(r[0]) in _holder_ids and r[6] > 0]
+            _selling_holders = [str(r[0]) for r in rows if str(r[0]) in _holder_ids and r[6] < 0]
+            _inactive_holders = [str(h[0]) for h in _holders if str(h[0]) not in {str(r[0]) for r in rows}]
+
+            console.rule('[bold cyan]Top Holder Watch[/bold cyan]')
+            console.print()
+            console.print(f'  [dim]Tracking your top 5 estimated holders for {symbol}:[/dim]')
+            console.print()
+
+            for h in _holders:
+                hid = str(h[0])
+                held = h[1]
+                # Find today's activity for this holder
+                today = next((r for r in rows if str(r[0]) == hid), None)
+                if today:
+                    nv = today[6]
+                    nq = today[3]
+                    if nv > 0:
+                        status = f'[green]BUYING today  +{nq:,} shares (+{_fmt(nv)})[/green]  <- ACCUMULATING'
+                    else:
+                        status = f'[red]SELLING today {nq:,} shares (-{_fmt(abs(nv))})[/red]  <- WARNING'
+                else:
+                    status = '[dim]Not active today[/dim]'
+                console.print(f'  Broker {hid:>3} (holds ~{held:,.0f} shares): {status}')
+
+            console.print()
+            # Verdict
+            if _selling_holders:
+                console.print(f'  [bold red]ALERT: Your holders selling — Broker {", ".join(_selling_holders)} flipping![/bold red]')
+                console.print('  [red]-> Consider reducing position. Run 17d to check trend.[/red]')
+            elif _buying_holders:
+                console.print(f'  [bold green]GOOD: Your holders still accumulating — Broker {", ".join(_buying_holders)}[/bold green]')
+                console.print('  [green]-> Hold position. Institutions still confident.[/green]')
+            else:
+                console.print('  [yellow]Your top holders not active today — neutral signal.[/yellow]')
+                console.print('  [dim]-> Watch tomorrow. Absence could mean waiting or done.[/dim]')
+            console.print()
+    except Exception as _e:
+        pass
+
     # Final analysis summary
     console.rule('[bold cyan]Analysis Summary[/bold cyan]')
     console.print()
