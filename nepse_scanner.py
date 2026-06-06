@@ -3415,11 +3415,11 @@ def analyze_best_rr(db_path='nepse_market_data.db'):
 
     table = Table(show_header=True, header_style='bold cyan', box=None, padding=(0,1))
     table.add_column('Symbol',    style='bold', width=10)
-    table.add_column('Price',     justify='right', width=8)
-    table.add_column('Support',   justify='right', width=9)
-    table.add_column('Resist',    justify='right', width=9)
-    table.add_column('Stop',      justify='right', width=8)
-    table.add_column('Target',    justify='right', width=8)
+    table.add_column('Price',     justify='right', width=10)
+    table.add_column('Support',   justify='right', width=10)
+    table.add_column('Resist',    justify='right', width=10)
+    table.add_column('Stop',      justify='right', width=10)
+    table.add_column('Target',    justify='right', width=10)
     table.add_column('R/R',       justify='right', width=6)
     table.add_column('Broker%',   justify='right', width=8)
     table.add_column('RSI',       justify='right', width=6)
@@ -3432,11 +3432,11 @@ def analyze_best_rr(db_path='nepse_market_data.db'):
         br_col  = 'green'      if bs >= 80 else 'yellow'     if bs >= 50 else 'red'
         table.add_row(
             sym,
-            f'Rs {curr:,.1f}',
-            f'Rs {sup:,.1f}',
-            f'Rs {res:,.1f}',
-            f'Rs {sl:,.1f}',
-            f'Rs {tgt:,.1f}',
+            f'{curr:,.0f}',
+            f'{sup:,.0f}',
+            f'{res:,.0f}',
+            f'{sl:,.0f}',
+            f'{tgt:,.0f}',
             f'[{rr_col}]1:{rr}[/{rr_col}]',
             f'[{br_col}]{bs}%[/{br_col}]',
             f'[{rsi_col}]{rsi}[/{rsi_col}]',
