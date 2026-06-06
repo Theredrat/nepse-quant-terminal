@@ -3948,12 +3948,21 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
         key = f'{d[:4]}-Q{q}'
         quarterly[key].append(c)
 
+    from datetime import date as _dt38
+    _curr_q38 = f'Q{(_dt38.today().month-1)//3+1}'
+    _curr_yr38 = str(_dt38.today().year)
+    _first_q38 = f'Q{(5-1)//3+1}'
+    _first_yr38 = '2021'
+
     by_q = defaultdict(list)
     for k, closes in sorted(quarterly.items()):
         if len(closes) >= 10:
+            yr38 = k[:4]
+            q38  = k[-2:]
+            if (yr38, q38) == (_curr_yr38, _curr_q38): continue
+            if (yr38, q38) == (_first_yr38, _first_q38): continue
             ret = (closes[-1]-closes[0])/closes[0]*100
-            q = k[-2:]
-            by_q[q].append((k[:4], ret))
+            by_q[q38].append((yr38, ret))
 
     # Quarterly range from HL data
     import sqlite3 as _sq2
