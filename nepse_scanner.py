@@ -3652,6 +3652,96 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
     console.print(f'  Next ({next_nq} {nq_labels[next_nq]}): [{col_next}]avg {next_avg:+.1f}%[/{col_next}]')
     console.print()
 
+    # === YEAR CYCLE ANALYSIS ===
+    console.rule('[bold]Year Cycle Analysis & 2026 Projection[/bold]')
+    console.print()
+
+    # Build full year returns
+    yearly2 = defaultdict(list)
+    for d, c in nepse:
+        yearly2[d[:4]].append((d, c))
+
+    yr_rets = {}
+    for yr in sorted(yearly2.keys()):
+        closes = [c for _, c in sorted(yearly2[yr])]
+        if len(closes) >= 20:
+            yr_rets[yr] = round((closes[-1]-closes[0])/closes[0]*100, 1)
+
+    # Classify each year
+    def yr_label(r):
+        if r >= 15:  return ('BULL',   'green')
+        if r >= 5:   return ('UP',     'green')
+        if r >= -2:  return ('FLAT',   'yellow')
+        if r >= -10: return ('DOWN',   'red')
+        return           ('CRASH',  'red')
+
+    console.print('  [bold]Historical Year Cycle:[/bold]')
+    console.print()
+    yrs = sorted(yr_rets.keys())
+    for i, yr in enumerate(yrs):
+        r = yr_rets[yr]
+        label, col = yr_label(r)
+        arrow = ''
+        if i > 0:
+            prev = yr_rets[yrs[i-1]]
+            arrow = '[green]▲[/green]' if r > prev else '[red]▼[/red]' if r < prev else '[yellow]=[/yellow]'
+        bar_len = min(int(abs(r)/2), 15)
+        bar = ('█' if r>=0 else '▓') * bar_len
+        console.print(f'  {arrow} [bold]{yr}[/bold]: [{col}]{r:+.1f}%  {label}[/{col}]  [{col}]{bar}[/{col}]')
+
+    console.print()
+
+    # Cycle pattern detection
+    console.print('  [bold]Cycle Pattern (2021-2026):[/bold]')
+    console.print()
+    pattern = []
+    for yr in yrs:
+        l, _ = yr_label(yr_rets[yr])
+        pattern.append(f'{yr}:{l}')
+    console.print('  ' + '  ->  '.join(pattern))
+    console.print()
+
+    # 2026 projection
+    curr_yr = str(today.year)
+    curr_yr_days = len(yearly2.get(curr_yr, []))
+    curr_yr_ret  = yr_rets.get(curr_yr, 0)
+
+    # Remaining months in year
+    remaining_months = 12 - today.month
+    # Sum seasonality for remaining months
+    remaining_seasonal = sum(
+        sum(r for _,r in by_month[m])/len(by_month[m])
+        for m in range(today.month+1, 13)
+        if by_month[m]
+    )
+    projected_additional = round(remaining_seasonal, 1)
+    projected_total = round(curr_yr_ret + projected_additional, 1)
+    proj_label, proj_col = yr_label(projected_total)
+
+    console.rule(f'[bold cyan]2026 Projection[/bold cyan]')
+    console.print()
+    console.print(f'  Year to date ({curr_yr_days} trading days): [bold]{curr_yr_ret:+.1f}%[/bold]')
+    console.print(f'  Remaining months: {remaining_months}')
+    console.print(f'  Historical avg for remaining months: {projected_additional:+.1f}%')
+    console.print()
+    console.print(f'  [bold cyan]Projected full year 2026: [{proj_col}]{projected_total:+.1f}% ({proj_label})[/{proj_col}][/bold cyan]')
+    console.print()
+
+    # Key dates coming up
+    console.rule('[bold]Key Seasonal Dates Ahead[/bold]')
+    console.print()
+    upcoming = [
+        (7,  'Jul',  'STRONG BUY',  'green',  'Best month of year — deploy capital'),
+        (8,  'Aug',  'AVOID',       'red',    'Exit July positions — historically -4.4%'),
+        (9,  'Sep',  'STRONG AVOID','red',    'Worst month — stay in cash'),
+        (10, 'Oct',  'NEUTRAL',     'yellow', 'Cautious re-entry possible'),
+        (1,  'Jan',  'BUY',         'green',  'Second best month — avg +4.5%'),
+    ]
+    for m, name, sig, col, note in upcoming:
+        if m > today.month or (m < today.month and m == 1):
+            console.print(f'  [{col}]{name:>4}: {sig:<12} — {note}[/{col}]')
+    console.print()
+
 
 def analyze_market_phase(db_path='nepse_market_data.db'):
     """Option 37 - Market Phase Detector"""
