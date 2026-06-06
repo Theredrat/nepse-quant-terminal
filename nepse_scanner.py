@@ -4035,6 +4035,82 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
             console.print(f'  [{col}]{name:>4}: {sig:<12} — {note}[/{col}]')
     console.print()
 
+    # === MASTER SUMMARY ===
+    console.rule('[bold yellow]MASTER SUMMARY — All Timeframes[/bold yellow]')
+    console.print()
+
+    # Current conditions
+    curr_m_avg  = sum(r for _,r in by_month[today.month]) / len(by_month[today.month]) if by_month[today.month] else 0
+    curr_q_avg  = sum(r for _,r in by_q[curr_q]) / len(by_q[curr_q]) if by_q[curr_q] else 0
+    curr_nq_avg = sum(r for _,r in by_nq[curr_nq]) / len(by_nq[curr_nq]) if by_nq[curr_nq] else 0
+    curr_yr_ret = yr_rets.get(str(today.year), 0)
+
+    # Upcoming conditions
+    next_m      = today.month % 12 + 1
+    next_m_avg  = sum(r for _,r in by_month[next_m]) / len(by_month[next_m]) if by_month[next_m] else 0
+    next_q_avg  = sum(r for _,r in by_q[next_q]) / len(by_q[next_q]) if by_q[next_q] else 0
+    next_nq_avg = sum(r for _,r in by_nq[next_nq]) / len(by_nq[next_nq]) if by_nq[next_nq] else 0
+
+    def _sig(avg):
+        if avg >= 5:   return ('STRONG BUY',  'green')
+        if avg >= 2:   return ('BUY',         'green')
+        if avg >= -1:  return ('NEUTRAL',      'yellow')
+        if avg >= -4:  return ('AVOID',        'red')
+        return              ('STRONG AVOID', 'red')
+
+    # Current row
+    cm_sig, cm_col   = _sig(curr_m_avg)
+    cq_sig, cq_col   = _sig(curr_q_avg)
+    cnq_sig, cnq_col = _sig(curr_nq_avg)
+    cy_sig, cy_col   = _sig(curr_yr_ret)
+
+    # Upcoming row
+    nm_sig, nm_col   = _sig(next_m_avg)
+    nq_sig, nq_col   = _sig(next_q_avg)
+    nnq_sig, nnq_col = _sig(next_nq_avg)
+
+    # Overall current bias
+    curr_scores = [curr_m_avg, curr_q_avg, curr_nq_avg, curr_yr_ret]
+    curr_bias   = sum(curr_scores) / len(curr_scores)
+    next_scores = [next_m_avg, next_q_avg, next_nq_avg]
+    next_bias   = sum(next_scores) / len(next_scores)
+    bias_sig, bias_col = _sig(curr_bias)
+    next_bias_sig, next_bias_col = _sig(next_bias)
+
+    month_names2 = {1:'Jan',2:'Feb',3:'Mar',4:'Apr',5:'May',6:'Jun',
+                    7:'Jul',8:'Aug',9:'Sep',10:'Oct',11:'Nov',12:'Dec'}
+    curr_m_name = month_names2[today.month]
+    next_m_name = month_names2[next_m]
+
+    console.print(f'  [bold]{"Timeframe":<18} {"NOW":>16} {"UPCOMING":>16}[/bold]')
+    console.print(f'  {"-"*52}')
+    console.print(f'  {"Month":<18} [{cm_col}]{curr_m_name+": "+cm_sig:>16}[/{cm_col}]  [{nm_col}]{next_m_name+": "+nm_sig:>16}[/{nm_col}]')
+    console.print(f'  {"Cal Quarter":<18} [{cq_col}]{curr_q+": "+cq_sig:>16}[/{cq_col}]  [{nq_col}]{next_q+": "+nq_sig:>16}[/{nq_col}]')
+    console.print(f'  {"Nepali FY Qtr":<18} [{cnq_col}]{curr_nq+": "+cnq_sig:>16}[/{cnq_col}]  [{nnq_col}]{next_nq+": "+nnq_sig:>16}[/{nnq_col}]')
+    console.print(f'  {"Year":<18} [{cy_col}]{"2026: "+cy_sig:>16}[/{cy_col}]  [dim]{"proj +10.5%":>16}[/dim]')
+    console.print(f'  {"-"*52}')
+    console.print(f'  {"OVERALL BIAS":<18} [{bias_col}]{bias_sig:>16}[/{bias_col}]  [{next_bias_col}]{next_bias_sig:>16}[/{next_bias_col}]')
+    console.print()
+
+    # One-line verdict
+    if next_bias >= 5:
+        verdict_msg = 'Upcoming conditions are STRONGLY BULLISH — prepare to deploy capital.'
+    elif next_bias >= 2:
+        verdict_msg = 'Upcoming conditions lean BULLISH — start building positions.'
+    elif curr_bias <= -2 and next_bias >= 2:
+        verdict_msg = 'Current weakness, upcoming strength — hold cash now, deploy next timeframe.'
+    elif curr_bias >= 2 and next_bias <= -2:
+        verdict_msg = 'Current strength fading — take profits before next timeframe.'
+    elif next_bias >= -1:
+        verdict_msg = 'Mixed signals ahead — stay selective, rely on option 37 for confirmation.'
+    else:
+        verdict_msg = 'Upcoming conditions are BEARISH — reduce exposure, protect capital.'
+
+    bias_arrow = '▲' if next_bias > curr_bias else '▼' if next_bias < curr_bias else '='
+    console.print(f'  [bold]Seasonal Shift: [{bias_col}]{bias_sig}[/{bias_col}] {bias_arrow} [{next_bias_col}]{next_bias_sig}[/{next_bias_col}][/bold]')
+    console.print(f'  [bold yellow]{verdict_msg}[/bold yellow]')
+    console.print()
+
 
 def analyze_market_phase(db_path='nepse_market_data.db'):
     """Option 37 - Market Phase Detector"""
