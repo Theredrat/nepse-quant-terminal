@@ -2869,6 +2869,69 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
         if buy_days > sell_days: broker_score += 20
         else: broker_score -= 20
 
+        # ── Holder vs Seller comparison (latest date) ──
+        try:
+            latest = conn.execute(
+                'SELECT MAX(date) FROM broker_activity WHERE symbol=? AND broker_id GLOB "[0-9]*"',
+                (symbol,)
+            ).fetchone()[0]
+            if latest and holders:
+                _holder_ids = set(str(h[0]) for h in holders)
+                latest_rows = conn.execute(
+                    'SELECT broker_id, net_val, net_qty FROM broker_activity '
+                    'WHERE symbol=? AND date=? AND broker_id GLOB "[0-9]*"',
+                    (symbol, latest)
+                ).fetchall()
+
+                # Market-wide net sellers
+                _mkt_sellers = set(str(r[0]) for r in _all if r[2] > r[1])
+
+                # Your holders activity today
+                _buying_holders  = [(str(r[0]), r[1]) for r in latest_rows if str(r[0]) in _holder_ids and r[1] > 0]
+                _selling_holders = [(str(r[0]), r[1]) for r in latest_rows if str(r[0]) in _holder_ids and r[1] < 0]
+
+                # Net sellers selling this stock today
+                _smart_selling = [(str(r[0]), r[1]) for r in latest_rows
+                    if str(r[0]) in _mkt_sellers and r[1] < 0 and str(r[0]) not in _holder_ids]
+                _smart_selling.sort(key=lambda x: x[1])
+
+                total_holder_buy  = sum(nv for _, nv in _buying_holders)
+                total_smart_sell  = sum(abs(nv) for _, nv in _smart_selling)
+                net_flow_today    = total_holder_buy - total_smart_sell
+
+                console.print(f'  [bold]Latest date ({latest}) holder vs seller:[/bold]')
+                if _buying_holders:
+                    console.print(f'  [green]Your holders buying:  Rs {total_holder_buy/1e6:.2f}M[/green]')
+                if _selling_holders:
+                    console.print(f'  [red]Your holders SELLING: Rs {sum(abs(nv) for _,nv in _selling_holders)/1e6:.2f}M  <- WARNING[/red]')
+                if _smart_selling:
+                    console.print(f'  [red]Net sellers selling:  Rs {total_smart_sell/1e6:.2f}M ({len(_smart_selling)} brokers)[/red]')
+                    nf_col = 'green' if net_flow_today > 0 else 'red'
+                    console.print(f'  Net flow:             [{nf_col}]Rs {net_flow_today/1e6:.2f}M[/{nf_col}] {"(holders winning)" if net_flow_today > 0 else "(sellers winning)"}')
+
+                # Adjust broker score based on net flow
+                if _selling_holders:
+                    broker_score -= 20
+                elif net_flow_today > 0:
+                    broker_score += 10
+                elif total_smart_sell > total_holder_buy * 1.5:
+                    broker_score -= 15
+
+                console.print()
+
+                # Verdict
+                if _selling_holders:
+                    console.print('  [bold red]ALERT: Your holders selling today — exit signal![/bold red]')
+                elif _smart_selling and total_smart_sell > total_holder_buy * 1.5:
+                    console.print('  [bold yellow]CAUTION: Net sellers outweigh holders buying — tighten stop loss[/bold yellow]')
+                elif _buying_holders and net_flow_today > 0:
+                    console.print('  [bold green]GOOD: Holders winning vs net sellers — strong hold[/bold green]')
+                elif _buying_holders:
+                    console.print('  [bold yellow]HOLD: Holders accumulating but net sellers active — watch tomorrow[/bold yellow]')
+                console.print()
+        except Exception:
+            pass
+
         broker_score = max(0, min(100, broker_score))
         b_verdict = 'ACCUMULATING' if broker_score >= 65 else 'NEUTRAL' if broker_score >= 40 else 'DISTRIBUTING'
         b_col = 'green' if broker_score >= 65 else 'yellow' if broker_score >= 40 else 'red'
