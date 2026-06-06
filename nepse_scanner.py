@@ -3059,6 +3059,84 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
         console.print(f'  Error in Section 4: {e}', style='red')
         max_score += 100
 
+
+    # -----------------------------------------
+    # SECTION 5 - TRADE PLAN
+    # -----------------------------------------
+    console.print()
+    console.rule('[bold yellow]Section 5 -- Trade Plan[/bold yellow]', style='yellow')
+    console.print()
+    try:
+        prices_tp = conn.execute(
+            'SELECT date, high, low, close FROM stock_prices '
+            'WHERE symbol=? AND close > 0 ORDER BY date DESC LIMIT 60',
+            (symbol,)
+        ).fetchall()
+
+        if prices_tp:
+            curr_p     = prices_tp[0][3]
+            support    = min(p[2] for p in prices_tp[:5])
+            resistance = max(p[1] for p in prices_tp[:10])
+            stop_loss  = round(support * 0.97, 1)
+            target     = round(resistance * 0.95, 1)
+            risk       = curr_p - stop_loss
+            reward     = target - curr_p
+            rr         = round(reward / risk, 2) if risk > 0 else 0
+
+            if curr_p <= support * 1.02:
+                entry_note   = '[bold green]AT SUPPORT -- good entry zone right now[/bold green]'
+                entry_action = 'BUY NOW'
+            elif curr_p <= support * 1.05:
+                entry_note   = '[bold yellow]NEAR SUPPORT -- acceptable entry, small position[/bold yellow]'
+                entry_action = 'BUY SMALL'
+            elif curr_p >= resistance * 0.97:
+                entry_note   = '[bold red]NEAR RESISTANCE -- wait for pullback[/bold red]'
+                entry_action = 'WAIT'
+            else:
+                entry_note   = '[bold yellow]MID RANGE -- wait for dip toward support[/bold yellow]'
+                entry_action = 'WAIT FOR DIP'
+
+            console.print(f'  Current Price:    [bold]Rs {curr_p:,.1f}[/bold]')
+            console.print()
+            console.print(f'  Support Zone:     [green]Rs {support:,.1f}[/green]')
+            console.print(f'  Resistance Zone:  [red]Rs {resistance:,.1f}[/red]')
+            console.print()
+            console.print(f'  Entry Action:     {entry_note}')
+            console.print()
+            console.print(f'  Stop Loss:        [red]Rs {stop_loss:,.1f}[/red]  (3% below support)')
+            console.print(f'  Target:           [green]Rs {target:,.1f}[/green]  (5% below resistance)')
+            console.print()
+            rr_col  = 'green' if rr >= 2 else 'yellow' if rr >= 1.5 else 'red'
+            rr_note = '(GOOD -- take the trade)' if rr >= 2 else '(MARGINAL -- smaller position)' if rr >= 1.5 else '(POOR -- skip or wait)'
+            console.print(f'  Risk:             Rs {risk:,.1f} per share')
+            console.print(f'  Reward:           Rs {reward:,.1f} per share')
+            console.print(f'  Risk/Reward:      [{rr_col}]1:{rr} {rr_note}[/{rr_col}]')
+            console.print()
+            upside_pct   = ((target - curr_p) / curr_p) * 100
+            downside_pct = ((curr_p - stop_loss) / curr_p) * 100
+            console.print(f'  Upside potential: [green]+{upside_pct:.1f}%[/green]  |  Downside risk: [red]-{downside_pct:.1f}%[/red]')
+            console.print()
+            console.print('  [bold]Position Sizing:[/bold]')
+            console.print(f'    Risk Rs 10,000 max  -->  buy {int(10000/risk):,} shares at Rs {curr_p:,.1f}')
+            console.print(f'    Risk Rs 25,000 max  -->  buy {int(25000/risk):,} shares at Rs {curr_p:,.1f}')
+            console.print()
+            broker_s_tp = next((s for n,s,v,c in section_verdicts if n == "Broker Activity"), 50)
+            if entry_action in ("BUY NOW", "BUY SMALL") and broker_s_tp >= 70 and rr >= 2:
+                action_msg = '[bold green]ACTION: ENTER TRADE -- price at support, institutions accumulating, good R/R[/bold green]'
+            elif entry_action == "WAIT FOR DIP" and broker_s_tp >= 70:
+                action_msg = f'[bold yellow]ACTION: SET ALERT at Rs {support:,.1f} -- wait for pullback to support[/bold yellow]'
+            elif entry_action == "WAIT":
+                action_msg = '[bold red]ACTION: DO NOT BUY -- price near resistance, wait for pullback[/bold red]'
+            elif rr < 1.5:
+                action_msg = '[bold red]ACTION: SKIP -- risk/reward too poor at current price[/bold red]'
+            else:
+                action_msg = f'[bold yellow]ACTION: WATCH -- set alert at Rs {support:,.1f} for better entry[/bold yellow]'
+            console.print(f'  {action_msg}')
+        else:
+            console.print('  No price data for trade plan.', style='yellow')
+    except Exception as e:
+        console.print(f'  Error in Section 5: {e}', style='red')
+
     conn.close()
 
     # ─────────────────────────────────────────
