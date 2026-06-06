@@ -2926,7 +2926,7 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
                 down_days = len(valid_prices) - 1 - up_days
                 trend_col = 'green' if up_days > down_days else 'red' if down_days > up_days else 'yellow'
                 trend_str = 'UPTREND' if up_days > down_days else 'DOWNTREND' if down_days > up_days else 'SIDEWAYS'
-                recent_str = ' -> '.join([f'Rs {c:,.0f}' for c in valid_prices[:4]])
+                recent_str = ' -> '.join([f'Rs {c:,.0f}' for c in valid_prices[:4][::-1]])
                 console.print(f'  Price Trend (5d): [{trend_col}]{trend_str}[/{trend_col}] — {recent_str}')
                 if up_days > down_days: tech_score += 15
                 elif down_days > up_days: tech_score -= 15
