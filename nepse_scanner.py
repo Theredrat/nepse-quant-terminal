@@ -3163,8 +3163,11 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
             _supports    = sorted([l for l in _clusters if l < curr_p], reverse=True)
             _resistances = sorted([l for l in _clusters if l > curr_p])
 
-            support    = round(_supports[0], 1)    if _supports    else round(min(p[2] for p in prices_tp[:5]), 1)
-            resistance = round(_resistances[0], 1) if _resistances else round(max(p[1] for p in prices_tp[:10]), 1)
+            support    = round(_supports[0], 1) if _supports else round(min(p[2] for p in prices_tp[:5]), 1)
+
+            # Skip resistances too close to current price (< 3% away) — use next meaningful level
+            _valid_res = [l for l in _resistances if l > curr_p * 1.03]
+            resistance = round(_valid_res[0], 1) if _valid_res else round(_resistances[0], 1) if _resistances else round(max(p[1] for p in prices_tp[:10]), 1)
             stop_loss  = round(support * 0.97, 1)
             target     = round(resistance * 0.95, 1)
 
