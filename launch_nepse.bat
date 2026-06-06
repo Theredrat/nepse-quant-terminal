@@ -95,6 +95,7 @@ echo   20. Power Sell + Save Report
 echo.
 echo   --- FULL ANALYSIS ---
   echo   35. Full Stock Report  (one-stop buy/sell decision)
+  echo   36. Best R/R Scanner   (stocks with good R/R at current price)
   echo.
   echo   --- HELP ---
 echo   21. Signal Legend / Help
@@ -133,6 +134,8 @@ if "%choice%"=="20" python nepse_scanner.py --powersell --report & goto AGAIN
 if "%choice%"=="21" python nepse_scanner.py --legend & goto AGAIN
 if "%choice%"=="21b" python nepse_scanner.py --guide & goto AGAIN
 if "%choice%"=="35" goto FULL_REPORT
+
+if "%choice%"=="36" goto BEST_RR
 if "%choice%"=="22" start python nepse_alerts.py & goto AGAIN
 if "%choice%"=="23" python nepse_scanner.py --corr & goto AGAIN
 if "%choice%"=="24" python nepse_scanner.py --portfolio & goto AGAIN
@@ -283,6 +286,10 @@ goto AGAIN
 :FULL_REPORT
 set /p symbol=  Enter stock symbol (e.g. NABIL):
 python nepse_scanner.py --full-report %symbol%
+goto AGAIN
+
+:BEST_RR
+python nepse_scanner.py --best-rr
 goto AGAIN
 
 :AGAIN

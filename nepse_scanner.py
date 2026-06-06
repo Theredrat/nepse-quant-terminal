@@ -1974,6 +1974,7 @@ def parse_args():
     p.add_argument('--legend',      action='store_true')
     p.add_argument('--guide',       action='store_true', dest='buy_sell_guide')
     p.add_argument('--full-report',  metavar='SYMBOL', dest='full_report', default=None)
+    p.add_argument('--best-rr',       action='store_true', dest='best_rr', help='Best R/R scanner')
     p.add_argument('--portfolio',   nargs='*', metavar='SYMBOL', help='Position sizing + correlation for a set of stocks')
     p.add_argument('--corr',        action='store_true', help='Sector correlation heatmap')
     p.add_argument('--size',        nargs=2, metavar=('SYMBOL','AMOUNT'), help='Volatility-adjusted sizing e.g. --size AKJCL 100000')
@@ -3330,6 +3331,9 @@ def main():
         return
     elif getattr(args, 'full_report', None):
         analyze_full_stock_report(args.full_report)
+        return
+    elif getattr(args, 'best_rr', False):
+        analyze_best_rr()
         return
     if getattr(args, "unlock", None) and args.unlock[0].lower() in ("add","delete","list","upcoming"):
         _unlock_db()
@@ -6196,5 +6200,136 @@ def analyze_broker_date(symbol=None, date_str=None, db_path='nepse_market_data.d
 
 if __name__ == "__main__":
     main()
+
+
+def analyze_best_rr(db_path='nepse_market_data.db'):
+    """Option 36 - Best R/R Scanner: finds stocks with good R/R at current price"""
+    from rich.console import Console
+    from rich.table import Table
+    from rich.rule import Rule
+    console = Console()
+    import sqlite3
+
+    console.print()
+    console.rule('[bold yellow]Option 36 — Best R/R Scanner[/bold yellow]', style='yellow')
+    console.print()
+    console.print('  Scanning all stocks for R/R >= 1.5 at current price...', style='dim')
+    console.print()
+
+    conn = sqlite3.connect(db_path)
+    symbols = [s[0] for s in conn.execute(
+        'SELECT DISTINCT symbol FROM broker_activity ORDER BY symbol'
+    ).fetchall()]
+
+    results = []
+    for symbol in symbols:
+        try:
+            prices = conn.execute(
+                'SELECT date, high, low, close FROM stock_prices '
+                'WHERE symbol=? AND close > 0 ORDER BY date DESC LIMIT 60',
+                (symbol,)
+            ).fetchall()
+            if len(prices) < 10:
+                continue
+
+            curr = prices[0][3]
+            zone = curr * 0.02
+
+            _levels = [p[1] for p in prices] + [p[2] for p in prices]
+            _used = set()
+            _clusters = []
+            for i, v1 in enumerate(_levels):
+                if i in _used: continue
+                grp, idx = [v1], [i]
+                for j, v2 in enumerate(_levels):
+                    if j != i and j not in _used and abs(v1-v2) <= zone:
+                        grp.append(v2); idx.append(j)
+                if len(grp) >= 2:
+                    _clusters.append(sum(grp)/len(grp))
+                    _used.update(idx)
+
+            supports  = sorted([l for l in _clusters if l < curr], reverse=True)
+            valid_res = sorted([l for l in _clusters if l > curr * 1.03])
+            if not supports or not valid_res:
+                continue
+
+            support    = supports[0]
+            resistance = valid_res[0]
+            stop_loss  = support * 0.97
+            target     = resistance * 0.99
+            risk       = curr - stop_loss
+            reward     = target - curr
+            rr         = round(reward / risk, 2) if risk > 0 else 0
+            if rr < 1.5:
+                continue
+
+            # Broker score
+            dates = [d[0] for d in conn.execute(
+                'SELECT DISTINCT date FROM broker_activity WHERE symbol=? ORDER BY date DESC LIMIT 5',
+                (symbol,)
+            ).fetchall()]
+            buy_days = sum(1 for d in dates if (conn.execute(
+                'SELECT SUM(net_val) FROM broker_activity WHERE symbol=? AND date=?',
+                (symbol, d)
+            ).fetchone()[0] or 0) > 0)
+            broker_pct = round((buy_days / len(dates)) * 100) if dates else 0
+
+            # RSI
+            closes = [p[3] for p in prices[:15]]
+            gains  = [max(closes[i-1]-closes[i], 0) for i in range(1, len(closes))]
+            losses = [max(closes[i]-closes[i-1], 0) for i in range(1, len(closes))]
+            avg_g  = sum(gains)/len(gains) if gains else 0
+            avg_l  = sum(losses)/len(losses) if losses else 1
+            rsi    = round(100 - (100/(1 + avg_g/avg_l)), 1) if avg_l > 0 else 50
+
+            results.append((symbol, curr, round(support,1), round(resistance,1),
+                           round(stop_loss,1), round(target,1), rr, broker_pct, rsi))
+        except:
+            continue
+
+    conn.close()
+    results.sort(key=lambda x: x[6], reverse=True)
+
+    console.print(f'  Stocks with R/R >= 1.5 at current price: [bold]{len(results)}[/bold]')
+    console.print()
+
+    if not results:
+        console.print('  No stocks found with good R/R right now. Market may be extended.', style='yellow')
+        return
+
+    table = Table(show_header=True, header_style='bold cyan', box=None, padding=(0,1))
+    table.add_column('Symbol',    style='bold', width=10)
+    table.add_column('Price',     justify='right', width=8)
+    table.add_column('Support',   justify='right', width=9)
+    table.add_column('Resist',    justify='right', width=9)
+    table.add_column('Stop',      justify='right', width=8)
+    table.add_column('Target',    justify='right', width=8)
+    table.add_column('R/R',       justify='right', width=6)
+    table.add_column('Broker%',   justify='right', width=8)
+    table.add_column('RSI',       justify='right', width=6)
+    table.add_column('Signal',    width=16)
+
+    for sym, curr, sup, res, sl, tgt, rr, bs, rsi in results:
+        rsi_tag = 'OVERSOLD'   if rsi < 35 else 'OVERBOUGHT' if rsi > 70 else ''
+        rsi_col = 'green'      if rsi < 35 else 'red'        if rsi > 70 else 'white'
+        rr_col  = 'green'      if rr >= 2  else 'yellow'
+        br_col  = 'green'      if bs >= 80 else 'yellow'     if bs >= 50 else 'red'
+        table.add_row(
+            sym,
+            f'Rs {curr:,.1f}',
+            f'Rs {sup:,.1f}',
+            f'Rs {res:,.1f}',
+            f'Rs {sl:,.1f}',
+            f'Rs {tgt:,.1f}',
+            f'[{rr_col}]1:{rr}[/{rr_col}]',
+            f'[{br_col}]{bs}%[/{br_col}]',
+            f'[{rsi_col}]{rsi}[/{rsi_col}]',
+            f'[{rsi_col}]{rsi_tag}[/{rsi_col}]',
+        )
+
+    console.print(table)
+    console.print()
+    console.print('  [dim]Tip: Run option 35 on any stock above for full trade plan.[/dim]')
+    console.print()
 
 
