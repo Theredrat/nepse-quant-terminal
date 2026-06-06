@@ -3353,8 +3353,12 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
                 _by[(d.year,d.month)].append((c,h,l))
             _rets = _dd(list)
             _hl   = _dd(list)
+            _db_first_g = (_date(2021,5,25).year, _date(2021,5,25).month)
+            _today_g    = (_date.today().year, _date.today().month)
             for (yr,m),entries in _by.items():
                 if len(entries)<5: continue
+                if (yr,m) == _db_first_g: continue
+                if (yr,m) == _today_g: continue
                 oc=entries[0][0]; cc=entries[-1][0]
                 hh=max(e[1] for e in entries)
                 ll=min(e[2] for e in entries if e[2]>0)
@@ -3371,8 +3375,12 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
                     _by[(by,bm)].append((c,h,l))
             _rets = _dd(list)
             _hl   = _dd(list)
+            _db_first_bs = _to_bs(_date(2021,5,25))
+            _today_bs3   = _to_bs(_date.today())
             for (yr,m),entries in _by.items():
                 if len(entries)<5: continue
+                if (yr,m) == _db_first_bs: continue
+                if (yr,m) == _today_bs3: continue
                 oc=entries[0][0]; cc=entries[-1][0]
                 hh=max(e[1] for e in entries)
                 ll=min(e[2] for e in entries if e[2]>0)
@@ -4657,9 +4665,20 @@ def analyze_nepali_seasonality(db_path='nepse_market_data.db'):
     by_m = defaultdict(list)      # bs_m -> [(bs_yr, ret)]
     by_m_hl = defaultdict(list)   # bs_m -> [(bs_yr, swing, up, dn)]
 
+    # DB start = 2021-05-25 = BS 2078 Jestha (month 2)
+    # Skip first partial month and current running month
+    _db_first_bs = (2078, 2)
+    _today_bs    = gregorian_to_bs(date.today())
+
     for (bs_yr, bs_m) in sorted(by_bs.keys()):
         entries = by_bs[(bs_yr, bs_m)]
         if len(entries) < 5:
+            continue
+        # Skip first partial month (DB started mid-month)
+        if (bs_yr, bs_m) == _db_first_bs:
+            continue
+        # Skip current running month (not complete yet)
+        if (bs_yr, bs_m) == _today_bs:
             continue
         open_c  = entries[0][1]
         close_c = entries[-1][1]
