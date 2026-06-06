@@ -3423,7 +3423,7 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
     table.add_column('Up/Total', justify='center', width=9)
     table.add_column('Best',     justify='right', width=8)
     table.add_column('Worst',    justify='right', width=8)
-    table.add_column('Signal',   width=14)
+    table.add_column('Signal',   width=8)
     table.add_column('Swing(min-max)', justify='center', width=16)
     table.add_column('Up Move',  justify='right', width=9)
     table.add_column('Dn Move',  justify='right', width=9)
@@ -3436,7 +3436,7 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
         best = max(rets)
         worst= min(rets)
         col  = 'green' if avg >= 2 else 'yellow' if avg >= 0 else 'red'
-        verdict = 'STRONG BUY' if avg>=5 and wins==len(rets) else 'BUY' if avg>=2 else 'NEUTRAL' if avg>=-1 else 'AVOID' if avg>=-3 else 'STRONG AVOID'
+        verdict = 'STR.BUY' if avg>=5 and wins==len(rets) else 'BUY' if avg>=2 else 'NTRL' if avg>=-1 else 'AVOID' if avg>=-3 else 'STR.AVD'
         marker = ' <--' if m == curr_month else ''
 
         rng = by_month_range[m]
@@ -3567,7 +3567,7 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
     qtable.add_column('W/T',     justify='center', width=5)
     qtable.add_column('Best',    justify='right', width=7)
     qtable.add_column('Worst',   justify='right', width=7)
-    qtable.add_column('Signal',  width=12)
+    qtable.add_column('Signal',  width=8)
     qtable.add_column('Swing(rng)', justify='center', width=14)
     qtable.add_column('Up',      justify='right', width=6)
     qtable.add_column('Dn',      justify='right', width=6)
@@ -3581,7 +3581,7 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
         best = max(rets)
         worst= min(rets)
         col  = 'green' if avg>=3 else 'yellow' if avg>=0 else 'red'
-        verdict = 'STRONG BUY' if avg>=8 else 'BUY' if avg>=3 else 'NEUTRAL' if avg>=-1 else 'AVOID' if avg>=-4 else 'STRONG AVOID'
+        verdict = 'STR.BUY' if avg>=8 else 'BUY' if avg>=3 else 'NTRL' if avg>=-1 else 'AVOID' if avg>=-4 else 'STR.AVD'
         marker = ' <--' if q == curr_q else (' next' if q == next_q else '')
         yr_detail = '  '.join(f'{yr}:{r:+.0f}%' for yr,r in sorted(by_q[q]))
         rng_q = by_q_range[q]
@@ -3751,7 +3751,7 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
     nqtable.add_column('W/T',           justify='center', width=5)
     nqtable.add_column('Best',          justify='right', width=7)
     nqtable.add_column('Worst',         justify='right', width=7)
-    nqtable.add_column('Signal',        width=12)
+    nqtable.add_column('Signal',        width=8)
     nqtable.add_column('Swing(rng)',    justify='center', width=14)
     nqtable.add_column('Up',            justify='right', width=6)
     nqtable.add_column('Dn',            justify='right', width=6)
@@ -3765,7 +3765,7 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
         best  = max(rets)
         worst = min(rets)
         col   = 'green' if avg>=3 else 'yellow' if avg>=0 else 'red'
-        verdict = 'STRONG BUY' if avg>=8 else 'BUY' if avg>=3 else 'NEUTRAL' if avg>=-1 else 'AVOID' if avg>=-4 else 'STRONG AVOID'
+        verdict = 'STR.BUY' if avg>=8 else 'BUY' if avg>=3 else 'NTRL' if avg>=-1 else 'AVOID' if avg>=-4 else 'STR.AVD'
         marker = ' <-NOW' if nq==curr_nq else (' <-NXT' if nq==next_nq else '')
         yr_detail = '  '.join(f'{fy}:{r:+.0f}%' for fy,r in sorted(by_nq[nq]))
         rng_nq = by_nq_range[nq]
