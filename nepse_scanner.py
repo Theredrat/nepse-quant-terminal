@@ -4156,8 +4156,22 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
 
     console.print(f'  [bold]{"Timeframe":<14} {"NOW Signal":<14} {"Character (Now)":<32} {"NEXT Signal":<14} {"Character (Next)"}[/bold]')
     console.print(f'  {"-"*100}')
+    # NQ char for summary
+    _cnq_rng = by_nq_range[curr_nq]
+    _cnq_up = sum(r[2] for r in _cnq_rng)/len(_cnq_rng) if _cnq_rng else 0
+    _cnq_dn = sum(r[3] for r in _cnq_rng)/len(_cnq_rng) if _cnq_rng else 0
+    _cnq_sw = sum(r[1] for r in _cnq_rng)/len(_cnq_rng) if _cnq_rng else 0
+    cnq_char = _char_short(_cnq_up, _cnq_dn, _cnq_sw, curr_nq_avg)
+
+    _nnq_rng = by_nq_range[next_nq]
+    _nnq_up = sum(r[2] for r in _nnq_rng)/len(_nnq_rng) if _nnq_rng else 0
+    _nnq_dn = sum(r[3] for r in _nnq_rng)/len(_nnq_rng) if _nnq_rng else 0
+    _nnq_sw = sum(r[1] for r in _nnq_rng)/len(_nnq_rng) if _nnq_rng else 0
+    nnq_char = _char_short(_nnq_up, _nnq_dn, _nnq_sw, next_nq_avg)
+
     console.print(f'  {"Month":<14} [{cm_col}]{(curr_m_name+": "+cm_sig):<14}[/{cm_col}] [{cm_col}]{cm_char:<32}[/{cm_col}] [{nm_col}]{(next_m_name+": "+nm_sig):<14}[/{nm_col}] [{nm_col}]{nm_char}[/{nm_col}]')
     console.print(f'  {"Cal Qtr":<14} [{cq_col}]{(curr_q+": "+cq_sig):<14}[/{cq_col}] [{cq_col}]{cq_char:<32}[/{cq_col}] [{nq_col}]{(next_q+": "+nq_sig):<14}[/{nq_col}] [{nq_col}]{nq_char}[/{nq_col}]')
+    console.print(f'  {"NQ Qtr":<14} [{cnq_col}]{(curr_nq+": "+cnq_sig):<14}[/{cnq_col}] [{cnq_col}]{cnq_char:<32}[/{cnq_col}] [{nnq_col}]{(next_nq+": "+nnq_sig):<14}[/{nnq_col}] [{nnq_col}]{nnq_char}[/{nnq_col}]')
     console.print(f'  {"Year 2026":<14} [{cy_col}]{cy_sig:<14}[/{cy_col}] [{cy_col}]{("+"+str(curr_yr_ret)+"%  YTD"):<32}[/{cy_col}] [{proj_col2}]{"Proj: "+str(proj_yr)+"%":<14}[/{proj_col2}] [{proj_col2}]{"Based on historical seasonality"}[/{proj_col2}]')
     console.print(f'  {"-"*100}')
     console.print(f'  {"OVERALL":<14} [{bias_col}]{bias_sig:<14}[/{bias_col}] [dim]{"avg="+str(round(curr_bias,1))+"%":<32}[/dim] [{next_bias_col}]{next_bias_sig:<14}[/{next_bias_col}] [dim]{"avg="+str(round(next_bias,1))+"%"}[/dim]')
