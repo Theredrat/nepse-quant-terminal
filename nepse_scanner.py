@@ -3746,16 +3746,16 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
         ))
 
     nqtable = Table(show_header=True, header_style='bold cyan', box=None, padding=(0,1))
-    nqtable.add_column('Quarter',       width=22)
+    nqtable.add_column('Quarter',       width=20)
     nqtable.add_column('Avg Ret',       justify='right', width=8)
-    nqtable.add_column('Up/Total',      justify='center', width=9)
+    nqtable.add_column('Up/Tot',        justify='center', width=7)
     nqtable.add_column('Best',          justify='right', width=8)
     nqtable.add_column('Worst',         justify='right', width=8)
     nqtable.add_column('Signal',        width=12)
     nqtable.add_column('Swing(min-max)',justify='center', width=16)
-    nqtable.add_column('Up Move',       justify='right', width=9)
-    nqtable.add_column('Dn Move',       justify='right', width=9)
-    nqtable.add_column('History',       width=35)
+    nqtable.add_column('Up Move',       justify='right', width=8)
+    nqtable.add_column('Dn Move',       justify='right', width=8)
+    nqtable.add_column('History',       width=32)
 
     for nq in ['NQ1','NQ2','NQ3','NQ4']:
         rets = [r for _,r in by_nq[nq]]
@@ -3766,7 +3766,7 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
         worst = min(rets)
         col   = 'green' if avg>=3 else 'yellow' if avg>=0 else 'red'
         verdict = 'STRONG BUY' if avg>=8 else 'BUY' if avg>=3 else 'NEUTRAL' if avg>=-1 else 'AVOID' if avg>=-4 else 'STRONG AVOID'
-        marker = ' <-- NOW' if nq==curr_nq else (' <- NEXT' if nq==next_nq else '')
+        marker = ' <-NOW' if nq==curr_nq else (' <-NXT' if nq==next_nq else '')
         yr_detail = '  '.join(f'{fy}:{r:+.0f}%' for fy,r in sorted(by_nq[nq]))
         rng_nq = by_nq_range[nq]
         if rng_nq:
