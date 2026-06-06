@@ -3490,6 +3490,32 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
     curr_avg  = sum(curr_rets)/len(curr_rets) if curr_rets else 0
     console.rule(f'[bold]What To Do in {curr_month_name}[/bold]')
     console.print()
+
+    # Monthly character
+    _m_rng = by_month_range[today.month]
+    _m_up  = round(sum(r[2] for r in _m_rng)/len(_m_rng),1) if _m_rng else 0
+    _m_dn  = round(sum(r[3] for r in _m_rng)/len(_m_rng),1) if _m_rng else 0
+    _m_sw  = round(sum(r[1] for r in _m_rng)/len(_m_rng),1) if _m_rng else 0
+    if _m_up > abs(_m_dn)*2 and curr_avg >= 3:
+        _m_char = f'Strong one-way rally — up {_m_up:.1f}% with only -{_m_dn:.1f}% dip'
+    elif _m_up > abs(_m_dn)*2 and curr_avg < 3:
+        _m_char = f'Big rally then reversal — up {_m_up:.1f}% but gains given back'
+    elif abs(_m_dn) > _m_up*1.5:
+        _m_char = f'Downside dominated — drops {_m_dn:.1f}% from open, only bounces {_m_up:.1f}%'
+    elif _m_sw > 15:
+        _m_char = f'High volatility — {_m_sw:.1f}% swing, choppy both ways'
+    elif _m_sw < 8:
+        _m_char = f'Quiet month — only {_m_sw:.1f}% total range'
+    elif curr_avg >= 2:
+        _m_char = f'Bullish bias — up {_m_up:.1f}% vs dn {_m_dn:.1f}%, trend favors longs'
+    else:
+        _m_char = f'Mixed — up {_m_up:.1f}% / dn {_m_dn:.1f}% from open'
+
+    _m_col = 'green' if curr_avg >= 2 else 'yellow' if curr_avg >= -1 else 'red'
+    console.print(f'  Character : [{_m_col}]{_m_char}[/{_m_col}]')
+    console.print(f'  Swing     : [yellow]{_m_sw:.1f}%[/yellow]  Up={_m_up:.1f}%  Dn={_m_dn:.1f}%')
+    console.print()
+
     if curr_avg >= 5:
         console.print(f'  [bold green]{curr_month_name} is historically the strongest month.[/bold green]')
         console.print('  [green]-> Deploy capital now — seasonal tailwind is strong[/green]')
@@ -4082,14 +4108,59 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
     curr_m_name = month_names2[today.month]
     next_m_name = month_names2[next_m]
 
-    console.print(f'  [bold]{"Timeframe":<18} {"NOW":>16} {"UPCOMING":>16}[/bold]')
-    console.print(f'  {"-"*52}')
-    console.print(f'  {"Month":<18} [{cm_col}]{curr_m_name+": "+cm_sig:>16}[/{cm_col}]  [{nm_col}]{next_m_name+": "+nm_sig:>16}[/{nm_col}]')
-    console.print(f'  {"Cal Quarter":<18} [{cq_col}]{curr_q+": "+cq_sig:>16}[/{cq_col}]  [{nq_col}]{next_q+": "+nq_sig:>16}[/{nq_col}]')
-    console.print(f'  {"Nepali FY Qtr":<18} [{cnq_col}]{curr_nq+": "+cnq_sig:>16}[/{cnq_col}]  [{nnq_col}]{next_nq+": "+nnq_sig:>16}[/{nnq_col}]')
-    console.print(f'  {"Year":<18} [{cy_col}]{"2026: "+cy_sig:>16}[/{cy_col}]  [dim]{"proj +10.5%":>16}[/dim]')
-    console.print(f'  {"-"*52}')
-    console.print(f'  {"OVERALL BIAS":<18} [{bias_col}]{bias_sig:>16}[/{bias_col}]  [{next_bias_col}]{next_bias_sig:>16}[/{next_bias_col}]')
+    # Build character strings for summary
+    def _char_short(avg_up, avg_dn, avg_sw, avg):
+        if avg_up > abs(avg_dn)*2 and avg >= 3:
+            return f'One-way rally (+{avg_up:.0f}% up / -{avg_dn:.0f}% dip)'
+        elif avg_up > abs(avg_dn)*2 and avg < 3:
+            return f'Rally+reversal (+{avg_up:.0f}% then giveback)'
+        elif abs(avg_dn) > avg_up*1.5:
+            return f'Downside bias (-{avg_dn:.0f}% drop / +{avg_up:.0f}% bounce)'
+        elif avg_sw > 25:
+            return f'Extreme volatility ({avg_sw:.0f}% swing)'
+        elif avg_sw < 10:
+            return f'Quiet / low range ({avg_sw:.0f}% swing)'
+        else:
+            return f'Mixed (+{avg_up:.0f}% up / -{avg_dn:.0f}% dn)'
+
+    # Current month char
+    _cm_rng = by_month_range[today.month]
+    _cm_up = sum(r[2] for r in _cm_rng)/len(_cm_rng) if _cm_rng else 0
+    _cm_dn = sum(r[3] for r in _cm_rng)/len(_cm_rng) if _cm_rng else 0
+    _cm_sw = sum(r[1] for r in _cm_rng)/len(_cm_rng) if _cm_rng else 0
+    cm_char = _char_short(_cm_up, _cm_dn, _cm_sw, curr_m_avg)
+
+    # Next month char
+    _nm_rng = by_month_range[next_m]
+    _nm_up = sum(r[2] for r in _nm_rng)/len(_nm_rng) if _nm_rng else 0
+    _nm_dn = sum(r[3] for r in _nm_rng)/len(_nm_rng) if _nm_rng else 0
+    _nm_sw = sum(r[1] for r in _nm_rng)/len(_nm_rng) if _nm_rng else 0
+    nm_char = _char_short(_nm_up, _nm_dn, _nm_sw, next_m_avg)
+
+    # Current quarter char
+    _cq_rng = by_q_range[curr_q]
+    _cq_up = sum(r[2] for r in _cq_rng)/len(_cq_rng) if _cq_rng else 0
+    _cq_dn = sum(r[3] for r in _cq_rng)/len(_cq_rng) if _cq_rng else 0
+    _cq_sw = sum(r[1] for r in _cq_rng)/len(_cq_rng) if _cq_rng else 0
+    cq_char = _char_short(_cq_up, _cq_dn, _cq_sw, curr_q_avg)
+
+    # Next quarter char
+    _nq_rng = by_q_range[next_q]
+    _nq_up = sum(r[2] for r in _nq_rng)/len(_nq_rng) if _nq_rng else 0
+    _nq_dn = sum(r[3] for r in _nq_rng)/len(_nq_rng) if _nq_rng else 0
+    _nq_sw = sum(r[1] for r in _nq_rng)/len(_nq_rng) if _nq_rng else 0
+    nq_char = _char_short(_nq_up, _nq_dn, _nq_sw, next_q_avg)
+
+    proj_yr = round(curr_yr_ret + projected_additional, 1)
+    proj_col2 = 'green' if proj_yr > 0 else 'red'
+
+    console.print(f'  [bold]{"Timeframe":<14} {"NOW Signal":<14} {"Character (Now)":<32} {"NEXT Signal":<14} {"Character (Next)"}[/bold]')
+    console.print(f'  {"-"*100}')
+    console.print(f'  {"Month":<14} [{cm_col}]{(curr_m_name+": "+cm_sig):<14}[/{cm_col}] [{cm_col}]{cm_char:<32}[/{cm_col}] [{nm_col}]{(next_m_name+": "+nm_sig):<14}[/{nm_col}] [{nm_col}]{nm_char}[/{nm_col}]')
+    console.print(f'  {"Cal Qtr":<14} [{cq_col}]{(curr_q+": "+cq_sig):<14}[/{cq_col}] [{cq_col}]{cq_char:<32}[/{cq_col}] [{nq_col}]{(next_q+": "+nq_sig):<14}[/{nq_col}] [{nq_col}]{nq_char}[/{nq_col}]')
+    console.print(f'  {"Year 2026":<14} [{cy_col}]{cy_sig:<14}[/{cy_col}] [{cy_col}]{("+"+str(curr_yr_ret)+"%  YTD"):<32}[/{cy_col}] [{proj_col2}]{"Proj: "+str(proj_yr)+"%":<14}[/{proj_col2}] [{proj_col2}]{"Based on historical seasonality"}[/{proj_col2}]')
+    console.print(f'  {"-"*100}')
+    console.print(f'  {"OVERALL":<14} [{bias_col}]{bias_sig:<14}[/{bias_col}] [dim]{"avg="+str(round(curr_bias,1))+"%":<32}[/dim] [{next_bias_col}]{next_bias_sig:<14}[/{next_bias_col}] [dim]{"avg="+str(round(next_bias,1))+"%"}[/dim]')
     console.print()
 
     # One-line verdict
