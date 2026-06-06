@@ -3533,7 +3533,7 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
 
     yearly = defaultdict(list)
     for d, c in nepse:
-        yearly[d[:4]].append(c)
+        yearly[d[:4]].append((d, c))
 
     ytable = Table(show_header=True, header_style='bold cyan', box=None, padding=(0,1))
     ytable.add_column('Year',  width=6)
