@@ -2920,7 +2920,10 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
                 console.print()
 
                 # Verdict
-                if _selling_holders:
+                _total_hbuy  = sum(r[1] for r in latest_rows if str(r[0]) in _holder_ids and r[1] > 0)
+                _total_hsell = sum(abs(r[1]) for r in latest_rows if str(r[0]) in _holder_ids and r[1] < 0)
+                _sell_ratio  = _total_hsell / _total_hbuy if _total_hbuy > 0 else 0
+                if _selling_holders and _sell_ratio > 0.10:
                     console.print('  [bold red]ALERT: Your holders selling today — exit signal![/bold red]')
                 elif _smart_selling and total_smart_sell > total_holder_buy * 1.5:
                     console.print('  [bold yellow]CAUTION: Net sellers outweigh holders buying — tighten stop loss[/bold yellow]')
@@ -6105,7 +6108,10 @@ def analyze_broker_date(symbol=None, date_str=None, db_path='nepse_market_data.d
                 console.print()
 
             # Final verdict
-            if _selling_holders:
+            _hbuy2  = sum(r[6] for r in rows if str(r[0]) in _holder_ids and r[6] > 0)
+            _hsell2 = sum(abs(r[6]) for r in rows if str(r[0]) in _holder_ids and r[6] < 0)
+            _sratio2 = _hsell2 / _hbuy2 if _hbuy2 > 0 else 1
+            if _selling_holders and _sratio2 > 0.10:
                 console.print(f'  [bold red]ALERT: Your holders selling — Broker {", ".join(_selling_holders)} flipping![/bold red]')
                 console.print('  [red]-> Consider reducing position. Run 17d to check trend.[/red]')
             elif _smart_selling and _buying_holders:
