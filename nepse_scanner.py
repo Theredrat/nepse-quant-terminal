@@ -1,4 +1,4 @@
-﻿import sys, os
+import sys, os
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -6272,12 +6272,44 @@ def analyze_sector_seasonality(db_path='nepse_market_data.db'):
         console.print()
 
     # ══ NOW SUMMARY ══
-    console.rule(f'[bold]Current Period Summary — {curr_fyq} / {curr_gq}[/bold]')
-    console.print()
-    console.print(f'  [bold cyan]FYQ Character:[/bold cyan] [dim]{FYQ_CHAR.get(curr_fyq,"")}[/dim]')
+    curr_mn = MONTH_NAMES[today.month-1]
+    next_mn = MONTH_NAMES[today.month % 12]
+    console.rule(f'[bold]Current Period — {curr_mn} / {curr_fyq} / {curr_gq}[/bold]')
     console.print()
 
-    # Ranked by FYQ current
+    # Month ranking
+    GM_CHAR = {
+        1:'Jan (Poush-Magh) — Weak start. Tax selling. Good for selective accumulation.',
+        2:'Feb (Magh-Falgun) — Mostly negative. Mid-year lull continues.',
+        3:'Mar (Falgun-Chaitra) — Mixed. Some recovery. Pre-Baisakh positioning.',
+        4:'Apr (Chaitra-Baisakh) — New Year transition. Volatile. Early birds buy.',
+        5:'May (Baisakh-Jestha) — Baisakh euphoria fades. Mixed signals.',
+        6:'Jun (Jestha-Ashadh) — Pre-monsoon positioning. Finance and microfinance strong. FY year-end.',
+        7:'Jul (Ashadh-Shrawan) — NEW FISCAL YEAR. Strongest month for almost all sectors.',
+        8:'Aug (Shrawan-Bhadra) — Post-July correction. Monsoon peak. Mostly negative.',
+        9:'Sep (Bhadra-Ashwin) — Weakest month. Pre-Dashain profit booking.',
+        10:'Oct (Ashwin-Kartik) — Dashain/Tihar season. Festive rally begins.',
+        11:'Nov (Kartik-Mangsir) — Post-Tihar mixed. Some sectors extend.',
+        12:'Dec (Mangsir-Poush) — Year-end positioning. Mixed signals.',
+    }
+    console.print(f'  [bold cyan]Month ({curr_mn}):[/bold cyan] [dim]{GM_CHAR.get(today.month,"")}[/dim]')
+    console.print()
+    mon_rows = []
+    for sect in all_sectors:
+        v = gm_stats.get(sect, {}).get(today.month)
+        if v:
+            sig,col = _sig(v[0])
+            mon_rows.append((v[0], sect, sig, col, v[5], v[6], v[1], v[2]))
+    mon_rows.sort(reverse=True)
+    console.print(f'  [bold]{curr_mn} Sector Ranking:[/bold]')
+    console.print()
+    for ret,sect,sig,col,up,dn,wins,total in mon_rows:
+        console.print(f'  [{col}]{sig:8s}[/{col}]  {sect:<22}  [{col}]{ret:+.1f}%[/{col}]  [dim]{wins}/{total} up  +{up:.1f}% up / -{dn:.1f}% dn[/dim]', highlight=False)
+    console.print()
+
+    # FYQ ranking
+    console.print(f'  [bold cyan]FYQ Character ({curr_fyq}):[/bold cyan] [dim]{FYQ_CHAR.get(curr_fyq,"")}[/dim]')
+    console.print()
     now_rows = []
     for sect in all_sectors:
         v = fyq_stats[sect].get(curr_fyq)
@@ -6285,7 +6317,7 @@ def analyze_sector_seasonality(db_path='nepse_market_data.db'):
             sig,col = _sig(v[0])
             now_rows.append((v[0], sect, sig, col, v[5], v[6], v[1], v[2]))
     now_rows.sort(reverse=True)
-    console.print(f'  [bold]FYQ{curr_fyq[-1]} Sector Ranking:[/bold]')
+    console.print(f'  [bold]{curr_fyq} Sector Ranking:[/bold]')
     console.print()
     for ret,sect,sig,col,up,dn,wins,total in now_rows:
         console.print(f'  [{col}]{sig:8s}[/{col}]  {sect:<22}  [{col}]{ret:+.1f}%[/{col}]  [dim]{wins}/{total} up  +{up:.1f}% up / -{dn:.1f}% dn[/dim]')
