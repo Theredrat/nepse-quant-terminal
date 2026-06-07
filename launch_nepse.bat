@@ -143,7 +143,7 @@ if "%choice%"=="36" goto BEST_RR
 if "%choice%"=="37" goto MARKET_PHASE
 if "%choice%"=="38" goto SEASONALITY
 if "%choice%"=="39" goto NEPALI_SEASON
-if "%choice%"=="40" python nepse_scanner.py --sector-season ^& goto AGAIN
+if "%choice%"=="40" goto SECTOR_SEASON
 if "%choice%"=="22" start python nepse_alerts.py & goto AGAIN
 if "%choice%"=="23" python nepse_scanner.py --corr & goto AGAIN
 if "%choice%"=="24" python nepse_scanner.py --portfolio & goto AGAIN
@@ -312,10 +312,15 @@ goto AGAIN
 python nepse_scanner.py --seasonality
 goto AGAIN
 
+:SECTOR_SEASON
+python nepse_scanner.py --sector-season
+goto AGAIN
+
 :AGAIN
 echo.
 echo  ============================================
 pause
 goto MENU
+
 
 
