@@ -5366,10 +5366,43 @@ def analyze_market_phase(db_path='nepse_market_data.db'):
         if t5b > t5s: sm_buy_days+=1
     sm_score = 25 if sm_buy_days>=4 else 15 if sm_buy_days>=3 else 5 if sm_buy_days>=2 else 0
 
+    # === SIGNAL 5: VOLUME CONFIRMATION ===
+    vol_data = conn.execute(
+        "SELECT date, volume FROM stock_prices WHERE symbol='NEPSE' AND volume>0 ORDER BY date DESC LIMIT 25"
+    ).fetchall()
+    vol_score = 0
+    vol_note  = 'No volume data'
+    vol_ratio = 0
+    if len(vol_data) >= 10:
+        avg_vol_5d  = sum(r[1] for r in vol_data[:5])  / 5
+        avg_vol_20d = sum(r[1] for r in vol_data[:20]) / 20
+        vol_ratio   = round(avg_vol_5d / avg_vol_20d * 100) if avg_vol_20d > 0 else 100
+        price_up    = trend_5d >= 0
+        high_vol    = vol_ratio >= 110  # 10% above average
+        low_vol     = vol_ratio <= 90   # 10% below average
+        if price_up and high_vol:
+            vol_score = 25
+            vol_note  = f'Rally on HIGH volume ({vol_ratio}% of avg) — strong accumulation'
+        elif price_up and low_vol:
+            vol_score = 10
+            vol_note  = f'Rally on LOW volume ({vol_ratio}% of avg) — weak, suspect'
+        elif price_up:
+            vol_score = 15
+            vol_note  = f'Rally on normal volume ({vol_ratio}% of avg) — OK'
+        elif not price_up and high_vol:
+            vol_score = 0
+            vol_note  = f'Drop on HIGH volume ({vol_ratio}% of avg) — strong distribution'
+        elif not price_up and low_vol:
+            vol_score = 15
+            vol_note  = f'Drop on LOW volume ({vol_ratio}% of avg) — weak selling, not panic'
+        else:
+            vol_score = 10
+            vol_note  = f'Drop on normal volume ({vol_ratio}% of avg) — normal selling'
+
     conn.close()
 
     # === TOTAL SCORE & PHASE ===
-    total = nepse_score + breadth_score + above_score + sm_score
+    total = nepse_score + breadth_score + above_score + sm_score + vol_score
 
     if total >= 80:
         phase='MARKUP';        phase_col='green';  phase_note='Strong uptrend — buy breakouts, ride momentum'
@@ -5440,6 +5473,13 @@ def analyze_market_phase(db_path='nepse_market_data.db'):
     console.print(f'     Score: [{s_col}]{sm_score}/25[/{s_col}]')
     console.print()
 
+    # Volume
+    v_col = 'green' if vol_score>=20 else 'yellow' if vol_score>=10 else 'red'
+    console.print('  [bold]5. Volume Confirmation (5d vs 20d avg)[/bold]')
+    console.print(f'     {vol_note}')
+    console.print(f'     Score: [{v_col}]{vol_score}/25[/{v_col}]')
+    console.print()
+
     # Trading guidance
     console.rule('[bold]What To Do Now[/bold]')
     console.print()
@@ -5476,6 +5516,10 @@ def analyze_market_phase(db_path='nepse_market_data.db'):
         console.print(f'  Breadth needs: +{max(0,need_breadth)}% more advances (currently {breadth_ratio}%, need 55%)')
         console.print(f'  Above 20MA needs: +{max(0,need_above)}% more stocks (currently {pct_above}%, need 55%)')
         console.print(f'  Smart money needs: {max(0,need_sm)} more buy days (currently {sm_buy_days}/5, need 3+)')
+        if vol_ratio < 100:
+            console.print(f'  Volume: {vol_ratio}% of avg — watch for capitulation flush on high volume')
+        else:
+            console.print(f'  Volume: {vol_ratio}% of avg — needs rally on 110%+ volume to confirm reversal')
         console.print()
 
 
