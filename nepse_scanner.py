@@ -4209,26 +4209,66 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
     console.rule('[bold]Nepali Fiscal Year Quarterly Seasonality[/bold]')
     console.print()
 
-    def _nepali_q(month):
-        if month in (7,8,9):    return 'NQ1'
-        if month in (10,11,12): return 'NQ2'
-        if month in (1,2,3):    return 'NQ3'
-        return 'NQ4'
+    # True BS date boundaries for NQ quarters
+    _bs38_start = {
+        2077:(2020,4,13),2078:(2021,4,14),2079:(2022,4,14),
+        2080:(2023,4,14),2081:(2024,4,13),2082:(2025,4,14),2083:(2026,4,14),
+    }
+    _bs38_mdays = {
+        2077:[31,31,31,32,31,31,30,29,30,29,30,30],
+        2078:[31,31,32,31,31,31,30,29,30,29,30,30],
+        2079:[31,32,31,32,31,30,30,29,30,29,30,30],
+        2080:[31,31,31,32,31,31,30,29,30,29,30,30],
+        2081:[31,31,32,31,31,31,30,29,30,29,30,30],
+        2082:[31,32,31,32,31,30,30,29,30,29,30,30],
+        2083:[31,31,31,32,31,31,30,29,30,29,30,30],
+    }
+    # BS month -> NQ quarter (Shrawan=4 is NQ1)
+    _bs38_nq = {4:'NQ1',5:'NQ1',6:'NQ1',
+                7:'NQ2',8:'NQ2',9:'NQ2',
+                10:'NQ3',11:'NQ3',12:'NQ3',
+                1:'NQ4',2:'NQ4',3:'NQ4'}
+    # BS month -> FY offset (months before Shrawan belong to previous FY)
+    # Shrawan(4)-Ashadh(3) = same FY as BS year
+    # Baisakh(1)-Ashadh(3) = NQ4 of previous BS year's FY
 
-    def _fiscal_year(date):
-        y, m = int(date[:4]), int(date[5:7])
-        return y if m >= 7 else y - 1
+    def _to_bs38(d_str):
+        from datetime import date as _d
+        d = _d.fromisoformat(d_str)
+        for yr in sorted(_bs38_start.keys(), reverse=True):
+            g = _bs38_start[yr]
+            s = _d(g[0],g[1],g[2])
+            if d >= s:
+                days = (d-s).days
+                for mi,md in enumerate(_bs38_mdays.get(yr,[])):
+                    if days < md: return yr, mi+1
+                    days -= md
+                return yr+1, 1
+        return None, None
+
+    def _bs38_fy(bs_yr, bs_m):
+        # NQ1=Shrawan-Ashwin(m4-6), NQ2=Kartik-Poush(m7-9)
+        # NQ3=Magh-Chaitra(m10-12), NQ4=Baisakh-Ashadh(m1-3)
+        # FY label = BS year when Shrawan starts
+        if bs_m in (4,5,6,7,8,9,10,11,12):
+            return bs_yr
+        else:  # m 1,2,3 = NQ4 of previous FY
+            return bs_yr - 1
 
     nq_data = defaultdict(list)
     for d, c in nepse:
-        m = int(d[5:7])
-        key = f'{_fiscal_year(d)}-{_nepali_q(m)}'
-        nq_data[key].append(c)
+        bs_yr, bs_m = _to_bs38(d)
+        if bs_yr and bs_m:
+            nq  = _bs38_nq[bs_m]
+            fy  = _bs38_fy(bs_yr, bs_m)
+            key = f'{fy}-{nq}'
+            nq_data[key].append(c)
 
     # Current and first partial NQ filters
-    _curr_nq_key  = f'{_fiscal_year(str(today.date()))}-{_nepali_q(today.month)}'
-    _db_start_str = '2021-05-25'
-    _first_nq_key = f'{_fiscal_year(_db_start_str)}-{_nepali_q(int(_db_start_str[5:7]))}'
+    _today_bs38 = _to_bs38(str(today.date()))
+    _curr_nq_key  = f'{_bs38_fy(_today_bs38[0], _today_bs38[1])}-{_bs38_nq[_today_bs38[1]]}'
+    _first_bs38   = _to_bs38('2021-05-25')
+    _first_nq_key = f'{_bs38_fy(_first_bs38[0], _first_bs38[1])}-{_bs38_nq[_first_bs38[1]]}'
 
     by_nq = defaultdict(list)
     for k in sorted(nq_data.keys()):
@@ -4241,7 +4281,7 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
             fy = k.split('-')[0]
             by_nq[nq].append((fy, ret))
 
-    curr_nq = _nepali_q(today.month)
+    curr_nq = _bs38_nq[_to_bs38(str(today.date()))[1]]
     next_nq = {'NQ1':'NQ2','NQ2':'NQ3','NQ3':'NQ4','NQ4':'NQ1'}[curr_nq]
     nq_labels = {'NQ1':'Jul-Sep','NQ2':'Oct-Dec','NQ3':'Jan-Mar','NQ4':'Apr-Jun'}
 
@@ -4255,9 +4295,10 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
     _conn4.close()
     _nqhl = defaultdict(list)
     for _d, _h, _l, _c in _hl4:
-        _mm = int(_d[5:7])
-        _nqk = f'{_fiscal_year(_d)}-{_nepali_q(_mm)}'
-        _nqhl[_nqk].append((_h, _l, _c))
+        _bs_yr38, _bs_m38 = _to_bs38(_d)
+        if _bs_yr38 and _bs_m38:
+            _nqk = f'{_bs38_fy(_bs_yr38, _bs_m38)}-{_bs38_nq[_bs_m38]}'
+            _nqhl[_nqk].append((_h, _l, _c))
     by_nq_range = defaultdict(list)
     for _k in sorted(_nqhl.keys()):
         _rows = _nqhl[_k]
