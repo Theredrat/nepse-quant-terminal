@@ -3666,52 +3666,6 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
     # FINAL VERDICT
     # ─────────────────────────────────────────
     console.print()
-    console.rule('[bold cyan]Final Verdict[/bold cyan]', style='cyan')
-    console.print()
-
-    # Summary table
-    t = Table(show_header=True, header_style='bold cyan', box=None, padding=(0,2))
-    t.add_column('Section', width=20)
-    t.add_column('Score', width=10, justify='right')
-    t.add_column('Verdict', width=30)
-    for name, score, verdict, col in section_verdicts:
-        t.add_row(name, f'[{col}]{score}/100[/{col}]', f'[{col}]{verdict}[/{col}]')
-    console.print(t)
-    console.print()
-
-    final_pct = (total_score / max_score * 100) if max_score > 0 else 0
-    broker_s = next((s for n,s,v,c in section_verdicts if n == 'Broker Activity'), 50)
-    tech_s = next((s for n,s,v,c in section_verdicts if n == 'Technical'), 50)
-    fund_s = next((s for n,s,v,c in section_verdicts if n == 'Fundamentals'), 50)
-    if final_pct >= 70 or (broker_s >= 80 and tech_s >= 60):
-        final_verdict = '[bold green]STRONG BUY — Strong accumulation and momentum. Good entry.[/bold green]'
-    elif final_pct >= 55 or (broker_s >= 70 and final_pct >= 45):
-        final_verdict = '[bold green]BUY / ACCUMULATE — Institutional buying active. Consider entering.[/bold green]'
-    elif final_pct >= 45 or (broker_s >= 60 and fund_s >= 40):
-        final_verdict = '[bold yellow]HOLD / WATCH — Mixed signals. Wait for more confirmation.[/bold yellow]'
-    elif final_pct >= 35:
-        final_verdict = '[bold yellow]CAUTION — More negatives than positives. Avoid new entry.[/bold yellow]'
-    else:
-        final_verdict = '[bold red]AVOID / SELL — Weak fundamentals, distribution, bearish trend.[/bold red]'
-
-    # Trading vs Investing label
-    if fund_s >= 60 and broker_s >= 60:
-        trade_label = '[bold green]INVESTOR + TRADER stock — Strong fundamentals AND momentum[/bold green]'
-    elif fund_s >= 60 and broker_s < 60:
-        trade_label = '[bold cyan]INVESTOR stock — Good fundamentals but weak momentum. Long term hold.[/bold cyan]'
-    elif fund_s < 40 and broker_s >= 70:
-        trade_label = '[bold yellow]TRADER stock only — Weak fundamentals but strong momentum. Short term trade, set stop loss.[/bold yellow]'
-    elif fund_s < 40 and tech_s >= 60:
-        trade_label = '[bold yellow]SPECULATIVE TRADE — Price momentum only. High risk, tight stop loss required.[/bold yellow]'
-    else:
-        trade_label = '[dim]NEUTRAL — No strong edge for trading or investing right now.[/dim]'
-
-    console.print(f'  Overall Score: [bold]{total_score}/{max_score} ({final_pct:.0f}%)[/bold]')
-    console.print()
-    console.print(f'  {final_verdict}')
-    console.print()
-    console.print(f'  {trade_label}')
-    console.print()
     # === NEPALI FY QUARTERLY (Shrawan-based) ===
     console.print()
     console.rule('[bold]Nepali FY Quarterly Seasonality (Shrawan-based)[/bold]')
@@ -3895,6 +3849,52 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
     console.print('  [dim]Research only. Not financial advice. Paper trade first.[/dim]')
     console.print()
 
+    console.print()
+    console.rule('[bold cyan]Final Verdict[/bold cyan]', style='cyan')
+    console.print()
+
+    # Summary table
+    t = Table(show_header=True, header_style='bold cyan', box=None, padding=(0,2))
+    t.add_column('Section', width=20)
+    t.add_column('Score', width=10, justify='right')
+    t.add_column('Verdict', width=30)
+    for name, score, verdict, col in section_verdicts:
+        t.add_row(name, f'[{col}]{score}/100[/{col}]', f'[{col}]{verdict}[/{col}]')
+    console.print(t)
+    console.print()
+
+    final_pct = (total_score / max_score * 100) if max_score > 0 else 0
+    broker_s = next((s for n,s,v,c in section_verdicts if n == 'Broker Activity'), 50)
+    tech_s = next((s for n,s,v,c in section_verdicts if n == 'Technical'), 50)
+    fund_s = next((s for n,s,v,c in section_verdicts if n == 'Fundamentals'), 50)
+    if final_pct >= 70 or (broker_s >= 80 and tech_s >= 60):
+        final_verdict = '[bold green]STRONG BUY — Strong accumulation and momentum. Good entry.[/bold green]'
+    elif final_pct >= 55 or (broker_s >= 70 and final_pct >= 45):
+        final_verdict = '[bold green]BUY / ACCUMULATE — Institutional buying active. Consider entering.[/bold green]'
+    elif final_pct >= 45 or (broker_s >= 60 and fund_s >= 40):
+        final_verdict = '[bold yellow]HOLD / WATCH — Mixed signals. Wait for more confirmation.[/bold yellow]'
+    elif final_pct >= 35:
+        final_verdict = '[bold yellow]CAUTION — More negatives than positives. Avoid new entry.[/bold yellow]'
+    else:
+        final_verdict = '[bold red]AVOID / SELL — Weak fundamentals, distribution, bearish trend.[/bold red]'
+
+    # Trading vs Investing label
+    if fund_s >= 60 and broker_s >= 60:
+        trade_label = '[bold green]INVESTOR + TRADER stock — Strong fundamentals AND momentum[/bold green]'
+    elif fund_s >= 60 and broker_s < 60:
+        trade_label = '[bold cyan]INVESTOR stock — Good fundamentals but weak momentum. Long term hold.[/bold cyan]'
+    elif fund_s < 40 and broker_s >= 70:
+        trade_label = '[bold yellow]TRADER stock only — Weak fundamentals but strong momentum. Short term trade, set stop loss.[/bold yellow]'
+    elif fund_s < 40 and tech_s >= 60:
+        trade_label = '[bold yellow]SPECULATIVE TRADE — Price momentum only. High risk, tight stop loss required.[/bold yellow]'
+    else:
+        trade_label = '[dim]NEUTRAL — No strong edge for trading or investing right now.[/dim]'
+
+    console.print(f'  Overall Score: [bold]{total_score}/{max_score} ({final_pct:.0f}%)[/bold]')
+    console.print()
+    console.print(f'  {final_verdict}')
+    console.print()
+    console.print(f'  {trade_label}')
 
 def analyze_seasonality(db_path='nepse_market_data.db'):
     """Option 38 - Seasonality Analysis"""
