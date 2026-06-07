@@ -6153,7 +6153,9 @@ def analyze_sector_seasonality(db_path='nepse_market_data.db'):
     bs_yr = bs_today[0] or today.year
     curr_bsm_key = (bs_yr, curr_bsm)
     curr_nq_key  = (bs_yr if curr_bsm >= 4 else bs_yr-1, curr_nq)
-    curr_fyq_key = (bs_yr if curr_bsm >= 4 else bs_yr-1, curr_fyq)
+    # NQ FY: same logic
+    curr_fyq_fy  = bs_yr if curr_bsm >= 4 else bs_yr-1
+    curr_fyq_key = (curr_fyq_fy, curr_fyq)
 
     # ── Helper: aggregate across years by period label ──
     def _agg(groups_sect, label_fn, curr_key, min_days=10):
@@ -6348,23 +6350,141 @@ def analyze_sector_seasonality(db_path='nepse_market_data.db'):
     console.print()
 
     # ══════════════════════════════════════════
-    # NOW SUMMARY
+    # PERIOD CHARACTER DESCRIPTIONS
     # ══════════════════════════════════════════
-    console.rule(f'[bold]Current Period Summary — {MONTH_NAMES[curr_gm-1]} / {curr_gq} / {_bs_names[curr_bsm][:3]} / {curr_nq} / {curr_fyq}[/bold]')
+    FYQ_CHAR = {
+        'FYQ1': 'Shrawan-Ashwin (Jul-Oct) — New fiscal year deployment. Institutions rebalance portfolios. Monsoon season — hydropower peaks. Historically strongest quarter for most sectors. Dashain rally begins late Ashwin.',
+        'FYQ2': 'Kartik-Poush (Oct-Jan) — Post-Dashain/Tihar profit booking early, then year-end window dressing. Hydropower best quarter (dry season flow). Cold season — tourism slows. Banks show Q2 results.',
+        'FYQ3': 'Magh-Chaitra (Jan-Apr) — Mid-year lull. Tax loss selling pressure. Pre-election volatility in political years. Development banks and investment sectors show strength. Holi/Fagu season.',
+        'FYQ4': 'Baisakh-Ashadh (Apr-Jul) — Nepali New Year euphoria (Baisakh). Pre-monsoon optimism. Fiscal year-end institutional buying. Hotel & tourism, microfinance, manufacturing historically strong. Hydropower weakest (pre-monsoon low water).',
+    }
+    NQ_CHAR = {
+        'NQ1': 'Baisakh-Ashadh (Apr-Jul) — New Year + fiscal year-end buying. Strong for most sectors except hydropower.',
+        'NQ2': 'Shrawan-Ashwin (Jul-Oct) — Monsoon + new FY deployment. Hydropower peaks. Strongest overall quarter.',
+        'NQ3': 'Kartik-Poush (Oct-Jan) — Festive season (Dashain/Tihar) early boost, then profit booking. Hydropower strong (dry season).',
+        'NQ4': 'Magh-Chaitra (Jan-Apr) — Weakest quarter for most sectors. Tax pressure, political uncertainty, mid-year lull.',
+    }
+    GQ_CHAR = {
+        'Q1': 'Jan-Mar — Post-holiday lull globally. NEPSE mid-year (Magh-Chaitra). Generally weak for most sectors.',
+        'Q2': 'Apr-Jun — New Year (Baisakh) rally. Fiscal year-end buying pressure. Hotels, microfinance, finance lead.',
+        'Q3': 'Jul-Sep — New fiscal year + monsoon. Strongest quarter historically. Broad-based buying across sectors.',
+        'Q4': 'Oct-Dec — Dashain/Tihar festive rally early. Profit booking post-festival. Mixed signals.',
+    }
+    GM_CHAR = {
+        1:  'Jan (Poush-Magh) — Weak start. Tax selling pressure. Good for selective accumulation.',
+        2:  'Feb (Magh-Falgun) — Mostly negative. Mid-year lull continues. Avoid chasing.',
+        3:  'Mar (Falgun-Chaitra) — Mixed. Some recovery. Watch for pre-Baisakh positioning.',
+        4:  'Apr (Chaitra-Baisakh) — New Year transition. Volatile. Early birds buy before Baisakh rally.',
+        5:  'May (Baisakh-Jestha) — Baisakh new year euphoria fades. Mixed — some sectors extend, others correct.',
+        6:  'Jun (Jestha-Ashadh) — Pre-monsoon positioning. Finance and microfinance historically strong. FY year-end.',
+        7:  'Jul (Ashadh-Shrawan) — NEW FISCAL YEAR. Strongest month of year for almost all sectors. Institutional redeployment.',
+        8:  'Aug (Shrawan-Bhadra) — Post-July correction. Monsoon peak. Hydropower strong but others pull back.',
+        9:  'Sep (Bhadra-Ashwin) — Weakest month. Pre-Dashain profit booking. Broad selling across sectors.',
+        10: 'Oct (Ashwin-Kartik) — Dashain/Tihar season begins. Festive rally. Consumer sectors lead.',
+        11: 'Nov (Kartik-Mangsir) — Post-Tihar mixed. Some sectors extend, others correct after rally.',
+        12: 'Dec (Mangsir-Poush) — Year-end positioning. Mixed — window dressing by some institutions.',
+    }
+    BSM_CHAR = {
+        1:  'Baisakh — Nepali New Year. Euphoric buying. Best BS month for most sectors.',
+        2:  'Jestha — Post-New Year lull. Selective strength in finance/microfinance.',
+        3:  'Ashadh — Fiscal year-end buying. Strong for finance, development banks.',
+        4:  'Shrawan — New FY starts. Strongest BS month. Institutional redeployment.',
+        5:  'Bhadra — Monsoon peak. Weakest BS month for most sectors. Profit booking.',
+        6:  'Ashwin — Pre-Dashain positioning. Mixed. Non-life insurance outlier (+26%).',
+        7:  'Kartik — Dashain/Tihar rally. Development banks and hydropower lead.',
+        8:  'Mangsir — Post-festival correction. Mixed signals across sectors.',
+        9:  'Poush — Best BS month for hydropower and development banks. Dry season peak.',
+        10: 'Magh — Mid-year lull. Weak for most. Hydropower extends.',
+        11: 'Falgun — Holi season. Mixed. Manufacturing outlier historically.',
+        12: 'Chaitra — Pre-New Year anticipation. Some buying ahead of Baisakh.',
+    }
+
+    def _show_period_summary(label, fyq_key, gm_key, title_str):
+        console.rule(f'[bold]{title_str}[/bold]')
+        console.print()
+
+        # FYQ character
+        fyq_desc = FYQ_CHAR.get(fyq_key, '')
+        console.print(f'  [bold cyan]FYQ Character:[/bold cyan] [dim]{fyq_desc}[/dim]')
+        console.print()
+
+        # Ranked sector table for this FYQ
+        rows = []
+        for sect in sorted(fyq_g.keys()):
+            agg = _agg(fyq_g[sect], lambda k: k[1], curr_fyq_key)
+            v = agg.get(fyq_key)
+            if v:
+                sig, col = _sig(v[0])
+                rows.append((v[0], sect, sig, col, v[1], v[2]))
+        rows.sort(reverse=True)
+        for ret, sect, sig, col, up, dn in rows:
+            console.print(f'  [{col}]{sig:8s}[/{col}]  {sect:<22}  [{col}]{ret:+.1f}%[/{col}]  [dim]+{up:.1f}% up / -{dn:.1f}% dn[/dim]')
+        console.print()
+
+        # Greg month character
+        gm_desc = GM_CHAR.get(gm_key, '')
+        if gm_desc:
+            console.print(f'  [bold cyan]Month Character ({MONTH_NAMES[gm_key-1]}):[/bold cyan] [dim]{gm_desc}[/dim]')
+        console.print()
+
+    # ── Current period ──
+    next_gm  = (curr_gm % 12) + 1
+    next_fyq = FYQ_ORDER[(FYQ_ORDER.index(curr_fyq) + 1) % 4]
+
+    _show_period_summary(
+        'current', curr_fyq, curr_gm,
+        f'Current Period — {MONTH_NAMES[curr_gm-1]} / {curr_gq} / {_bs_names[curr_bsm][:3]} / {curr_nq} / {curr_fyq}'
+    )
+
+    # ── Upcoming period ──
+    console.rule(f'[bold yellow]Upcoming Period — {MONTH_NAMES[next_gm-1]} / {next_fyq}[/bold yellow]', style='yellow')
     console.print()
-    # Use FYQ as primary signal
-    fyq_now_rows = []
+    next_fyq_desc = FYQ_CHAR.get(next_fyq, '')
+    next_gm_desc  = GM_CHAR.get(next_gm, '')
+    console.print(f'  [bold cyan]Next FYQ ({next_fyq}) Character:[/bold cyan] [dim]{next_fyq_desc}[/dim]')
+    console.print()
+    console.print(f'  [bold cyan]Next Month ({MONTH_NAMES[next_gm-1]}) Character:[/bold cyan] [dim]{next_gm_desc}[/dim]')
+    console.print()
+
+    # Ranked sectors for next FYQ
+    next_rows = []
     for sect in sorted(fyq_g.keys()):
-        agg = _agg(fyq_g[sect], lambda k: k[1], curr_fyq_key)
-        v = agg.get(curr_fyq)
+        # For next FYQ — exclude current in-progress key only, show all completed next_fyq years
+        agg_all = _agg(fyq_g[sect], lambda k: k[1], curr_fyq_key)
+        # But curr_fyq_key exclusion is fine — next_fyq data is all complete
+        # Problem: _agg also excludes first_key — rebuild without first_key exclusion
+        by_label = {}
+        all_keys = sorted(fyq_g[sect].keys())
+        first_k = all_keys[0] if all_keys else None
+        vals = []
+        for k, entries in fyq_g[sect].items():
+            if k == curr_fyq_key: continue
+            if k == first_k: continue
+            if len(entries) < 10: continue
+            lbl = k[1]
+            if lbl != next_fyq: continue
+            op = entries[0][1]; cl = entries[-1][4]
+            hi = max(e[2] for e in entries)
+            lo = min(e[3] for e in entries if e[3]>0)
+            if op <= 0: continue
+            ret=(cl-op)/op*100; up=(hi-op)/op*100
+            dn=(op-lo)/op*100
+            vals.append((ret,up,dn))
+        if not vals: continue
+        avg_ret = sum(v[0] for v in vals)/len(vals)
+        avg_up  = sum(v[1] for v in vals)/len(vals)
+        avg_dn  = sum(v[2] for v in vals)/len(vals)
+        v = (avg_ret, avg_up, avg_dn, 0, len(vals), 0, 0)
         if v:
             sig, col = _sig(v[0])
-            fyq_now_rows.append((v[0], sect, sig, col, v[1], v[2]))
-    fyq_now_rows.sort(reverse=True)
-    for ret, sect, sig, col, up, dn in fyq_now_rows:
-        console.print(f'  [{col}]{sig:8s}[/{col}]  {sect:<22}  [{col}]{ret:+.1f}%[/{col}]  [dim]up avg +{up:.1f}% / dn avg -{dn:.1f}%[/dim]')
+            next_rows.append((v[0], sect, sig, col, v[1], v[2]))
+    next_rows.sort(reverse=True)
+    console.print(f'  [bold]Sector Outlook for {next_fyq} ({FYQ_LABEL[next_fyq]}):[/bold]')
     console.print()
-    console.print('  [dim]Research only. Not financial advice.[/dim]')
+    for ret, sect, sig, col, up, dn in next_rows:
+        console.print(f'  [{col}]{sig:8s}[/{col}]  {sect:<22}  [{col}]{ret:+.1f}%[/{col}]  [dim]+{up:.1f}% up / -{dn:.1f}% dn[/dim]')
+    console.print()
+    console.print('  [dim]All returns based on complete periods only (current excluded). Research only. Not financial advice.[/dim]')
     console.print()
 
 def main():
