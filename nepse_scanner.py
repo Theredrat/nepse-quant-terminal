@@ -6272,10 +6272,9 @@ def analyze_sector_seasonality(db_path='nepse_market_data.db'):
         console.print()
 
     # ══ NOW SUMMARY ══
-    console.rule(f'[bold]Current Period Summary — {curr_fyq} / {curr_nq} / {curr_gq}[/bold]')
+    console.rule(f'[bold]Current Period Summary — {curr_fyq} / {curr_gq}[/bold]')
     console.print()
     console.print(f'  [bold cyan]FYQ Character:[/bold cyan] [dim]{FYQ_CHAR.get(curr_fyq,"")}[/dim]')
-    console.print(f'  [bold cyan]NQ Character:[/bold cyan]  [dim]{NQ_CHAR.get(curr_nq,"")}[/dim]')
     console.print()
 
     # Ranked by FYQ current
@@ -6293,10 +6292,9 @@ def analyze_sector_seasonality(db_path='nepse_market_data.db'):
     console.print()
 
     # ══ UPCOMING SUMMARY ══
-    console.rule(f'[bold yellow]Upcoming — {next_fyq} / {next_nq}[/bold yellow]', style='yellow')
+    console.rule(f'[bold yellow]Upcoming — {next_fyq} / {next_gq}[/bold yellow]', style='yellow')
     console.print()
     console.print(f'  [bold cyan]Next FYQ Character:[/bold cyan] [dim]{FYQ_CHAR.get(next_fyq,"")}[/dim]')
-    console.print(f'  [bold cyan]Next NQ Character:[/bold cyan]  [dim]{NQ_CHAR.get(next_nq,"")}[/dim]')
     console.print()
     next_rows = []
     for sect in all_sectors:
