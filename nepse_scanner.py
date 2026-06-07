@@ -3712,6 +3712,161 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
     console.print()
     console.print(f'  {trade_label}')
     console.print()
+    # === NEPALI FY QUARTERLY (Shrawan-based) ===
+    console.print()
+    console.rule('[bold]Nepali FY Quarterly Seasonality (Shrawan-based)[/bold]')
+    console.print()
+    console.print('  [dim]FYQ1=Shrawan-Ashwin  FYQ2=Kartik-Poush  FYQ3=Magh-Chaitra  FYQ4=Baisakh-Ashadh[/dim]')
+    console.print()
+
+    # Map BS months to FY quarters
+    fy_q_map = {4:'FYQ1',5:'FYQ1',6:'FYQ1',
+                7:'FYQ2',8:'FYQ2',9:'FYQ2',
+                10:'FYQ3',11:'FYQ3',12:'FYQ3',
+                1:'FYQ4',2:'FYQ4',3:'FYQ4'}
+    fy_q_labels = {
+        'FYQ1':'Shrawan-Bhadra-Ashwin (Jul-Oct)',
+        'FYQ2':'Kartik-Mangsir-Poush  (Oct-Jan)',
+        'FYQ3':'Magh-Falgun-Chaitra   (Jan-Apr)',
+        'FYQ4':'Baisakh-Jestha-Ashadh (Apr-Jul)',
+    }
+
+    def _fy_label(bs_yr, bs_m):
+        if bs_m in (4,5,6,7,8,9,10,11,12): return bs_yr
+        else: return bs_yr - 1
+
+    # Build FY quarterly data from monthly data
+    by_fyq      = defaultdict(list)
+    by_fyq_hl   = defaultdict(list)
+
+    from collections import defaultdict as _dd2
+    _fyq_raw = _dd2(list)
+    _fyq_hl_raw = _dd2(list)
+
+    # Load raw trading days grouped by FY quarter
+    conn2 = sqlite3.connect(db_path)
+    conn2.row_factory = sqlite3.Row
+    rows2 = conn2.execute(
+        "SELECT date, close, high, low FROM stock_prices "
+        "WHERE symbol='NEPSE' AND close>0 ORDER BY date"
+    ).fetchall()
+    conn2.close()
+
+    for r in rows2:
+        try:
+            d = date.fromisoformat(r['date'])
+            bs_yr2, bs_m2 = gregorian_to_bs(d)
+            if bs_yr2 and bs_m2:
+                fyq  = fy_q_map[bs_m2]
+                fy   = _fy_label(bs_yr2, bs_m2)
+                key  = (fy, fyq)
+                _fyq_raw[key].append((r['close'], r['high'], r['low']))
+        except: pass
+
+    # DB first and current FY quarter to skip
+    _today_bs2 = gregorian_to_bs(date.today())
+    _curr_fyq_key = (_fy_label(_today_bs2[0], _today_bs2[1]), fy_q_map[_today_bs2[1]])
+    _first_bs2 = gregorian_to_bs(date(2021,5,25))
+    _first_fyq_key = (_fy_label(_first_bs2[0], _first_bs2[1]), fy_q_map[_first_bs2[1]])
+
+    for key, entries in sorted(_fyq_raw.items()):
+        if len(entries) < 10: continue
+        if key == _curr_fyq_key: continue
+        if key == _first_fyq_key: continue
+        fy, fyq = key
+        oc = entries[0][0]; cc = entries[-1][0]
+        hh = max(e[1] for e in entries)
+        ll = min(e[2] for e in entries if e[2]>0)
+        ret   = (cc-oc)/oc*100
+        swing = (hh-ll)/ll*100
+        up    = (hh-oc)/oc*100
+        dn    = (oc-ll)/oc*100
+        by_fyq[fyq].append((fy, ret))
+        by_fyq_hl[fyq].append((fy, swing, up, dn))
+
+    # Current and next FY quarter
+    curr_fyq = fy_q_map[curr_bs_m]
+    fyq_order = ['FYQ1','FYQ2','FYQ3','FYQ4']
+    curr_fyq_idx = fyq_order.index(curr_fyq)
+    next_fyq = fyq_order[(curr_fyq_idx+1) % 4]
+
+    fyqtable = Table(show_header=True, header_style='bold cyan', box=None, padding=(0,1))
+    fyqtable.add_column('Quarter',      width=22)
+    fyqtable.add_column('Avg Ret',      justify='right', width=8)
+    fyqtable.add_column('W/T',          justify='center', width=5)
+    fyqtable.add_column('Best',         justify='right', width=7)
+    fyqtable.add_column('Worst',        justify='right', width=7)
+    fyqtable.add_column('Signal',       width=8)
+    fyqtable.add_column('Swing(rng)',   justify='center', width=14)
+    fyqtable.add_column('Up',           justify='right', width=6)
+    fyqtable.add_column('Dn',           justify='right', width=6)
+
+    for fyq in fyq_order:
+        rets = by_fyq[fyq]
+        if not rets: continue
+        avg   = sum(r for _,r in rets)/len(rets)
+        wins  = sum(1 for _,r in rets if r>0)
+        best  = max(r for _,r in rets)
+        worst = min(r for _,r in rets)
+        rng   = by_fyq_hl[fyq]
+        avg_sw = sum(r[1] for r in rng)/len(rng) if rng else 0
+        min_sw = min(r[1] for r in rng) if rng else 0
+        max_sw = max(r[1] for r in rng) if rng else 0
+        avg_up = sum(r[2] for r in rng)/len(rng) if rng else 0
+        avg_dn = sum(r[3] for r in rng)/len(rng) if rng else 0
+        col    = 'green' if avg>=2 else 'yellow' if avg>=-1 else 'red'
+        sig    = 'STR.BUY' if avg>=5 else 'BUY' if avg>=2 else 'NTRL' if avg>=-1 else 'AVOID' if avg>=-4 else 'STR.AVD'
+        marker = ' <-NOW' if fyq==curr_fyq else (' <-NXT' if fyq==next_fyq else '')
+        sw_str = f'{avg_sw:.1f}%({min_sw:.0f}-{max_sw:.0f}%)'
+        fyqtable.add_row(
+            f'[bold]{fyq}{marker}[/bold]',
+            f'[{col}]{avg:+.1f}%[/{col}]',
+            f'[{col}]{wins}/{len(rets)}[/{col}]',
+            f'[green]{best:+.1f}%[/green]',
+            f'[red]{worst:+.1f}%[/red]',
+            f'[{col}]{sig}[/{col}]',
+            f'[yellow]{sw_str}[/yellow]',
+            f'[green]+{avg_up:.1f}%[/green]',
+            f'[red]-{avg_dn:.1f}%[/red]',
+        )
+
+    console.print(fyqtable)
+    console.print()
+
+    # FYQ Trading Guide
+    console.rule('[bold]Nepali FY Quarter Trading Guide[/bold]')
+    console.print()
+    for fyq in fyq_order:
+        rets = by_fyq[fyq]
+        if not rets: continue
+        avg   = sum(r for _,r in rets)/len(rets)
+        wins  = sum(1 for _,r in rets if r>0)
+        rng   = by_fyq_hl[fyq]
+        avg_up = round(sum(r[2] for r in rng)/len(rng),1) if rng else 0
+        avg_dn = round(sum(r[3] for r in rng)/len(rng),1) if rng else 0
+        avg_sw = round(sum(r[1] for r in rng)/len(rng),1) if rng else 0
+        marker = ' <-- NOW' if fyq==curr_fyq else (' <- NEXT' if fyq==next_fyq else '')
+        col    = 'green' if avg>=2 else 'yellow' if avg>=-1 else 'red'
+        if avg_up > abs(avg_dn)*2 and avg>=3:
+            char = f'Strong rally — up {avg_up:.1f}% dominates'
+        elif avg_up > abs(avg_dn)*2 and avg<3:
+            char = f'Rally then fade — up {avg_up:.1f}% given back'
+        elif abs(avg_dn) > avg_up*1.5:
+            char = f'Downside dominated — drops {avg_dn:.1f}%'
+        elif avg_sw > 25:
+            char = f'Extreme volatility — {avg_sw:.0f}% swing'
+        else:
+            char = f'Mixed — up {avg_up:.1f}% / dn {avg_dn:.1f}%'
+        if avg>=5:   action = f'Deploy capital — strong tailwind +{avg_up:.1f}%'
+        elif avg>=2: action = f'Lean bullish. Dip {avg_dn:.1f}% then rally {avg_up:.1f}%.'
+        elif avg>=-1:action = f'Neutral — selective only. Up {avg_up:.1f}% vs dn {avg_dn:.1f}%.'
+        elif avg>=-4:action = f'Avoid longs. Drops {avg_dn:.1f}%, recovers {avg_up:.1f}%.'
+        else:        action = f'Stay cash. Heavy selling {avg_dn:.1f}% down.'
+        console.print(f'  [{col}][bold]{fyq}{marker}[/bold]  ({fy_q_labels[fyq]})  avg={avg:+.1f}%  ({wins}/{len(rets)} up)[/{col}]')
+        console.print(f'    Character : {char}')
+        console.print(f'    Action    : [{col}]{action}[/{col}]')
+        console.print()
+
     console.print('  [dim]Research only. Not financial advice. Paper trade first.[/dim]')
     console.print()
 
@@ -4970,6 +5125,161 @@ def analyze_nepali_seasonality(db_path='nepse_market_data.db'):
         else:
             action = f'Stay cash. Heavy selling — {avg_dn:.1f}% down, {avg_sw:.0f}% swing.'
         console.print(f'  [{col}][bold]{nq}{marker}[/bold]  ({nq_labels[nq]})  avg={avg:+.1f}%  ({wins}/{len(rets)} up)[/{col}]')
+        console.print(f'    Character : {char}')
+        console.print(f'    Action    : [{col}]{action}[/{col}]')
+        console.print()
+
+    # === NEPALI FY QUARTERLY (Shrawan-based) ===
+    console.print()
+    console.rule('[bold]Nepali FY Quarterly Seasonality (Shrawan-based)[/bold]')
+    console.print()
+    console.print('  [dim]FYQ1=Shrawan-Ashwin  FYQ2=Kartik-Poush  FYQ3=Magh-Chaitra  FYQ4=Baisakh-Ashadh[/dim]')
+    console.print()
+
+    # Map BS months to FY quarters
+    fy_q_map = {4:'FYQ1',5:'FYQ1',6:'FYQ1',
+                7:'FYQ2',8:'FYQ2',9:'FYQ2',
+                10:'FYQ3',11:'FYQ3',12:'FYQ3',
+                1:'FYQ4',2:'FYQ4',3:'FYQ4'}
+    fy_q_labels = {
+        'FYQ1':'Shrawan-Bhadra-Ashwin (Jul-Oct)',
+        'FYQ2':'Kartik-Mangsir-Poush  (Oct-Jan)',
+        'FYQ3':'Magh-Falgun-Chaitra   (Jan-Apr)',
+        'FYQ4':'Baisakh-Jestha-Ashadh (Apr-Jul)',
+    }
+
+    def _fy_label(bs_yr, bs_m):
+        if bs_m in (4,5,6,7,8,9,10,11,12): return bs_yr
+        else: return bs_yr - 1
+
+    # Build FY quarterly data from monthly data
+    by_fyq      = defaultdict(list)
+    by_fyq_hl   = defaultdict(list)
+
+    from collections import defaultdict as _dd2
+    _fyq_raw = _dd2(list)
+    _fyq_hl_raw = _dd2(list)
+
+    # Load raw trading days grouped by FY quarter
+    conn2 = sqlite3.connect(db_path)
+    conn2.row_factory = sqlite3.Row
+    rows2 = conn2.execute(
+        "SELECT date, close, high, low FROM stock_prices "
+        "WHERE symbol='NEPSE' AND close>0 ORDER BY date"
+    ).fetchall()
+    conn2.close()
+
+    for r in rows2:
+        try:
+            d = date.fromisoformat(r['date'])
+            bs_yr2, bs_m2 = gregorian_to_bs(d)
+            if bs_yr2 and bs_m2:
+                fyq  = fy_q_map[bs_m2]
+                fy   = _fy_label(bs_yr2, bs_m2)
+                key  = (fy, fyq)
+                _fyq_raw[key].append((r['close'], r['high'], r['low']))
+        except: pass
+
+    # DB first and current FY quarter to skip
+    _today_bs2 = gregorian_to_bs(date.today())
+    _curr_fyq_key = (_fy_label(_today_bs2[0], _today_bs2[1]), fy_q_map[_today_bs2[1]])
+    _first_bs2 = gregorian_to_bs(date(2021,5,25))
+    _first_fyq_key = (_fy_label(_first_bs2[0], _first_bs2[1]), fy_q_map[_first_bs2[1]])
+
+    for key, entries in sorted(_fyq_raw.items()):
+        if len(entries) < 10: continue
+        if key == _curr_fyq_key: continue
+        if key == _first_fyq_key: continue
+        fy, fyq = key
+        oc = entries[0][0]; cc = entries[-1][0]
+        hh = max(e[1] for e in entries)
+        ll = min(e[2] for e in entries if e[2]>0)
+        ret   = (cc-oc)/oc*100
+        swing = (hh-ll)/ll*100
+        up    = (hh-oc)/oc*100
+        dn    = (oc-ll)/oc*100
+        by_fyq[fyq].append((fy, ret))
+        by_fyq_hl[fyq].append((fy, swing, up, dn))
+
+    # Current and next FY quarter
+    curr_fyq = fy_q_map[curr_bs_m]
+    fyq_order = ['FYQ1','FYQ2','FYQ3','FYQ4']
+    curr_fyq_idx = fyq_order.index(curr_fyq)
+    next_fyq = fyq_order[(curr_fyq_idx+1) % 4]
+
+    fyqtable = Table(show_header=True, header_style='bold cyan', box=None, padding=(0,1))
+    fyqtable.add_column('Quarter',      width=22)
+    fyqtable.add_column('Avg Ret',      justify='right', width=8)
+    fyqtable.add_column('W/T',          justify='center', width=5)
+    fyqtable.add_column('Best',         justify='right', width=7)
+    fyqtable.add_column('Worst',        justify='right', width=7)
+    fyqtable.add_column('Signal',       width=8)
+    fyqtable.add_column('Swing(rng)',   justify='center', width=14)
+    fyqtable.add_column('Up',           justify='right', width=6)
+    fyqtable.add_column('Dn',           justify='right', width=6)
+
+    for fyq in fyq_order:
+        rets = by_fyq[fyq]
+        if not rets: continue
+        avg   = sum(r for _,r in rets)/len(rets)
+        wins  = sum(1 for _,r in rets if r>0)
+        best  = max(r for _,r in rets)
+        worst = min(r for _,r in rets)
+        rng   = by_fyq_hl[fyq]
+        avg_sw = sum(r[1] for r in rng)/len(rng) if rng else 0
+        min_sw = min(r[1] for r in rng) if rng else 0
+        max_sw = max(r[1] for r in rng) if rng else 0
+        avg_up = sum(r[2] for r in rng)/len(rng) if rng else 0
+        avg_dn = sum(r[3] for r in rng)/len(rng) if rng else 0
+        col    = 'green' if avg>=2 else 'yellow' if avg>=-1 else 'red'
+        sig    = 'STR.BUY' if avg>=5 else 'BUY' if avg>=2 else 'NTRL' if avg>=-1 else 'AVOID' if avg>=-4 else 'STR.AVD'
+        marker = ' <-NOW' if fyq==curr_fyq else (' <-NXT' if fyq==next_fyq else '')
+        sw_str = f'{avg_sw:.1f}%({min_sw:.0f}-{max_sw:.0f}%)'
+        fyqtable.add_row(
+            f'[bold]{fyq}{marker}[/bold]',
+            f'[{col}]{avg:+.1f}%[/{col}]',
+            f'[{col}]{wins}/{len(rets)}[/{col}]',
+            f'[green]{best:+.1f}%[/green]',
+            f'[red]{worst:+.1f}%[/red]',
+            f'[{col}]{sig}[/{col}]',
+            f'[yellow]{sw_str}[/yellow]',
+            f'[green]+{avg_up:.1f}%[/green]',
+            f'[red]-{avg_dn:.1f}%[/red]',
+        )
+
+    console.print(fyqtable)
+    console.print()
+
+    # FYQ Trading Guide
+    console.rule('[bold]Nepali FY Quarter Trading Guide[/bold]')
+    console.print()
+    for fyq in fyq_order:
+        rets = by_fyq[fyq]
+        if not rets: continue
+        avg   = sum(r for _,r in rets)/len(rets)
+        wins  = sum(1 for _,r in rets if r>0)
+        rng   = by_fyq_hl[fyq]
+        avg_up = round(sum(r[2] for r in rng)/len(rng),1) if rng else 0
+        avg_dn = round(sum(r[3] for r in rng)/len(rng),1) if rng else 0
+        avg_sw = round(sum(r[1] for r in rng)/len(rng),1) if rng else 0
+        marker = ' <-- NOW' if fyq==curr_fyq else (' <- NEXT' if fyq==next_fyq else '')
+        col    = 'green' if avg>=2 else 'yellow' if avg>=-1 else 'red'
+        if avg_up > abs(avg_dn)*2 and avg>=3:
+            char = f'Strong rally — up {avg_up:.1f}% dominates'
+        elif avg_up > abs(avg_dn)*2 and avg<3:
+            char = f'Rally then fade — up {avg_up:.1f}% given back'
+        elif abs(avg_dn) > avg_up*1.5:
+            char = f'Downside dominated — drops {avg_dn:.1f}%'
+        elif avg_sw > 25:
+            char = f'Extreme volatility — {avg_sw:.0f}% swing'
+        else:
+            char = f'Mixed — up {avg_up:.1f}% / dn {avg_dn:.1f}%'
+        if avg>=5:   action = f'Deploy capital — strong tailwind +{avg_up:.1f}%'
+        elif avg>=2: action = f'Lean bullish. Dip {avg_dn:.1f}% then rally {avg_up:.1f}%.'
+        elif avg>=-1:action = f'Neutral — selective only. Up {avg_up:.1f}% vs dn {avg_dn:.1f}%.'
+        elif avg>=-4:action = f'Avoid longs. Drops {avg_dn:.1f}%, recovers {avg_up:.1f}%.'
+        else:        action = f'Stay cash. Heavy selling {avg_dn:.1f}% down.'
+        console.print(f'  [{col}][bold]{fyq}{marker}[/bold]  ({fy_q_labels[fyq]})  avg={avg:+.1f}%  ({wins}/{len(rets)} up)[/{col}]')
         console.print(f'    Character : {char}')
         console.print(f'    Action    : [{col}]{action}[/{col}]')
         console.print()
@@ -8186,6 +8496,161 @@ def analyze_broker_date(symbol=None, date_str=None, db_path='nepse_market_data.d
     console.print()
     console.print(f'  Verdict: {verdict}')
     console.print()
+    # === NEPALI FY QUARTERLY (Shrawan-based) ===
+    console.print()
+    console.rule('[bold]Nepali FY Quarterly Seasonality (Shrawan-based)[/bold]')
+    console.print()
+    console.print('  [dim]FYQ1=Shrawan-Ashwin  FYQ2=Kartik-Poush  FYQ3=Magh-Chaitra  FYQ4=Baisakh-Ashadh[/dim]')
+    console.print()
+
+    # Map BS months to FY quarters
+    fy_q_map = {4:'FYQ1',5:'FYQ1',6:'FYQ1',
+                7:'FYQ2',8:'FYQ2',9:'FYQ2',
+                10:'FYQ3',11:'FYQ3',12:'FYQ3',
+                1:'FYQ4',2:'FYQ4',3:'FYQ4'}
+    fy_q_labels = {
+        'FYQ1':'Shrawan-Bhadra-Ashwin (Jul-Oct)',
+        'FYQ2':'Kartik-Mangsir-Poush  (Oct-Jan)',
+        'FYQ3':'Magh-Falgun-Chaitra   (Jan-Apr)',
+        'FYQ4':'Baisakh-Jestha-Ashadh (Apr-Jul)',
+    }
+
+    def _fy_label(bs_yr, bs_m):
+        if bs_m in (4,5,6,7,8,9,10,11,12): return bs_yr
+        else: return bs_yr - 1
+
+    # Build FY quarterly data from monthly data
+    by_fyq      = defaultdict(list)
+    by_fyq_hl   = defaultdict(list)
+
+    from collections import defaultdict as _dd2
+    _fyq_raw = _dd2(list)
+    _fyq_hl_raw = _dd2(list)
+
+    # Load raw trading days grouped by FY quarter
+    conn2 = sqlite3.connect(db_path)
+    conn2.row_factory = sqlite3.Row
+    rows2 = conn2.execute(
+        "SELECT date, close, high, low FROM stock_prices "
+        "WHERE symbol='NEPSE' AND close>0 ORDER BY date"
+    ).fetchall()
+    conn2.close()
+
+    for r in rows2:
+        try:
+            d = date.fromisoformat(r['date'])
+            bs_yr2, bs_m2 = gregorian_to_bs(d)
+            if bs_yr2 and bs_m2:
+                fyq  = fy_q_map[bs_m2]
+                fy   = _fy_label(bs_yr2, bs_m2)
+                key  = (fy, fyq)
+                _fyq_raw[key].append((r['close'], r['high'], r['low']))
+        except: pass
+
+    # DB first and current FY quarter to skip
+    _today_bs2 = gregorian_to_bs(date.today())
+    _curr_fyq_key = (_fy_label(_today_bs2[0], _today_bs2[1]), fy_q_map[_today_bs2[1]])
+    _first_bs2 = gregorian_to_bs(date(2021,5,25))
+    _first_fyq_key = (_fy_label(_first_bs2[0], _first_bs2[1]), fy_q_map[_first_bs2[1]])
+
+    for key, entries in sorted(_fyq_raw.items()):
+        if len(entries) < 10: continue
+        if key == _curr_fyq_key: continue
+        if key == _first_fyq_key: continue
+        fy, fyq = key
+        oc = entries[0][0]; cc = entries[-1][0]
+        hh = max(e[1] for e in entries)
+        ll = min(e[2] for e in entries if e[2]>0)
+        ret   = (cc-oc)/oc*100
+        swing = (hh-ll)/ll*100
+        up    = (hh-oc)/oc*100
+        dn    = (oc-ll)/oc*100
+        by_fyq[fyq].append((fy, ret))
+        by_fyq_hl[fyq].append((fy, swing, up, dn))
+
+    # Current and next FY quarter
+    curr_fyq = fy_q_map[curr_bs_m]
+    fyq_order = ['FYQ1','FYQ2','FYQ3','FYQ4']
+    curr_fyq_idx = fyq_order.index(curr_fyq)
+    next_fyq = fyq_order[(curr_fyq_idx+1) % 4]
+
+    fyqtable = Table(show_header=True, header_style='bold cyan', box=None, padding=(0,1))
+    fyqtable.add_column('Quarter',      width=22)
+    fyqtable.add_column('Avg Ret',      justify='right', width=8)
+    fyqtable.add_column('W/T',          justify='center', width=5)
+    fyqtable.add_column('Best',         justify='right', width=7)
+    fyqtable.add_column('Worst',        justify='right', width=7)
+    fyqtable.add_column('Signal',       width=8)
+    fyqtable.add_column('Swing(rng)',   justify='center', width=14)
+    fyqtable.add_column('Up',           justify='right', width=6)
+    fyqtable.add_column('Dn',           justify='right', width=6)
+
+    for fyq in fyq_order:
+        rets = by_fyq[fyq]
+        if not rets: continue
+        avg   = sum(r for _,r in rets)/len(rets)
+        wins  = sum(1 for _,r in rets if r>0)
+        best  = max(r for _,r in rets)
+        worst = min(r for _,r in rets)
+        rng   = by_fyq_hl[fyq]
+        avg_sw = sum(r[1] for r in rng)/len(rng) if rng else 0
+        min_sw = min(r[1] for r in rng) if rng else 0
+        max_sw = max(r[1] for r in rng) if rng else 0
+        avg_up = sum(r[2] for r in rng)/len(rng) if rng else 0
+        avg_dn = sum(r[3] for r in rng)/len(rng) if rng else 0
+        col    = 'green' if avg>=2 else 'yellow' if avg>=-1 else 'red'
+        sig    = 'STR.BUY' if avg>=5 else 'BUY' if avg>=2 else 'NTRL' if avg>=-1 else 'AVOID' if avg>=-4 else 'STR.AVD'
+        marker = ' <-NOW' if fyq==curr_fyq else (' <-NXT' if fyq==next_fyq else '')
+        sw_str = f'{avg_sw:.1f}%({min_sw:.0f}-{max_sw:.0f}%)'
+        fyqtable.add_row(
+            f'[bold]{fyq}{marker}[/bold]',
+            f'[{col}]{avg:+.1f}%[/{col}]',
+            f'[{col}]{wins}/{len(rets)}[/{col}]',
+            f'[green]{best:+.1f}%[/green]',
+            f'[red]{worst:+.1f}%[/red]',
+            f'[{col}]{sig}[/{col}]',
+            f'[yellow]{sw_str}[/yellow]',
+            f'[green]+{avg_up:.1f}%[/green]',
+            f'[red]-{avg_dn:.1f}%[/red]',
+        )
+
+    console.print(fyqtable)
+    console.print()
+
+    # FYQ Trading Guide
+    console.rule('[bold]Nepali FY Quarter Trading Guide[/bold]')
+    console.print()
+    for fyq in fyq_order:
+        rets = by_fyq[fyq]
+        if not rets: continue
+        avg   = sum(r for _,r in rets)/len(rets)
+        wins  = sum(1 for _,r in rets if r>0)
+        rng   = by_fyq_hl[fyq]
+        avg_up = round(sum(r[2] for r in rng)/len(rng),1) if rng else 0
+        avg_dn = round(sum(r[3] for r in rng)/len(rng),1) if rng else 0
+        avg_sw = round(sum(r[1] for r in rng)/len(rng),1) if rng else 0
+        marker = ' <-- NOW' if fyq==curr_fyq else (' <- NEXT' if fyq==next_fyq else '')
+        col    = 'green' if avg>=2 else 'yellow' if avg>=-1 else 'red'
+        if avg_up > abs(avg_dn)*2 and avg>=3:
+            char = f'Strong rally — up {avg_up:.1f}% dominates'
+        elif avg_up > abs(avg_dn)*2 and avg<3:
+            char = f'Rally then fade — up {avg_up:.1f}% given back'
+        elif abs(avg_dn) > avg_up*1.5:
+            char = f'Downside dominated — drops {avg_dn:.1f}%'
+        elif avg_sw > 25:
+            char = f'Extreme volatility — {avg_sw:.0f}% swing'
+        else:
+            char = f'Mixed — up {avg_up:.1f}% / dn {avg_dn:.1f}%'
+        if avg>=5:   action = f'Deploy capital — strong tailwind +{avg_up:.1f}%'
+        elif avg>=2: action = f'Lean bullish. Dip {avg_dn:.1f}% then rally {avg_up:.1f}%.'
+        elif avg>=-1:action = f'Neutral — selective only. Up {avg_up:.1f}% vs dn {avg_dn:.1f}%.'
+        elif avg>=-4:action = f'Avoid longs. Drops {avg_dn:.1f}%, recovers {avg_up:.1f}%.'
+        else:        action = f'Stay cash. Heavy selling {avg_dn:.1f}% down.'
+        console.print(f'  [{col}][bold]{fyq}{marker}[/bold]  ({fy_q_labels[fyq]})  avg={avg:+.1f}%  ({wins}/{len(rets)} up)[/{col}]')
+        console.print(f'    Character : {char}')
+        console.print(f'    Action    : [{col}]{action}[/{col}]')
+        console.print()
+
     console.print('  [dim]Research only. Not financial advice. Paper trade first.[/dim]')
     console.print()
 
