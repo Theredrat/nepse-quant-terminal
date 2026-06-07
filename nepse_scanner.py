@@ -5754,6 +5754,13 @@ def analyze_best_rr(db_path='nepse_market_data.db'):
         'SELECT DISTINCT symbol FROM broker_activity ORDER BY symbol'
     ).fetchall()]
 
+    # Pre-load sector data once
+    _sect_data = {}
+    try:
+        _sp = _load_sector_prices(db_path)
+        _sect_data = _sector_returns(_sp)
+    except: pass
+
     results = []
     for symbol in symbols:
         try:
@@ -5845,8 +5852,30 @@ def analyze_best_rr(db_path='nepse_market_data.db'):
             avg_l  = sum(losses)/len(losses) if losses else 1
             rsi    = round(100 - (100/(1 + avg_g/avg_l)), 1) if avg_l > 0 else 50
 
+            # Sector momentum
+            sect_5d = 0.0
+            try:
+                _sym_sect = (conn.execute(
+                    "SELECT sector FROM companies WHERE symbol=?", (symbol,)
+                ).fetchone() or [None])[0]
+                if _sym_sect and _sect_data:
+                    _NMAP = {
+                        "Hydro Power":"Hydropower","Commercial Banks":"Commercial Banks",
+                        "Development Banks":"Development Banks","Finance":"Finance",
+                        "Microfinance":"Microfinance","Life Insurance":"Life Insurance",
+                        "Non Life Insurance":"Non-Life Insurance",
+                        "Manufacturing And Processing":"Manufacturing",
+                        "Hotels And Tourism":"Hotel & Tourism",
+                        "Investment":"Investment","Tradings":"Trading","Others":"Others",
+                    }
+                    _sk = _NMAP.get(_sym_sect, _sym_sect)
+                    _sd = _sect_data.get(_sk) or _sect_data.get(_sym_sect)
+                    if _sd:
+                        sect_5d = _sd.get(5) or 0.0
+            except: pass
+
             results.append((symbol, curr, round(support,1), round(resistance,1),
-                           round(stop_loss,1), round(target,1), rr, broker_pct, rsi))
+                           round(stop_loss,1), round(target,1), rr, broker_pct, rsi, sect_5d))
         except:
             continue
 
@@ -5863,33 +5892,37 @@ def analyze_best_rr(db_path='nepse_market_data.db'):
     # Composite score: R/R + broker + RSI position
     scored = []
     for row in results:
-        sym, curr, sup, res, sl, tgt, rr, bs, rsi = row
-        rr_score  = min(rr * 20, 40)           # max 40pts
-        br_score  = bs * 0.4                    # max 40pts
-        rsi_score = 20 if rsi < 40 else 10 if rsi < 55 else 0  # max 20pts
-        score = round(rr_score + br_score + rsi_score, 1)
-        scored.append((sym, curr, sup, res, sl, tgt, rr, bs, rsi, score))
-    scored.sort(key=lambda x: x[9], reverse=True)
+        sym, curr, sup, res, sl, tgt, rr, bs, rsi, s5d = row
+        rr_score   = min(rr * 20, 40)           # max 40pts
+        br_score   = bs * 0.3                    # max 30pts
+        rsi_score  = 15 if rsi < 40 else 8 if rsi < 55 else 0  # max 15pts
+        sect_score = 15 if s5d >= 2 else 8 if s5d >= 0 else 0  # max 15pts
+        score = round(rr_score + br_score + rsi_score + sect_score, 1)
+        scored.append((sym, curr, sup, res, sl, tgt, rr, bs, rsi, s5d, score))
+    scored.sort(key=lambda x: x[10], reverse=True)
 
     table = Table(show_header=True, header_style='bold cyan', box=None, padding=(0,1))
-    table.add_column('Symbol',  style='bold', width=7)
-    table.add_column('Price',   justify='right', width=7)
-    table.add_column('Supp',    justify='right', width=7)
-    table.add_column('Res',     justify='right', width=7)
-    table.add_column('Stop',    justify='right', width=7)
-    table.add_column('Target',  justify='right', width=7)
+    table.add_column('Sym',     style='bold', width=6)
+    table.add_column('Price',   justify='right', width=6)
+    table.add_column('Supp',    justify='right', width=6)
+    table.add_column('Res',     justify='right', width=6)
+    table.add_column('Stop',    justify='right', width=6)
+    table.add_column('Tgt',     justify='right', width=6)
     table.add_column('R/R',     justify='right', width=6)
-    table.add_column('Brok%',   justify='right', width=6)
+    table.add_column('Brk%',    justify='right', width=5)
     table.add_column('RSI',     justify='right', width=5)
+    table.add_column('Sec5d',   justify='right', width=6)
     table.add_column('Score',   justify='right', width=6)
-    table.add_column('Signal',  width=10)
+    table.add_column('Sig',     width=9)
 
-    for sym, curr, sup, res, sl, tgt, rr, bs, rsi, score in scored:
-        rsi_tag = 'OVERSOLD' if rsi < 35 else 'OVERBOUGHT' if rsi > 70 else ''
-        rsi_col = 'green'    if rsi < 35 else 'red'        if rsi > 70 else 'white'
-        rr_col  = 'green'    if rr >= 2  else 'yellow'
-        br_col  = 'green'    if bs >= 80 else 'yellow'     if bs >= 50 else 'red'
-        sc_col  = 'green'    if score >= 60 else 'yellow'  if score >= 40 else 'red'
+    for sym, curr, sup, res, sl, tgt, rr, bs, rsi, s5d, score in scored:
+        rsi_tag  = 'OVERSOLD' if rsi < 35 else 'OVERBOUGHT' if rsi > 70 else ''
+        rsi_col  = 'green'    if rsi < 35 else 'red'        if rsi > 70 else 'white'
+        rr_col   = 'green'    if rr >= 2  else 'yellow'
+        br_col   = 'green'    if bs >= 80 else 'yellow'     if bs >= 50 else 'red'
+        sc_col   = 'green'    if score >= 60 else 'yellow'  if score >= 40 else 'red'
+        sect_col = 'green'    if s5d >= 2 else 'red'        if s5d < 0  else 'yellow'
+        sect_str = f'{s5d:+.1f}%' if s5d != 0 else 'N/A'
         table.add_row(
             sym,
             f'{curr:,.0f}',
@@ -5900,6 +5933,7 @@ def analyze_best_rr(db_path='nepse_market_data.db'):
             f'[{rr_col}]1:{rr:.1f}[/{rr_col}]',
             f'[{br_col}]{bs}%[/{br_col}]',
             f'[{rsi_col}]{rsi}[/{rsi_col}]',
+            f'[{sect_col}]{sect_str}[/{sect_col}]',
             f'[{sc_col}]{score:.0f}[/{sc_col}]',
             f'[{rsi_col}]{rsi_tag}[/{rsi_col}]',
         )
