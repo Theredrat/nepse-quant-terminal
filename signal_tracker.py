@@ -183,7 +183,7 @@ def show_report():
 
     # Recent 15 signals
     console.print()
-    console.print('[bold white]  Recent Signals (last 15):[/bold white]')
+    console.print('[bold white]  Recent Signals (last 30):[/bold white]')
     rec = Table(show_header=True, header_style='bold white', box=None, padding=(0,1))
     rec.add_column('Date',   width=12, no_wrap=True)
     rec.add_column('Symbol', width=8,  no_wrap=True)
@@ -199,7 +199,7 @@ def show_report():
         col = 'green' if r >= WIN_TARGET else 'red' if r < 0 else 'yellow'
         return f'[{col}]{r:+.1f}%[/{col}]'
 
-    for r in rows[:15]:
+    for r in rows[:30]:
         rec.add_row(r[0], r[1], r[2], f'{r[4]:.0f}', fmt(r[7]), fmt(r[8]), fmt(r[9]), r[3] or '')
     console.print(rec)
     console.print()

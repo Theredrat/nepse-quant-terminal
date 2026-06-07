@@ -9298,7 +9298,13 @@ def analyze_momentum_hunter(days=7, top_n=15, min_days=2, db_path='nepse_market_
         console.print()
         try:
             from signal_tracker import log_signals_raw
-            to_log = [{'symbol': c['symbol'], 'signal': 'MOMENTUM_HUNTER', 'ltp': c.get('price', 0), 'score': c.get('momentum', 0), 'reason': str(c.get('consec',0))+'d consec buy'} for c in candidates]
+            import sqlite3 as _st17
+            _conn17 = _st17.connect('nepse_market_data.db')
+            def _get_ltp(sym):
+                r = _conn17.execute("SELECT close FROM stock_prices WHERE symbol=? ORDER BY date DESC LIMIT 1",(sym,)).fetchone()
+                return r[0] if r else 0
+            to_log = [{'symbol': c['symbol'], 'signal': 'MOMENTUM_HUNTER', 'ltp': _get_ltp(c['symbol']), 'score': c.get('momentum', 0), 'reason': str(c.get('consec',0))+'d consec buy'} for c in candidates]
+            _conn17.close()
             log_signals_raw(to_log, source='17f')
         except Exception:
             pass
