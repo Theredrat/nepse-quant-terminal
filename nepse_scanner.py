@@ -3949,7 +3949,7 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
         col    = 'green' if avg>=2 else 'yellow' if avg>=-1 else 'red'
         sig    = 'STR.BUY' if avg>=5 else 'BUY' if avg>=2 else 'NTRL' if avg>=-1 else 'AVOID' if avg>=-4 else 'STR.AVD'
         marker = ' <-NOW' if fyq==curr_fyq else (' <-NXT' if fyq==next_fyq else '')
-        sw_str = f'{avg_sw:.1f}%({min_sw:.0f}-{max_sw:.0f}%)'
+        sw_str = f'{avg_sw:.0f}%({min_sw:.0f}-{max_sw:.0f})'
         lim_tag = ' [dim](limited)[/dim]' if len(rets) < 3 else ''
         fyqtable.add_row(
             f'[bold]{fyq}{marker}[/bold]{lim_tag}',
@@ -5154,7 +5154,7 @@ def analyze_nepali_seasonality(db_path='nepse_market_data.db'):
         col    = 'green' if avg >= 2 else 'yellow' if avg >= 0 else 'red'
         sig    = 'STR.BUY' if avg>=5 and wins==len(rets) else 'BUY' if avg>=2 else 'NTRL' if avg>=-1 else 'AVOID' if avg>=-3 else 'STR.AVD'
         marker = ' <--' if bs_m == curr_bs_m else ''
-        sw_str = f'{avg_sw:.1f}%({min_sw:.0f}-{max_sw:.0f}%)'
+        sw_str = f'{avg_sw:.0f}%({min_sw:.0f}-{max_sw:.0f})'
         table.add_row(
             f'[bold]{bs_month_names[bs_m]}{marker}[/bold]',
             f'[{col}]{avg:+.1f}%[/{col}]',
@@ -5261,7 +5261,7 @@ def analyze_nepali_seasonality(db_path='nepse_market_data.db'):
         col    = 'green' if avg >= 2 else 'yellow' if avg >= -1 else 'red'
         sig    = 'STR.BUY' if avg>=5 else 'BUY' if avg>=2 else 'NTRL' if avg>=-1 else 'AVOID' if avg>=-4 else 'STR.AVD'
         marker = ' <-NOW' if nq==curr_nq else (' <-NXT' if nq==next_nq else '')
-        sw_str = f'{avg_sw:.1f}%({min_sw:.0f}-{max_sw:.0f}%)'
+        sw_str = f'{avg_sw:.0f}%({min_sw:.0f}-{max_sw:.0f})'
         nqtable.add_row(
             f'[bold]{nq}{marker}[/bold]',
             f'[{col}]{avg:+.1f}%[/{col}]',
@@ -5446,7 +5446,7 @@ def analyze_nepali_seasonality(db_path='nepse_market_data.db'):
         col    = 'green' if avg>=2 else 'yellow' if avg>=-1 else 'red'
         sig    = 'STR.BUY' if avg>=5 else 'BUY' if avg>=2 else 'NTRL' if avg>=-1 else 'AVOID' if avg>=-4 else 'STR.AVD'
         marker = ' <-NOW' if fyq==curr_fyq else (' <-NXT' if fyq==next_fyq else '')
-        sw_str = f'{avg_sw:.1f}%({min_sw:.0f}-{max_sw:.0f}%)'
+        sw_str = f'{avg_sw:.0f}%({min_sw:.0f}-{max_sw:.0f})'
         lim_tag = ' [dim](limited)[/dim]' if len(rets) < 3 else ''
         fyqtable.add_row(
             f'[bold]{fyq}{marker}[/bold]{lim_tag}',
@@ -5949,12 +5949,10 @@ def analyze_best_rr(db_path='nepse_market_data.db'):
 
 
 def analyze_sector_seasonality(db_path='nepse_market_data.db'):
-    """Option 40 - Sector Seasonality: 5 systems with swing stats."""
+    """Option 40 - Sector Seasonality: option 38 style per-sector tables."""
     from rich.console import Console
     from rich.table import Table
-    from rich.rule import Rule
     from rich import box
-    from rich.text import Text
     import sqlite3, datetime
     from collections import defaultdict
 
@@ -5962,10 +5960,10 @@ def analyze_sector_seasonality(db_path='nepse_market_data.db'):
     console.print()
     console.rule('[bold yellow]Option 40 — Sector Seasonality[/bold yellow]', style='yellow')
     console.print()
-    console.print('  [dim]Greg monthly / Greg quarterly / BS monthly / BS quarterly / FYQ — with swing stats[/dim]')
+    console.print('  [dim]Per-sector seasonality — FYQ / NQ / Greg quarterly — with W/T, swing, year history[/dim]')
     console.print()
 
-    # ── BS conversion tables ──
+    # ── BS conversion ──
     _baisakh_start = {
         2077:(2020,4,13),2078:(2021,4,14),2079:(2022,4,14),
         2080:(2023,4,14),2081:(2024,4,13),2082:(2025,4,14),2083:(2026,4,14),
@@ -5996,31 +5994,30 @@ def analyze_sector_seasonality(db_path='nepse_market_data.db'):
                 return yr+1,1
         return None,None
 
-    def _fyq_from_bs(bsm):
-        if   bsm in (1,2,3):   return 'FYQ4'   # Baisakh-Ashadh
-        elif bsm in (4,5,6):   return 'FYQ1'   # Shrawan-Ashwin
-        elif bsm in (7,8,9):   return 'FYQ2'   # Kartik-Poush
-        else:                   return 'FYQ3'   # Magh-Chaitra
+    def _fyq(bsm):
+        if   bsm in (1,2,3):   return 'FYQ4'
+        elif bsm in (4,5,6):   return 'FYQ1'
+        elif bsm in (7,8,9):   return 'FYQ2'
+        else:                   return 'FYQ3'
 
-    def _nq_from_bs(bsm):
-        # NQ: Baisakh-based quarters
-        if   bsm in (1,2,3):   return 'NQ1'   # Baisakh-Ashadh
-        elif bsm in (4,5,6):   return 'NQ2'   # Shrawan-Ashwin
-        elif bsm in (7,8,9):   return 'NQ3'   # Kartik-Poush
-        else:                   return 'NQ4'   # Magh-Chaitra
+    def _nq(bsm):
+        if   bsm in (1,2,3):   return 'NQ1'
+        elif bsm in (4,5,6):   return 'NQ2'
+        elif bsm in (7,8,9):   return 'NQ3'
+        else:                   return 'NQ4'
 
-    def _greg_q(m):
+    def _gq(m):
         if   m in (1,2,3):   return 'Q1'
         elif m in (4,5,6):   return 'Q2'
         elif m in (7,8,9):   return 'Q3'
         else:                 return 'Q4'
 
     def _sig(avg):
-        if avg >=  5: return 'STR.BUY','green'
+        if avg >=  5: return 'S.BUY','green'
         if avg >=  2: return 'BUY','green'
         if avg >= -1: return 'NTRL','yellow'
         if avg >= -3: return 'AVOID','red'
-        return 'STR.AVD','red'
+        return 'S.AVD','red'
 
     NAME_MAP = {
         'Hydro Power':'Hydropower','Commercial Banks':'Commercial Banks',
@@ -6032,58 +6029,70 @@ def analyze_sector_seasonality(db_path='nepse_market_data.db'):
         'Investment':'Investment','Tradings':'Trading','Others':'Others',
     }
 
+    FYQ_LABELS = {'FYQ1':'Shr-Ash','FYQ2':'Kar-Pou','FYQ3':'Mag-Cha','FYQ4':'Bai-Ash'}
+    NQ_LABELS  = {'NQ1':'Bai-Ash','NQ2':'Shr-Ash','NQ3':'Kar-Pou','NQ4':'Mag-Cha'}
+    GQ_LABELS  = {'Q1':'Jan-Mar','Q2':'Apr-Jun','Q3':'Jul-Sep','Q4':'Oct-Dec'}
+    FYQ_ORDER  = ['FYQ1','FYQ2','FYQ3','FYQ4']
+    NQ_ORDER   = ['NQ1','NQ2','NQ3','NQ4']
+    GQ_ORDER   = ['Q1','Q2','Q3','Q4']
+
+    FYQ_CHAR = {
+        'FYQ1':'Shrawan-Ashwin — New FY deployment. Monsoon. Hydropower peaks. Mixed for equal-weighted sector index.',
+        'FYQ2':'Kartik-Poush — Post-Dashain/Tihar. Dev banks and hydropower strong (dry season). Year-end window dressing.',
+        'FYQ3':'Magh-Chaitra — Mid-year lull. Tax pressure. Weakest quarter for most sectors.',
+        'FYQ4':'Baisakh-Ashadh — New Year euphoria. FY-end buying. Hotel, microfinance, finance historically strong.',
+    }
+    NQ_CHAR = {
+        'NQ1':'Baisakh-Ashadh — New Year buying. FY-end. Strong for most except hydropower.',
+        'NQ2':'Shrawan-Ashwin — New FY + monsoon. Hydropower peaks. Strongest quarter for NEPSE index.',
+        'NQ3':'Kartik-Poush — Festive rally then profit booking. Hydropower strong.',
+        'NQ4':'Magh-Chaitra — Weakest quarter. Tax pressure, mid-year lull.',
+    }
+
     today = datetime.date.today()
-    curr_gm = today.month
-    curr_gq = _greg_q(today.month)
-    bs_today = _to_bs(today)
-    curr_bsm = bs_today[1] if bs_today[0] else today.month
-    curr_nq  = _nq_from_bs(curr_bsm)
-    curr_fyq = _fyq_from_bs(curr_bsm)
+    bs_yr, curr_bsm = _to_bs(today)
+    curr_fyq = _fyq(curr_bsm)
+    curr_nq  = _nq(curr_bsm)
+    curr_gq  = _gq(today.month)
+    curr_fyq_fy = bs_yr if curr_bsm >= 4 else bs_yr - 1
+    curr_nq_fy  = bs_yr if curr_bsm >= 4 else bs_yr - 1
+    curr_fyq_key = (curr_fyq_fy, curr_fyq)
+    curr_nq_key  = (curr_nq_fy,  curr_nq)
+    curr_gq_key  = (today.year,  curr_gq)
+    next_fyq = FYQ_ORDER[(FYQ_ORDER.index(curr_fyq)+1) % 4]
+    next_nq  = NQ_ORDER [(NQ_ORDER.index(curr_nq)  +1) % 4]
+    next_gq  = GQ_ORDER [(GQ_ORDER.index(curr_gq)  +1) % 4]
 
-    MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
-    BS_NAMES    = [_bs_names[i] for i in range(1,13)]
-    GQ_ORDER    = ['Q1','Q2','Q3','Q4']
-    NQ_ORDER    = ['NQ1','NQ2','NQ3','NQ4']
-    FYQ_ORDER   = ['FYQ1','FYQ2','FYQ3','FYQ4']
-
-    GQ_LABEL = {'Q1':'Jan-Mar','Q2':'Apr-Jun','Q3':'Jul-Sep','Q4':'Oct-Dec'}
-    NQ_LABEL = {'NQ1':'Bai-Ash','NQ2':'Shr-Ash','NQ3':'Kar-Pou','NQ4':'Mag-Cha'}
-    FYQ_LABEL= {'FYQ1':'Shr-Ash','FYQ2':'Kar-Pou','FYQ3':'Mag-Cha','FYQ4':'Bai-Ash'}
-
-    # ── Load all OHLC data ──
+    # ── Load OHLC ──
     conn = sqlite3.connect(db_path)
     rows = conn.execute("""
         SELECT sp.symbol, c.sector, sp.date, sp.open, sp.high, sp.low, sp.close
-        FROM stock_prices sp
-        JOIN companies c ON sp.symbol = c.symbol
-        WHERE sp.close > 0 AND sp.date >= '2021-01-01'
+        FROM stock_prices sp JOIN companies c ON sp.symbol=c.symbol
+        WHERE sp.close>0 AND sp.date>='2021-01-01'
         ORDER BY sp.symbol, sp.date
     """).fetchall()
     conn.close()
 
     if not rows:
-        console.print('[red]No price data found.[/red]')
-        return
+        console.print('[red]No data.[/red]'); return
 
-    # Group by sector -> symbol -> date -> (open,high,low,close)
     sym_sector = {}
     sym_ohlc   = defaultdict(dict)
-    for sym, sect, dt, op, hi, lo, cl in rows:
+    for sym,sect,dt,op,hi,lo,cl in rows:
         sym_sector[sym] = NAME_MAP.get(sect, sect)
         sym_ohlc[sym][dt] = (op or cl, hi or cl, lo or cl, cl)
 
-    # Build sector daily equal-weighted OHLC index
+    # Build equal-weighted sector daily OHLC
     sect_daily = defaultdict(lambda: defaultdict(list))
-    for sym, dmap in sym_ohlc.items():
+    for sym,dmap in sym_ohlc.items():
         sect = sym_sector[sym]
-        for dt, ohlc in dmap.items():
+        for dt,ohlc in dmap.items():
             sect_daily[sect][dt].append(ohlc)
 
-    # Average across stocks per day
-    sect_index = {}  # sect -> {date: (avg_open, avg_high, avg_low, avg_close)}
-    for sect, dmap in sect_daily.items():
+    sect_index = {}
+    for sect,dmap in sect_daily.items():
         sect_index[sect] = {}
-        for dt, ohlcs in dmap.items():
+        for dt,ohlcs in dmap.items():
             n = len(ohlcs)
             sect_index[sect][dt] = (
                 sum(o[0] for o in ohlcs)/n,
@@ -6092,399 +6101,208 @@ def analyze_sector_seasonality(db_path='nepse_market_data.db'):
                 sum(o[3] for o in ohlcs)/n,
             )
 
-    # ── Helper: compute period stats from grouped daily data ──
-    # groups: key -> [(date, open, high, low, close)]
-    def _period_stats(groups, curr_key, first_key=None, min_days=10):
-        """Returns dict: key -> (avg_ret, wins, total, avg_up, avg_dn, avg_sw, best, worst)"""
-        result = {}
-        for key, entries in sorted(groups.items()):
+    # ── Group into periods ──
+    # fyq_g[sect][(fy,fyq)] = [(dt,o,h,l,c)]
+    # nq_g[sect][(fy,nq)]   = [(dt,o,h,l,c)]
+    # gq_g[sect][(yr,gq)]   = [(dt,o,h,l,c)]
+    fyq_g = defaultdict(lambda: defaultdict(list))
+    nq_g  = defaultdict(lambda: defaultdict(list))
+    gq_g  = defaultdict(lambda: defaultdict(list))
+
+    for sect,dmap in sect_index.items():
+        for dt_str in sorted(dmap.keys()):
+            d = _date.fromisoformat(dt_str)
+            o,h,l,c = dmap[dt_str]
+            entry = (dt_str,o,h,l,c)
+            bsy,bsm = _to_bs(d)
+            if bsy and bsm:
+                fy = bsy if bsm>=4 else bsy-1
+                fyq_g[sect][(fy, _fyq(bsm))].append(entry)
+                nq_g [sect][(fy, _nq(bsm) )].append(entry)
+            gq_g[sect][(d.year, _gq(d.month))].append(entry)
+
+    # ── Compute period stats ──
+    # Returns: label -> (avg_ret, wins, total, best, worst, avg_up, avg_dn, avg_sw, min_sw, max_sw, [(fy,ret)])
+    def _calc(groups, curr_key, label_fn, min_days=10):
+        by_label = defaultdict(list)   # label -> [(fy_str, ret, up, dn, sw)]
+        all_keys = sorted(groups.keys())
+        first_k  = all_keys[0] if all_keys else None
+        for key,entries in groups.items():
             if key == curr_key: continue
-            if first_key and key == first_key: continue
+            if key == first_k:  continue
             if len(entries) < min_days: continue
-            op = entries[0][1]   # first day open
-            cl = entries[-1][4]  # last day close
-            hi = max(e[2] for e in entries)
-            lo = min(e[3] for e in entries if e[3] > 0)
-            if op <= 0: continue
-            ret  = (cl - op) / op * 100
-            up   = (hi - op) / op * 100
-            dn   = (op - lo) / op * 100
-            sw   = (hi - lo) / lo * 100 if lo > 0 else 0
-            result[key] = (ret, up, dn, sw)
-        return result
-
-    # ── Build all 5 period groupings ──
-    # Each: sect -> period_key -> [(date, o, h, l, c)]
-    def _build_groups():
-        gm  = defaultdict(lambda: defaultdict(list))  # Greg monthly: (sect,(y,m))
-        gq  = defaultdict(lambda: defaultdict(list))  # Greg quarterly
-        bsm = defaultdict(lambda: defaultdict(list))  # BS monthly
-        nq  = defaultdict(lambda: defaultdict(list))  # BS quarterly
-        fyq = defaultdict(lambda: defaultdict(list))  # FYQ
-
-        for sect, dmap in sect_index.items():
-            for dt_str in sorted(dmap.keys()):
-                d = datetime.date.fromisoformat(dt_str)
-                o,h,l,c = dmap[dt_str]
-                entry = (dt_str, o, h, l, c)
-                y,m = d.year, d.month
-
-                gm[sect][(y,m)].append(entry)
-                gq[sect][(y, _greg_q(m))].append(entry)
-
-                bsy, bsmo = _to_bs(d)
-                if bsy and bsmo:
-                    bsm[sect][(bsy,bsmo)].append(entry)
-                    fy = bsy if bsmo >= 4 else bsy-1  # FY starts Baisakh(4)? No - FY starts Shrawan(4 BS)
-                    # Actually FY starts Shrawan (BS month 4)
-                    fy_nq = bsy if bsmo >= 4 else bsy-1
-                    nq[sect][(fy_nq, _nq_from_bs(bsmo))].append(entry)
-                    fy_fyq = bsy if bsmo >= 4 else bsy-1
-                    fyq[sect][(fy_fyq, _fyq_from_bs(bsmo))].append(entry)
-
-        return gm, gq, bsm, nq, fyq
-
-    with console.status('[cyan]Computing sector seasonality...[/cyan]'):
-        gm_g, gq_g, bsm_g, nq_g, fyq_g = _build_groups()
-
-    # Current keys to exclude
-    curr_gm_key  = (today.year, today.month)
-    curr_gq_key  = (today.year, curr_gq)
-    bs_yr = bs_today[0] or today.year
-    curr_bsm_key = (bs_yr, curr_bsm)
-    curr_nq_key  = (bs_yr if curr_bsm >= 4 else bs_yr-1, curr_nq)
-    # NQ FY: same logic
-    curr_fyq_fy  = bs_yr if curr_bsm >= 4 else bs_yr-1
-    curr_fyq_key = (curr_fyq_fy, curr_fyq)
-
-    # ── Helper: aggregate across years by period label ──
-    def _agg(groups_sect, label_fn, curr_key, min_days=10):
-        """label_fn(key) -> label string. Returns label -> (avg_ret, avg_up, avg_dn, avg_sw, n, best, worst)"""
-        by_label = defaultdict(list)
-        for sect_groups in [groups_sect]:
-            all_keys = sorted(sect_groups.keys())
-            first_key = all_keys[0] if all_keys else None
-            for key, entries in sect_groups.items():
-                if key == curr_key: continue
-                if key == first_key: continue
-                if len(entries) < min_days: continue
-                op = entries[0][1]
-                cl = entries[-1][4]
-                hi = max(e[2] for e in entries)
-                lo = min(e[3] for e in entries if e[3] > 0)
-                if op <= 0: continue
-                ret = (cl-op)/op*100
-                up  = (hi-op)/op*100
-                dn  = (op-lo)/op*100
-                sw  = (hi-lo)/lo*100 if lo>0 else 0
-                lbl = label_fn(key)
-                by_label[lbl].append((ret, up, dn, sw))
-        result = {}
-        for lbl, vals in by_label.items():
-            rets = [v[0] for v in vals]
-            ups  = [v[1] for v in vals]
-            dns  = [v[2] for v in vals]
-            sws  = [v[3] for v in vals]
-            n = len(rets)
-            result[lbl] = (
-                sum(rets)/n, sum(ups)/n, sum(dns)/n, sum(sws)/n,
-                n, max(rets), min(rets)
-            )
-        return result
-
-    # ── Display helper ──
-    def _fmt(v, curr=False):
-        if v is None: return '[dim]N/A[/dim]'
-        sig, col = _sig(v)
-        mk = '*' if curr else ''
-        return f'[{col}]{v:+.1f}%{mk}[/{col}]'
-
-    def _swing_str(up, dn):
-        return f'[green]+{up:.1f}%[/green]/[red]-{dn:.1f}%[/red]'
-
-    # ══════════════════════════════════════════
-    # TABLE 1: Greg Monthly
-    # ══════════════════════════════════════════
-    console.rule('[bold cyan]1. Greg Monthly Seasonality[/bold cyan]', style='cyan')
-    console.print()
-    t1 = Table(show_header=True, header_style='bold cyan', box=box.SIMPLE_HEAVY,
-               border_style='cyan', padding=(0,1))
-    t1.add_column('Sector', width=18, no_wrap=True)
-    for i,mn in enumerate(MONTH_NAMES):
-        hdr = f'[bold]{mn}*[/bold]' if (i+1)==curr_gm else mn
-        t1.add_column(hdr, justify='right', width=6)
-    t1.add_column('Best', width=4)
-    t1.add_column('Worst', width=4)
-
-    for sect in sorted(gm_g.keys()):
-        agg = _agg(gm_g[sect], lambda k: MONTH_NAMES[k[1]-1], curr_gm_key)
-        cells = []
-        for i,mn in enumerate(MONTH_NAMES):
-            v = agg.get(mn)
-            cells.append(_fmt(v[0] if v else None, curr=(i+1)==curr_gm))
-        valid = {mn: agg[mn][0] for mn in agg}
-        bm = max(valid, key=valid.get) if valid else 'N/A'
-        wm = min(valid, key=valid.get) if valid else 'N/A'
-        t1.add_row(sect, *cells, f'[green]{bm}[/green]', f'[red]{wm}[/red]')
-    console.print(t1)
-    console.print()
-
-    # ══════════════════════════════════════════
-    # TABLE 2: Greg Quarterly
-    # ══════════════════════════════════════════
-    console.rule('[bold cyan]2. Greg Quarterly (Q1=Jan-Mar, Q2=Apr-Jun, Q3=Jul-Sep, Q4=Oct-Dec)[/bold cyan]', style='cyan')
-    console.print()
-    t2 = Table(show_header=True, header_style='bold cyan', box=box.SIMPLE_HEAVY,
-               border_style='cyan', padding=(0,1))
-    t2.add_column('Sector', width=18, no_wrap=True)
-    for gq in GQ_ORDER:
-        hdr = f'[bold]{gq}({GQ_LABEL[gq]})*[/bold]' if gq==curr_gq else f'{gq}({GQ_LABEL[gq]})'
-        t2.add_column(hdr, justify='right', width=14)
-    t2.add_column('Swing Up/Dn', width=14)
-    t2.add_column('Best', width=4)
-    t2.add_column('Worst', width=4)
-
-    for sect in sorted(gq_g.keys()):
-        agg = _agg(gq_g[sect], lambda k: k[1], curr_gq_key)
-        cells = []
-        for gq in GQ_ORDER:
-            v = agg.get(gq)
-            cells.append(_fmt(v[0] if v else None, curr=(gq==curr_gq)))
-        curr_v = agg.get(curr_gq)
-        sw_str = _swing_str(curr_v[1], curr_v[2]) if curr_v else '[dim]N/A[/dim]'
-        valid = {q: agg[q][0] for q in agg}
-        bq = max(valid, key=valid.get) if valid else 'N/A'
-        wq = min(valid, key=valid.get) if valid else 'N/A'
-        t2.add_row(sect, *cells, sw_str, f'[green]{bq}[/green]', f'[red]{wq}[/red]')
-    console.print(t2)
-    console.print()
-
-    # ══════════════════════════════════════════
-    # TABLE 3: BS Monthly
-    # ══════════════════════════════════════════
-    console.rule('[bold cyan]3. BS Monthly Seasonality (Baisakh=1)[/bold cyan]', style='cyan')
-    console.print()
-    t3 = Table(show_header=True, header_style='bold cyan', box=box.SIMPLE_HEAVY,
-               border_style='cyan', padding=(0,1))
-    t3.add_column('Sector', width=18, no_wrap=True)
-    for i in range(1,13):
-        nm = _bs_names[i][:3]
-        hdr = f'[bold]{nm}*[/bold]' if i==curr_bsm else nm
-        t3.add_column(hdr, justify='right', width=6)
-    t3.add_column('Best', width=4)
-    t3.add_column('Worst', width=4)
-
-    for sect in sorted(bsm_g.keys()):
-        agg = _agg(bsm_g[sect], lambda k: k[1], curr_bsm_key)
-        cells = []
-        for i in range(1,13):
-            v = agg.get(i)
-            cells.append(_fmt(v[0] if v else None, curr=(i==curr_bsm)))
-        valid = {i: agg[i][0] for i in agg}
-        bi = max(valid, key=valid.get) if valid else 'N/A'
-        wi = min(valid, key=valid.get) if valid else 'N/A'
-        bn = _bs_names.get(bi, str(bi)) if isinstance(bi, int) else bi
-        wn = _bs_names.get(wi, str(wi)) if isinstance(wi, int) else wi
-        t3.add_row(sect, *cells, f'[green]{bn[:3]}[/green]', f'[red]{wn[:3]}[/red]')
-    console.print(t3)
-    console.print()
-
-    # ══════════════════════════════════════════
-    # TABLE 4: BS Quarterly (NQ)
-    # ══════════════════════════════════════════
-    console.rule('[bold cyan]4. BS Quarterly (NQ1=Bai-Ash, NQ2=Shr-Ash, NQ3=Kar-Pou, NQ4=Mag-Cha)[/bold cyan]', style='cyan')
-    console.print()
-    t4 = Table(show_header=True, header_style='bold cyan', box=box.SIMPLE_HEAVY,
-               border_style='cyan', padding=(0,1))
-    t4.add_column('Sector', width=18, no_wrap=True)
-    for nq in NQ_ORDER:
-        hdr = f'[bold]{nq}({NQ_LABEL[nq]})*[/bold]' if nq==curr_nq else f'{nq}({NQ_LABEL[nq]})'
-        t4.add_column(hdr, justify='right', width=14)
-    t4.add_column('Swing Up/Dn', width=14)
-    t4.add_column('Best', width=4)
-    t4.add_column('Worst', width=4)
-
-    for sect in sorted(nq_g.keys()):
-        agg = _agg(nq_g[sect], lambda k: k[1], curr_nq_key)
-        cells = []
-        for nq in NQ_ORDER:
-            v = agg.get(nq)
-            cells.append(_fmt(v[0] if v else None, curr=(nq==curr_nq)))
-        curr_v = agg.get(curr_nq)
-        sw_str = _swing_str(curr_v[1], curr_v[2]) if curr_v else '[dim]N/A[/dim]'
-        valid = {q: agg[q][0] for q in agg}
-        bq = max(valid, key=valid.get) if valid else 'N/A'
-        wq = min(valid, key=valid.get) if valid else 'N/A'
-        t4.add_row(sect, *cells, sw_str, f'[green]{bq}[/green]', f'[red]{wq}[/red]')
-    console.print(t4)
-    console.print()
-
-    # ══════════════════════════════════════════
-    # TABLE 5: FYQ (Shrawan-based)
-    # ══════════════════════════════════════════
-    console.rule('[bold cyan]5. FYQ Seasonality (FYQ1=Shr-Ash, FYQ2=Kar-Pou, FYQ3=Mag-Cha, FYQ4=Bai-Ash)[/bold cyan]', style='cyan')
-    console.print()
-    t5 = Table(show_header=True, header_style='bold cyan', box=box.SIMPLE_HEAVY,
-               border_style='cyan', padding=(0,1))
-    t5.add_column('Sector', width=18, no_wrap=True)
-    for fq in FYQ_ORDER:
-        hdr = f'[bold]{fq}({FYQ_LABEL[fq]})*[/bold]' if fq==curr_fyq else f'{fq}({FYQ_LABEL[fq]})'
-        t5.add_column(hdr, justify='right', width=14)
-    t5.add_column('Swing Up/Dn', width=14)
-    t5.add_column('Best', width=4)
-    t5.add_column('Worst', width=4)
-
-    for sect in sorted(fyq_g.keys()):
-        agg = _agg(fyq_g[sect], lambda k: k[1], curr_fyq_key)
-        cells = []
-        for fq in FYQ_ORDER:
-            v = agg.get(fq)
-            cells.append(_fmt(v[0] if v else None, curr=(fq==curr_fyq)))
-        curr_v = agg.get(curr_fyq)
-        sw_str = _swing_str(curr_v[1], curr_v[2]) if curr_v else '[dim]N/A[/dim]'
-        valid = {q: agg[q][0] for q in agg}
-        bq = max(valid, key=valid.get) if valid else 'N/A'
-        wq = min(valid, key=valid.get) if valid else 'N/A'
-        t5.add_row(sect, *cells, sw_str, f'[green]{bq}[/green]', f'[red]{wq}[/red]')
-    console.print(t5)
-    console.print()
-
-    # ══════════════════════════════════════════
-    # PERIOD CHARACTER DESCRIPTIONS
-    # ══════════════════════════════════════════
-    FYQ_CHAR = {
-        'FYQ1': 'Shrawan-Ashwin (Jul-Oct) — New fiscal year deployment. Institutions rebalance portfolios. Monsoon season — hydropower peaks. Historically strongest quarter for most sectors. Dashain rally begins late Ashwin.',
-        'FYQ2': 'Kartik-Poush (Oct-Jan) — Post-Dashain/Tihar profit booking early, then year-end window dressing. Hydropower best quarter (dry season flow). Cold season — tourism slows. Banks show Q2 results.',
-        'FYQ3': 'Magh-Chaitra (Jan-Apr) — Mid-year lull. Tax loss selling pressure. Pre-election volatility in political years. Development banks and investment sectors show strength. Holi/Fagu season.',
-        'FYQ4': 'Baisakh-Ashadh (Apr-Jul) — Nepali New Year euphoria (Baisakh). Pre-monsoon optimism. Fiscal year-end institutional buying. Hotel & tourism, microfinance, manufacturing historically strong. Hydropower weakest (pre-monsoon low water).',
-    }
-    NQ_CHAR = {
-        'NQ1': 'Baisakh-Ashadh (Apr-Jul) — New Year + fiscal year-end buying. Strong for most sectors except hydropower.',
-        'NQ2': 'Shrawan-Ashwin (Jul-Oct) — Monsoon + new FY deployment. Hydropower peaks. Strongest overall quarter.',
-        'NQ3': 'Kartik-Poush (Oct-Jan) — Festive season (Dashain/Tihar) early boost, then profit booking. Hydropower strong (dry season).',
-        'NQ4': 'Magh-Chaitra (Jan-Apr) — Weakest quarter for most sectors. Tax pressure, political uncertainty, mid-year lull.',
-    }
-    GQ_CHAR = {
-        'Q1': 'Jan-Mar — Post-holiday lull globally. NEPSE mid-year (Magh-Chaitra). Generally weak for most sectors.',
-        'Q2': 'Apr-Jun — New Year (Baisakh) rally. Fiscal year-end buying pressure. Hotels, microfinance, finance lead.',
-        'Q3': 'Jul-Sep — New fiscal year + monsoon. Strongest quarter historically. Broad-based buying across sectors.',
-        'Q4': 'Oct-Dec — Dashain/Tihar festive rally early. Profit booking post-festival. Mixed signals.',
-    }
-    GM_CHAR = {
-        1:  'Jan (Poush-Magh) — Weak start. Tax selling pressure. Good for selective accumulation.',
-        2:  'Feb (Magh-Falgun) — Mostly negative. Mid-year lull continues. Avoid chasing.',
-        3:  'Mar (Falgun-Chaitra) — Mixed. Some recovery. Watch for pre-Baisakh positioning.',
-        4:  'Apr (Chaitra-Baisakh) — New Year transition. Volatile. Early birds buy before Baisakh rally.',
-        5:  'May (Baisakh-Jestha) — Baisakh new year euphoria fades. Mixed — some sectors extend, others correct.',
-        6:  'Jun (Jestha-Ashadh) — Pre-monsoon positioning. Finance and microfinance historically strong. FY year-end.',
-        7:  'Jul (Ashadh-Shrawan) — NEW FISCAL YEAR. Strongest month of year for almost all sectors. Institutional redeployment.',
-        8:  'Aug (Shrawan-Bhadra) — Post-July correction. Monsoon peak. Hydropower strong but others pull back.',
-        9:  'Sep (Bhadra-Ashwin) — Weakest month. Pre-Dashain profit booking. Broad selling across sectors.',
-        10: 'Oct (Ashwin-Kartik) — Dashain/Tihar season begins. Festive rally. Consumer sectors lead.',
-        11: 'Nov (Kartik-Mangsir) — Post-Tihar mixed. Some sectors extend, others correct after rally.',
-        12: 'Dec (Mangsir-Poush) — Year-end positioning. Mixed — window dressing by some institutions.',
-    }
-    BSM_CHAR = {
-        1:  'Baisakh — Nepali New Year. Euphoric buying. Best BS month for most sectors.',
-        2:  'Jestha — Post-New Year lull. Selective strength in finance/microfinance.',
-        3:  'Ashadh — Fiscal year-end buying. Strong for finance, development banks.',
-        4:  'Shrawan — New FY starts. Strongest BS month. Institutional redeployment.',
-        5:  'Bhadra — Monsoon peak. Weakest BS month for most sectors. Profit booking.',
-        6:  'Ashwin — Pre-Dashain positioning. Mixed. Non-life insurance outlier (+26%).',
-        7:  'Kartik — Dashain/Tihar rally. Development banks and hydropower lead.',
-        8:  'Mangsir — Post-festival correction. Mixed signals across sectors.',
-        9:  'Poush — Best BS month for hydropower and development banks. Dry season peak.',
-        10: 'Magh — Mid-year lull. Weak for most. Hydropower extends.',
-        11: 'Falgun — Holi season. Mixed. Manufacturing outlier historically.',
-        12: 'Chaitra — Pre-New Year anticipation. Some buying ahead of Baisakh.',
-    }
-
-    def _show_period_summary(label, fyq_key, gm_key, title_str):
-        console.rule(f'[bold]{title_str}[/bold]')
-        console.print()
-
-        # FYQ character
-        fyq_desc = FYQ_CHAR.get(fyq_key, '')
-        console.print(f'  [bold cyan]FYQ Character:[/bold cyan] [dim]{fyq_desc}[/dim]')
-        console.print()
-
-        # Ranked sector table for this FYQ
-        rows = []
-        for sect in sorted(fyq_g.keys()):
-            agg = _agg(fyq_g[sect], lambda k: k[1], curr_fyq_key)
-            v = agg.get(fyq_key)
-            if v:
-                sig, col = _sig(v[0])
-                rows.append((v[0], sect, sig, col, v[1], v[2]))
-        rows.sort(reverse=True)
-        for ret, sect, sig, col, up, dn in rows:
-            console.print(f'  [{col}]{sig:8s}[/{col}]  {sect:<22}  [{col}]{ret:+.1f}%[/{col}]  [dim]+{up:.1f}% up / -{dn:.1f}% dn[/dim]')
-        console.print()
-
-        # Greg month character
-        gm_desc = GM_CHAR.get(gm_key, '')
-        if gm_desc:
-            console.print(f'  [bold cyan]Month Character ({MONTH_NAMES[gm_key-1]}):[/bold cyan] [dim]{gm_desc}[/dim]')
-        console.print()
-
-    # ── Current period ──
-    next_gm  = (curr_gm % 12) + 1
-    next_fyq = FYQ_ORDER[(FYQ_ORDER.index(curr_fyq) + 1) % 4]
-
-    _show_period_summary(
-        'current', curr_fyq, curr_gm,
-        f'Current Period — {MONTH_NAMES[curr_gm-1]} / {curr_gq} / {_bs_names[curr_bsm][:3]} / {curr_nq} / {curr_fyq}'
-    )
-
-    # ── Upcoming period ──
-    console.rule(f'[bold yellow]Upcoming Period — {MONTH_NAMES[next_gm-1]} / {next_fyq}[/bold yellow]', style='yellow')
-    console.print()
-    next_fyq_desc = FYQ_CHAR.get(next_fyq, '')
-    next_gm_desc  = GM_CHAR.get(next_gm, '')
-    console.print(f'  [bold cyan]Next FYQ ({next_fyq}) Character:[/bold cyan] [dim]{next_fyq_desc}[/dim]')
-    console.print()
-    console.print(f'  [bold cyan]Next Month ({MONTH_NAMES[next_gm-1]}) Character:[/bold cyan] [dim]{next_gm_desc}[/dim]')
-    console.print()
-
-    # Ranked sectors for next FYQ
-    next_rows = []
-    for sect in sorted(fyq_g.keys()):
-        # For next FYQ — exclude current in-progress key only, show all completed next_fyq years
-        agg_all = _agg(fyq_g[sect], lambda k: k[1], curr_fyq_key)
-        # But curr_fyq_key exclusion is fine — next_fyq data is all complete
-        # Problem: _agg also excludes first_key — rebuild without first_key exclusion
-        by_label = {}
-        all_keys = sorted(fyq_g[sect].keys())
-        first_k = all_keys[0] if all_keys else None
-        vals = []
-        for k, entries in fyq_g[sect].items():
-            if k == curr_fyq_key: continue
-            if k == first_k: continue
-            if len(entries) < 10: continue
-            lbl = k[1]
-            if lbl != next_fyq: continue
             op = entries[0][1]; cl = entries[-1][4]
             hi = max(e[2] for e in entries)
             lo = min(e[3] for e in entries if e[3]>0)
             if op <= 0: continue
-            ret=(cl-op)/op*100; up=(hi-op)/op*100
-            dn=(op-lo)/op*100
-            vals.append((ret,up,dn))
-        if not vals: continue
-        avg_ret = sum(v[0] for v in vals)/len(vals)
-        avg_up  = sum(v[1] for v in vals)/len(vals)
-        avg_dn  = sum(v[2] for v in vals)/len(vals)
-        v = (avg_ret, avg_up, avg_dn, 0, len(vals), 0, 0)
+            ret = (cl-op)/op*100
+            up  = (hi-op)/op*100
+            dn  = (op-lo)/op*100 if lo>0 else 0
+            sw  = (hi-lo)/lo*100 if lo>0 else 0
+            lbl = label_fn(key)
+            fy_str = str(key[0])
+            by_label[lbl].append((fy_str, ret, up, dn, sw))
+        result = {}
+        for lbl,vals in by_label.items():
+            rets = [v[1] for v in vals]
+            ups  = [v[2] for v in vals]
+            dns  = [v[3] for v in vals]
+            sws  = [v[4] for v in vals]
+            n    = len(rets)
+            wins = sum(1 for r in rets if r>0)
+            result[lbl] = (
+                sum(rets)/n, wins, n,
+                max(rets), min(rets),
+                sum(ups)/n, sum(dns)/n,
+                sum(sws)/n, min(sws), max(sws),
+                sorted((v[0],v[1]) for v in vals)
+            )
+        return result
+
+    # ── Build one option-38-style table per sector ──
+    def _make_table():
+        t = Table(show_header=True, header_style='bold cyan', box=box.SIMPLE_HEAVY,
+                  border_style='cyan', padding=(0,1))
+        t.add_column('Period',     width=20, justify='left',   no_wrap=True)
+        t.add_column('Ret',        width=7,  justify='right',  no_wrap=True)
+        t.add_column('W/T',        width=5,  justify='center', no_wrap=True)
+        t.add_column('Sig',        width=7,  justify='left',   no_wrap=True)
+        t.add_column('Swing(rng)', width=12, justify='left',   no_wrap=True)
+        t.add_column('Up',         width=8,  justify='right',  no_wrap=True)
+        t.add_column('Dn',         width=8,  justify='right',  no_wrap=True)
+        return t
+
+    def _row(period_label, stats, marker, col):
+        avg,wins,total,best,worst,avg_up,avg_dn,avg_sw,min_sw,max_sw,hist = stats
+        sig,_ = _sig(avg)
+        sw_str = f'{avg_sw:.0f}%({min_sw:.0f}-{max_sw:.0f})'
+        return [
+            f'[bold]{period_label}{marker}[/bold]',
+            f'[{col}]{avg:+.1f}%[/{col}]',
+            f'[{col}]{wins}/{total}[/{col}]',
+            f'[{col}]{sig}[/{col}]',
+            f'[yellow]{sw_str}[/yellow]',
+            f'[green]+{avg_up:.1f}%[/green]',
+            f'[red]-{avg_dn:.1f}%[/red]',
+        ]
+
+    def _hist_line(stats):
+        hist = stats[10]
+        return '  '.join(f'{fy}:{r:+.0f}%' for fy,r in hist)
+
+    all_sectors = sorted(sect_index.keys())
+
+    with console.status('[cyan]Computing sector seasonality...[/cyan]'):
+        # Pre-compute all stats
+        fyq_stats = {}
+        nq_stats  = {}
+        gq_stats  = {}
+        for sect in all_sectors:
+            fyq_stats[sect] = _calc(fyq_g[sect], curr_fyq_key, lambda k: k[1])
+            nq_stats [sect] = _calc(nq_g [sect], curr_nq_key,  lambda k: k[1])
+            gq_stats [sect] = _calc(gq_g [sect], curr_gq_key,  lambda k: k[1])
+
+    # ══ FYQ SECTION ══
+    console.rule('[bold cyan]FYQ Seasonality — Shrawan-based Fiscal Year Quarters[/bold cyan]', style='cyan')
+    console.print()
+    for sect in all_sectors:
+        stats = fyq_stats[sect]
+        if not stats: continue
+        console.print(f'  [bold white]{sect}[/bold white]')
+        t = _make_table()
+        for fq in FYQ_ORDER:
+            if fq not in stats: continue
+            marker = ' <-NOW' if fq==curr_fyq else (' <-NXT' if fq==next_fyq else '')
+            _,col = _sig(stats[fq][0])
+            t.add_row(*_row(f'{fq}({FYQ_LABELS[fq]})', stats[fq], marker, col))
+        console.print(t)
+        for fq in FYQ_ORDER:
+            if fq not in stats: continue
+            _,col = _sig(stats[fq][0])
+            marker = ' <-NOW' if fq==curr_fyq else (' <-NXT' if fq==next_fyq else '')
+            console.print(f'   [dim]{fq}{marker}: {_hist_line(stats[fq])}[/dim]')
+        console.print()
+
+    # ══ NQ SECTION ══
+    console.rule('[bold cyan]NQ Seasonality — Baisakh-based Nepali Quarters[/bold cyan]', style='cyan')
+    console.print()
+    for sect in all_sectors:
+        stats = nq_stats[sect]
+        if not stats: continue
+        console.print(f'  [bold white]{sect}[/bold white]')
+        t = _make_table()
+        for nq in NQ_ORDER:
+            if nq not in stats: continue
+            marker = ' <-NOW' if nq==curr_nq else (' <-NXT' if nq==next_nq else '')
+            _,col = _sig(stats[nq][0])
+            t.add_row(*_row(f'{nq}({NQ_LABELS[nq]})', stats[nq], marker, col))
+        console.print(t)
+        for nq in NQ_ORDER:
+            if nq not in stats: continue
+            marker = ' <-NOW' if nq==curr_nq else (' <-NXT' if nq==next_nq else '')
+            console.print(f'   [dim]{nq}{marker}: {_hist_line(stats[nq])}[/dim]')
+        console.print()
+
+    # ══ GREG QUARTERLY SECTION ══
+    console.rule('[bold cyan]Greg Quarterly Seasonality — Calendar Year Quarters[/bold cyan]', style='cyan')
+    console.print()
+    for sect in all_sectors:
+        stats = gq_stats[sect]
+        if not stats: continue
+        console.print(f'  [bold white]{sect}[/bold white]')
+        t = _make_table()
+        for gq in GQ_ORDER:
+            if gq not in stats: continue
+            marker = ' <-NOW' if gq==curr_gq else (' <-NXT' if gq==next_gq else '')
+            _,col = _sig(stats[gq][0])
+            t.add_row(*_row(f'{gq}({GQ_LABELS[gq]})', stats[gq], marker, col))
+        console.print(t)
+        for gq in GQ_ORDER:
+            if gq not in stats: continue
+            marker = ' <-NOW' if gq==curr_gq else (' <-NXT' if gq==next_gq else '')
+            console.print(f'   [dim]{gq}{marker}: {_hist_line(stats[gq])}[/dim]')
+        console.print()
+
+    # ══ NOW SUMMARY ══
+    console.rule(f'[bold]Current Period Summary — {curr_fyq} / {curr_nq} / {curr_gq}[/bold]')
+    console.print()
+    console.print(f'  [bold cyan]FYQ Character:[/bold cyan] [dim]{FYQ_CHAR.get(curr_fyq,"")}[/dim]')
+    console.print(f'  [bold cyan]NQ Character:[/bold cyan]  [dim]{NQ_CHAR.get(curr_nq,"")}[/dim]')
+    console.print()
+
+    # Ranked by FYQ current
+    now_rows = []
+    for sect in all_sectors:
+        v = fyq_stats[sect].get(curr_fyq)
         if v:
-            sig, col = _sig(v[0])
-            next_rows.append((v[0], sect, sig, col, v[1], v[2]))
+            sig,col = _sig(v[0])
+            now_rows.append((v[0], sect, sig, col, v[5], v[6], v[1], v[2]))
+    now_rows.sort(reverse=True)
+    console.print(f'  [bold]FYQ{curr_fyq[-1]} Sector Ranking:[/bold]')
+    console.print()
+    for ret,sect,sig,col,up,dn,wins,total in now_rows:
+        console.print(f'  [{col}]{sig:8s}[/{col}]  {sect:<22}  [{col}]{ret:+.1f}%[/{col}]  [dim]{wins}/{total} up  +{up:.1f}% up / -{dn:.1f}% dn[/dim]')
+    console.print()
+
+    # ══ UPCOMING SUMMARY ══
+    console.rule(f'[bold yellow]Upcoming — {next_fyq} / {next_nq}[/bold yellow]', style='yellow')
+    console.print()
+    console.print(f'  [bold cyan]Next FYQ Character:[/bold cyan] [dim]{FYQ_CHAR.get(next_fyq,"")}[/dim]')
+    console.print(f'  [bold cyan]Next NQ Character:[/bold cyan]  [dim]{NQ_CHAR.get(next_nq,"")}[/dim]')
+    console.print()
+    next_rows = []
+    for sect in all_sectors:
+        v = fyq_stats[sect].get(next_fyq)
+        if v:
+            sig,col = _sig(v[0])
+            next_rows.append((v[0], sect, sig, col, v[5], v[6], v[1], v[2]))
     next_rows.sort(reverse=True)
-    console.print(f'  [bold]Sector Outlook for {next_fyq} ({FYQ_LABEL[next_fyq]}):[/bold]')
+    console.print(f'  [bold]FYQ{next_fyq[-1]} Sector Outlook:[/bold]')
     console.print()
-    for ret, sect, sig, col, up, dn in next_rows:
-        console.print(f'  [{col}]{sig:8s}[/{col}]  {sect:<22}  [{col}]{ret:+.1f}%[/{col}]  [dim]+{up:.1f}% up / -{dn:.1f}% dn[/dim]')
+    for ret,sect,sig,col,up,dn,wins,total in next_rows:
+        console.print(f'  [{col}]{sig:8s}[/{col}]  {sect:<22}  [{col}]{ret:+.1f}%[/{col}]  [dim]{wins}/{total} up  +{up:.1f}% up / -{dn:.1f}% dn[/dim]')
     console.print()
-    console.print('  [dim]All returns based on complete periods only (current excluded). Research only. Not financial advice.[/dim]')
+    console.print('  [dim]All returns based on complete periods only. Research only. Not financial advice.[/dim]')
     console.print()
 
 def main():
@@ -9505,7 +9323,7 @@ def analyze_broker_date(symbol=None, date_str=None, db_path='nepse_market_data.d
         col    = 'green' if avg>=2 else 'yellow' if avg>=-1 else 'red'
         sig    = 'STR.BUY' if avg>=5 else 'BUY' if avg>=2 else 'NTRL' if avg>=-1 else 'AVOID' if avg>=-4 else 'STR.AVD'
         marker = ' <-NOW' if fyq==curr_fyq else (' <-NXT' if fyq==next_fyq else '')
-        sw_str = f'{avg_sw:.1f}%({min_sw:.0f}-{max_sw:.0f}%)'
+        sw_str = f'{avg_sw:.0f}%({min_sw:.0f}-{max_sw:.0f})'
         lim_tag = ' [dim](limited)[/dim]' if len(rets) < 3 else ''
         fyqtable.add_row(
             f'[bold]{fyq}{marker}[/bold]{lim_tag}',
