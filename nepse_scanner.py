@@ -1975,6 +1975,7 @@ def parse_args():
     p.add_argument('--guide',       action='store_true', dest='buy_sell_guide')
     p.add_argument('--full-report',  metavar='SYMBOL', dest='full_report', default=None)
     p.add_argument('--best-rr',       action='store_true', dest='best_rr', help='Best R/R scanner')
+    p.add_argument('--july-planner',  action='store_true', dest='july_planner', help='July deployment planner')
     p.add_argument('--sector-season', action='store_true', dest='sector_season', help='Sector seasonality')
     p.add_argument('--market-phase',   action='store_true', dest='market_phase', help='Market phase detector')
     p.add_argument('--seasonality',    action='store_true', dest='seasonality', help='Seasonality analysis')
@@ -6778,6 +6779,9 @@ def main():
     elif getattr(args, 'best_rr', False):
         analyze_best_rr()
         return
+    elif getattr(args, 'july_planner', False):
+        analyze_july_planner()
+        return
     elif getattr(args, 'sector_season', False):
         analyze_sector_seasonality()
         return
@@ -9285,6 +9289,290 @@ def analyze_momentum_hunter(days=7, top_n=15, min_days=2, db_path='nepse_market_
         console.print('  Error: ' + str(e), style='red')
         import traceback
         traceback.print_exc()
+
+def analyze_july_planner(db_path='nepse_market_data.db'):
+    """Option 41 - July Deployment Planner + Watchlist Monitor"""
+    from rich.console import Console
+    from rich.table import Table
+    from rich.rule import Rule
+    from rich import box
+    import sqlite3, datetime
+    from collections import defaultdict
+
+    console = Console(width=120)
+    today = datetime.date.today()
+    next_month = today.month % 12 + 1
+    MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+
+    console.print()
+    console.rule('[bold yellow]Option 41 — July Deployment Planner + Watchlist Monitor[/bold yellow]', style='yellow')
+    console.print()
+
+    conn = sqlite3.connect(db_path)
+
+    # ── Load watchlist ──
+    wl_syms = [r[0] for r in conn.execute(
+        "SELECT symbol FROM watchlist_items ORDER BY symbol"
+    ).fetchall()]
+    if not wl_syms:
+        console.print('  [red]No watchlist stocks found. Add stocks to watchlist first.[/red]')
+        conn.close(); return
+
+    console.print(f'  Watchlist: [bold]{len(wl_syms)}[/bold] stocks  |  Scanning for July readiness...')
+    console.print()
+
+    # ── Sector phase map ──
+    NAME_MAP = {
+        'Hydro Power':'Hydropower','Commercial Banks':'Commercial Banks',
+        'Development Banks':'Development Banks','Finance':'Finance',
+        'Microfinance':'Microfinance','Life Insurance':'Life Insurance',
+        'Non Life Insurance':'Non-Life Insurance',
+        'Manufacturing And Processing':'Manufacturing',
+        'Hotels And Tourism':'Hotel & Tourism',
+        'Investment':'Investment','Tradings':'Trading','Others':'Others',
+    }
+    latest = conn.execute("SELECT MAX(date) FROM stock_prices WHERE close>0").fetchone()[0]
+    sect_rows = conn.execute(
+        "SELECT sp.symbol, c.sector, sp.close "
+        "FROM stock_prices sp JOIN companies c ON sp.symbol=c.symbol "
+        "WHERE sp.close>0 AND sp.date>=date(?,'-60 days') "
+        "ORDER BY sp.symbol, sp.date", (latest,)
+    ).fetchall()
+    sym_prices_all = defaultdict(list)
+    sym_sect_all   = {}
+    for sym,sect,cl in sect_rows:
+        sym_sect_all[sym] = NAME_MAP.get(sect, sect)
+        sym_prices_all[sym].append(cl)
+    sect_phase_map = {}
+    sect_data_map  = defaultdict(lambda: {'above20':0,'total':0,'adv':0,'dec':0})
+    for sym,closes in sym_prices_all.items():
+        sect = sym_sect_all[sym]
+        if len(closes)<20: continue
+        ma20 = sum(closes[-20:])/20
+        if closes[-1]>ma20: sect_data_map[sect]['above20'] += 1
+        sect_data_map[sect]['total'] += 1
+        if len(closes)>=2:
+            if closes[-1]>closes[-2]: sect_data_map[sect]['adv'] += 1
+            elif closes[-1]<closes[-2]: sect_data_map[sect]['dec'] += 1
+    for sect,sd in sect_data_map.items():
+        if sd['total']<3: continue
+        pab = sd['above20']/sd['total']*100
+        adr = sd['adv']/(sd['adv']+sd['dec'])*100 if (sd['adv']+sd['dec'])>0 else 50
+        sc = (2 if pab>=55 else 1 if pab>=45 else 0) + (2 if adr>=55 else 1 if adr>=45 else 0)
+        sect_phase_map[sect] = 'MARKUP' if sc>=4 else 'ACCUM' if sc>=3 else 'TRANSIT' if sc>=2 else 'DISTRIB'
+
+    # ── Next month seasonal (Jul) ──
+    nep_hist = conn.execute(
+        "SELECT date,close FROM stock_prices WHERE symbol='NEPSE' AND close>0 ORDER BY date"
+    ).fetchall()
+    by_m = defaultdict(list)
+    for r in nep_hist:
+        d = datetime.date.fromisoformat(r[0])
+        if (d.year,d.month)==(today.year,today.month): continue
+        mrows = [x for x in nep_hist if x[0][:7]==f'{d.year}-{d.month:02d}']
+        if len(mrows)>=10:
+            ret=(mrows[-1][1]-mrows[0][1])/mrows[0][1]*100
+            if ret not in by_m[d.month]: by_m[d.month].append(ret)
+    def _msig(m):
+        rets=by_m.get(m,[])
+        if not rets: return 'UNKN','dim',0,0
+        avg=sum(rets)/len(rets); wins=sum(1 for r in rets if r>0)
+        if avg>=5:  return 'S.BUY','green',avg,wins
+        if avg>=2:  return 'BUY','green',avg,wins
+        if avg>=-1: return 'NTRL','yellow',avg,wins
+        if avg>=-3: return 'AVOID','red',avg,wins
+        return 'S.AVD','red',avg,wins
+    curr_sig,curr_col,curr_avg,curr_wins = _msig(today.month)
+    next_sig,next_col,next_avg,next_wins = _msig(next_month)
+    nm  = len(by_m.get(today.month,[]))
+    nnm = len(by_m.get(next_month,[]))
+
+    console.print(f'  [{curr_col}]This month ({MONTH_NAMES[today.month-1]}): {curr_sig} ({curr_avg:+.1f}% avg, {curr_wins}/{nm} up)[/{curr_col}]', highlight=False)
+    console.print(f'  [{next_col}]Next month ({MONTH_NAMES[next_month-1]}): {next_sig} ({next_avg:+.1f}% avg, {next_wins}/{nnm} up)[/{next_col}]', highlight=False)
+    console.print()
+
+    # ── Score each watchlist stock ──
+    results = []
+    for symbol in wl_syms:
+        try:
+            prices = conn.execute(
+                "SELECT date,high,low,close,volume FROM stock_prices "
+                "WHERE symbol=? AND close>0 ORDER BY date DESC LIMIT 200",
+                (symbol,)
+            ).fetchall()
+            if len(prices)<20: continue
+            curr = prices[0][3]
+
+            # ATR + S/R zones
+            tr_list=[]
+            for i in range(1,min(15,len(prices))):
+                h,l,pc=prices[i][1],prices[i][2],prices[i][3]
+                tr_list.append(max(h-l,abs(h-pc),abs(l-pc)))
+            atr = sum(tr_list)/len(tr_list) if tr_list else curr*0.02
+            zone = max(atr*1.5, curr*0.01)
+            levels = [(p[1],p[4] or 1) for p in prices] + [(p[2],p[4] or 1) for p in prices]
+            used=set(); clusters=[]
+            for i,(v1,vol1) in enumerate(levels):
+                if i in used: continue
+                gv,gvol,idx2=[v1],[vol1],[i]
+                for j,(v2,vol2) in enumerate(levels):
+                    if j!=i and j not in used and abs(v1-v2)<=zone:
+                        gv.append(v2); gvol.append(vol2); idx2.append(j)
+                if len(gv)>=2:
+                    ap=sum(gv)/len(gv); av=sum(gvol)/len(gvol)
+                    rec=sum(1/(k+1) for k in sorted(idx2))
+                    st=len(gv)*0.5+(av/max(p[4] or 1 for p in prices))*2+rec
+                    clusters.append((ap,st,len(gv))); _used2=set(idx2); used.update(_used2)
+            sup_c=[(p,s,t) for p,s,t in clusters if p<curr*0.999]
+            res_c=[(p,s,t) for p,s,t in clusters if p>curr*1.02]
+            if not sup_c or not res_c: continue
+            sup_n=[(p,s,t) for p,s,t in sup_c if p>=curr*0.92] or sup_c
+            res_n=[(p,s,t) for p,s,t in res_c if p<=curr*1.15] or res_c
+            support    = max(sup_n,key=lambda x:x[1])[0]
+            resistance = max(res_n,key=lambda x:x[1])[0]
+            stop_loss  = support*0.97
+            target     = resistance*0.99
+            risk       = curr-stop_loss
+            reward     = target-curr
+            rr         = round(reward/risk,2) if risk>0 else 0
+            dist_sup   = (curr-support)/curr*100 if curr>0 else 99
+
+            # Volume trend
+            vols=[p[4] or 0 for p in prices]
+            v5=sum(vols[:5])/5 if len(vols)>=5 else 0
+            v15=sum(vols[5:15])/10 if len(vols)>=15 else sum(vols[5:])/max(len(vols[5:]),1)
+            vol_ratio=v5/v15 if v15>0 else 1.0
+
+            # RSI
+            closes=[p[3] for p in prices[:15]]
+            gains=[max(closes[i-1]-closes[i],0) for i in range(1,len(closes))]
+            losses=[max(closes[i]-closes[i-1],0) for i in range(1,len(closes))]
+            avg_g=sum(gains)/len(gains) if gains else 0
+            avg_l=sum(losses)/len(losses) if losses else 1
+            rsi=round(100-(100/(1+avg_g/avg_l)),1) if avg_l>0 else 50
+
+            # Broker score
+            dates_b=[d[0] for d in conn.execute(
+                "SELECT DISTINCT date FROM broker_activity WHERE symbol=? ORDER BY date DESC LIMIT 5",
+                (symbol,)
+            ).fetchall()]
+            buy_days=sum(1 for d in dates_b if (conn.execute(
+                "SELECT SUM(net_val) FROM broker_activity WHERE symbol=? AND date=?",
+                (symbol,d)
+            ).fetchone()[0] or 0)>0)
+            broker_pct=round((buy_days/len(dates_b))*100) if dates_b else 0
+
+            # Sector
+            sr=conn.execute("SELECT sector FROM companies WHERE symbol=?",(symbol,)).fetchone()
+            sect = NAME_MAP.get(sr[0],sr[0]) if sr else ''
+            phase = sect_phase_map.get(sect,'UNKNOWN')
+
+            # July readiness score
+            rr_sc    = min(rr*15,30)                                      # max 30
+            prox_sc  = 10 if dist_sup<=2 else 7 if dist_sup<=5 else 3     # max 10 — close to support
+            vol_sc   = 10 if vol_ratio>=1.3 else 6 if vol_ratio>=1.0 else 0 # max 10 — volume building
+            rsi_sc   = 10 if rsi<40 else 6 if rsi<50 else 0               # max 10 — oversold = best entry
+            br_sc    = broker_pct*0.1                                      # max 10
+            phase_sc = 15 if phase in ('MARKUP','ACCUM') else 8 if phase=='TRANSIT' else 0  # max 15
+            seas_sc  = 15 if next_sig in ('S.BUY','BUY') else 8 if next_sig=='NTRL' else 0  # max 15 — Jul seasonal
+
+            july_score = round(rr_sc+prox_sc+vol_sc+rsi_sc+br_sc+phase_sc+seas_sc, 1)
+
+            # HOT now: phase ACCUM/MARKUP + current seasonal BUY + RR>=2
+            hot_now = phase in ('MARKUP','ACCUM') and curr_sig in ('S.BUY','BUY') and rr>=2.0
+            # READY for July: good score + RR exists + not overbought
+            july_ready = july_score>=50 and rr>=1.5 and rsi<75
+
+            if rr < 1.2: continue  # skip stocks with no R/R
+
+            results.append((symbol, curr, support, resistance, stop_loss, target,
+                           rr, dist_sup, vol_ratio, rsi, broker_pct, sect, phase,
+                           july_score, hot_now, july_ready))
+        except:
+            continue
+
+    conn.close()
+    results.sort(key=lambda x: x[13], reverse=True)
+
+    if not results:
+        console.print('  [yellow]No watchlist stocks with valid R/R found.[/yellow]')
+        return
+
+    # ── Split into HOT NOW and JULY READY ──
+    hot_list   = [r for r in results if r[14]]
+    july_list  = [r for r in results if r[15] and not r[14]]
+    watch_list = [r for r in results if not r[14] and not r[15]][:15]
+
+    def _print_table(rows, title, color):
+        if not rows: return
+        console.rule(f'[bold {color}]{title}[/bold {color}]', style=color)
+        console.print()
+        t = Table(show_header=True, header_style=f'bold {color}', box=box.SIMPLE_HEAVY,
+                  border_style=color, padding=(0,1), min_width=110)
+        t.add_column('Sym',    style='bold', width=7,  no_wrap=True)
+        t.add_column('Price',  justify='right', width=7,  no_wrap=True)
+        t.add_column('Supp',   justify='right', width=7,  no_wrap=True)
+        t.add_column('Stop',   justify='right', width=7,  no_wrap=True)
+        t.add_column('Tgt',    justify='right', width=7,  no_wrap=True)
+        t.add_column('R/R',    justify='right', width=6,  no_wrap=True)
+        t.add_column('Dst%',   justify='right', width=5,  no_wrap=True)
+        t.add_column('Vol',    justify='right', width=5,  no_wrap=True)
+        t.add_column('RSI',    justify='right', width=5,  no_wrap=True)
+        t.add_column('Phase',  width=8,  no_wrap=True)
+        t.add_column('Sector', width=14, no_wrap=True)
+        t.add_column('JulSc',  justify='right', width=5,  no_wrap=True)
+        for sym,curr,sup,res,sl,tgt,rr,dist,vol_r,rsi,brk,sect,phase,jscore,hot,ready in rows:
+            rr_c  = 'green' if rr>=2   else 'yellow'
+            rsi_c = 'green' if rsi<40  else 'red' if rsi>70 else 'white'
+            ph_c  = 'green' if phase in ('MARKUP','ACCUM') else 'yellow' if phase=='TRANSIT' else 'red'
+            dst_c = 'green' if dist<=3 else 'yellow' if dist<=6 else 'white'
+            vol_c = 'green' if vol_r>=1.2 else 'yellow' if vol_r>=0.9 else 'red'
+            js_c  = 'green' if jscore>=65 else 'yellow' if jscore>=50 else 'white'
+            t.add_row(
+                sym,
+                f'{curr:,.0f}',
+                f'{sup:,.0f}',
+                f'{sl:,.0f}',
+                f'{tgt:,.0f}',
+                f'[{rr_c}]1:{rr:.1f}[/{rr_c}]',
+                f'[{dst_c}]{dist:.1f}%[/{dst_c}]',
+                f'[{vol_c}]{vol_r:.1f}x[/{vol_c}]',
+                f'[{rsi_c}]{rsi:.0f}[/{rsi_c}]',
+                f'[{ph_c}]{phase}[/{ph_c}]',
+                f'[dim]{sect[:14]}[/dim]',
+                f'[{js_c}]{jscore:.0f}[/{js_c}]',
+            )
+        console.print(t)
+        console.print()
+
+    # Print sections
+    if hot_list:
+        _print_table(hot_list, f'★ HOT NOW — Enter Immediately ({len(hot_list)} stocks)', 'green')
+    else:
+        console.print('  [dim]No HOT NOW stocks — market in DISTRIBUTION, wait for phase to improve.[/dim]')
+        console.print()
+
+    _print_table(july_list[:20], f'▶ JULY READY — Prepare to Buy in July ({min(len(july_list),20)} shown)', 'cyan')
+    _print_table(watch_list,     f'◎ WATCHLIST — Monitor Daily ({len(watch_list)} shown)', 'yellow')
+
+    # ── Summary recommendation ──
+    console.rule('[bold yellow]Deployment Plan[/bold yellow]', style='yellow')
+    console.print()
+    console.print(f'  [bold]Current phase:[/bold] [{curr_col}]{curr_sig} this month[/{curr_col}] → [{next_col}]{next_sig} next month ({MONTH_NAMES[next_month-1]})[/{next_col}]', highlight=False)
+    console.print()
+    if hot_list:
+        console.print(f'  [green]ACTION NOW:[/green] {len(hot_list)} stocks are HOT. Enter with full position + tight stop.')
+    else:
+        console.print('  [yellow]ACTION NOW:[/yellow] No HOT entries. Stay mostly cash. Build watchlist only.')
+    if july_list:
+        top5 = [r[0] for r in july_list[:5]]
+        console.print(f'  [cyan]PREPARE FOR {MONTH_NAMES[next_month-1].upper()}:[/cyan] Top picks — {", ".join(top5)}')
+        console.print(f'  [dim]Set price alerts on these. Enter when phase turns ACCUM + volume confirms.[/dim]')
+    console.print()
+    console.print('  [dim]JulSc = July readiness score (0-100) | Dst% = distance from support | Vol = volume ratio[/dim]')
+    console.print('  [dim]HOT = phase ACCUM/MARKUP + seasonal BUY + R/R≥2 | READY = JulSc≥50 + R/R≥1.5 + RSI<75[/dim]')
+    console.print()
+
 
 def analyze_broker_date(symbol=None, date_str=None, db_path='nepse_market_data.db'):
     """Show broker activity for a specific stock on a specific date."""
