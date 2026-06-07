@@ -3603,10 +3603,12 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
             _ss = 50
 
         # Agreement note
+        _sg_str = ('+' if _s_g_avg>=0 else '') + f'{_s_g_avg:.1f}%' if _s_g_avg != 0 else 'N/A'
+        _sb_str = ('+' if _s_b_avg>=0 else '') + f'{_s_b_avg:.1f}%' if _s_b_avg != 0 else 'N/A'
         _greg_agree = ('Greg: NEPSE ' + ('+' if _n_g_avg>=0 else '') + f'{_n_g_avg:.1f}% / '
-                      + symbol + ' ' + ('+' if _s_g_avg>=0 else '') + f'{_s_g_avg:.1f}%')
+                      + symbol + ' ' + _sg_str)
         _bs_agree   = ('BS:   NEPSE ' + ('+' if _n_b_avg>=0 else '') + f'{_n_b_avg:.1f}% / '
-                      + symbol + ' ' + ('+' if _s_b_avg>=0 else '') + f'{_s_b_avg:.1f}%')
+                      + symbol + ' ' + _sb_str)
 
         # ── QUARTERLY ──
         console.print()
