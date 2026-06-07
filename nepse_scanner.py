@@ -4225,10 +4225,17 @@ def analyze_seasonality(db_path='nepse_market_data.db'):
         key = f'{_fiscal_year(d)}-{_nepali_q(m)}'
         nq_data[key].append(c)
 
+    # Current and first partial NQ filters
+    _curr_nq_key  = f'{_fiscal_year(str(today.date()))}-{_nepali_q(today.month)}'
+    _db_start_str = '2021-05-25'
+    _first_nq_key = f'{_fiscal_year(_db_start_str)}-{_nepali_q(int(_db_start_str[5:7]))}'
+
     by_nq = defaultdict(list)
     for k in sorted(nq_data.keys()):
         closes = nq_data[k]
         if len(closes) >= 10:
+            if k == _curr_nq_key: continue
+            if k == _first_nq_key: continue
             ret = (closes[-1]-closes[0])/closes[0]*100
             nq = k.split('-')[1]
             fy = k.split('-')[0]
