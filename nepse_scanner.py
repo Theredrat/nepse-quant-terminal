@@ -5707,36 +5707,66 @@ def analyze_best_rr(db_path='nepse_market_data.db'):
     for symbol in symbols:
         try:
             prices = conn.execute(
-                'SELECT date, high, low, close FROM stock_prices '
-                'WHERE symbol=? AND close > 0 ORDER BY date DESC LIMIT 60',
+                'SELECT date, high, low, close, volume FROM stock_prices '
+                'WHERE symbol=? AND close > 0 ORDER BY date DESC LIMIT 200',
                 (symbol,)
             ).fetchall()
             if len(prices) < 10:
                 continue
 
             curr = prices[0][3]
-            zone = curr * 0.02
+            # Adaptive zone based on ATR(14)
+            _tr_list = []
+            for i in range(1, min(15, len(prices))):
+                h, l, pc = prices[i][1], prices[i][2], prices[i][3]
+                _tr_list.append(max(h-l, abs(h-pc), abs(l-pc)))
+            atr = sum(_tr_list)/len(_tr_list) if _tr_list else curr*0.02
+            zone = max(atr * 1.5, curr * 0.01)
 
-            _levels = [p[1] for p in prices] + [p[2] for p in prices]
+            # Build volume-weighted touch levels
+            _highs  = [(p[1], p[4] or 1) for p in prices]
+            _lows   = [(p[2], p[4] or 1) for p in prices]
+            _levels = _highs + _lows
+
+            # Cluster with touch count + volume weighting
             _used = set()
             _clusters = []
-            for i, v1 in enumerate(_levels):
+            for i, (v1, vol1) in enumerate(_levels):
                 if i in _used: continue
-                grp, idx = [v1], [i]
-                for j, v2 in enumerate(_levels):
+                grp_v, grp_vol, idx = [v1], [vol1], [i]
+                for j, (v2, vol2) in enumerate(_levels):
                     if j != i and j not in _used and abs(v1-v2) <= zone:
-                        grp.append(v2); idx.append(j)
-                if len(grp) >= 2:
-                    _clusters.append(sum(grp)/len(grp))
+                        grp_v.append(v2); grp_vol.append(vol2); idx.append(j)
+                touches = len(grp_v)
+                if touches >= 2:
+                    avg_price  = sum(grp_v)/touches
+                    avg_vol    = sum(grp_vol)/touches
+                    # Recency bonus: more recent touches score higher
+                    recency = sum(1/(k+1) for k in sorted(idx))
+                    strength = touches * 0.5 + (avg_vol/max(p[4] or 1 for p in prices)) * 2 + recency
+                    _clusters.append((avg_price, strength, touches))
                     _used.update(idx)
 
-            supports  = sorted([l for l in _clusters if l < curr], reverse=True)
-            valid_res = sorted([l for l in _clusters if l > curr * 1.03])
-            if not supports or not valid_res:
+            # Select strongest support and resistance
+            _sup_candidates = [(p, s, t) for p, s, t in _clusters if p < curr * 0.999]
+            _res_candidates = [(p, s, t) for p, s, t in _clusters if p > curr * 1.02]
+
+            if not _sup_candidates or not _res_candidates:
                 continue
 
-            support    = supports[0]
-            resistance = valid_res[0]
+            # Pick nearest strong support (within 8% below) with best strength
+            _sup_near = [(p, s, t) for p, s, t in _sup_candidates if p >= curr * 0.92]
+            if not _sup_near:
+                _sup_near = _sup_candidates
+            support_level = max(_sup_near, key=lambda x: x[1])
+            support = support_level[0]
+
+            # Pick nearest strong resistance (within 15% above) with best strength
+            _res_near = [(p, s, t) for p, s, t in _res_candidates if p <= curr * 1.15]
+            if not _res_near:
+                _res_near = _res_candidates
+            resistance_level = max(_res_near, key=lambda x: x[1])
+            resistance = resistance_level[0]
             stop_loss  = support * 0.97
             target     = resistance * 0.99
             risk       = curr - stop_loss
@@ -5779,23 +5809,36 @@ def analyze_best_rr(db_path='nepse_market_data.db'):
         console.print('  No stocks found with good R/R right now. Market may be extended.', style='yellow')
         return
 
-    table = Table(show_header=True, header_style='bold cyan', box=None, padding=(0,1))
-    table.add_column('Symbol',    style='bold', width=10)
-    table.add_column('Price',     justify='right', width=10)
-    table.add_column('Support',   justify='right', width=10)
-    table.add_column('Resist',    justify='right', width=10)
-    table.add_column('Stop',      justify='right', width=10)
-    table.add_column('Target',    justify='right', width=10)
-    table.add_column('R/R',       justify='right', width=6)
-    table.add_column('Broker%',   justify='right', width=8)
-    table.add_column('RSI',       justify='right', width=6)
-    table.add_column('Signal',    width=16)
+    # Composite score: R/R + broker + RSI position
+    scored = []
+    for row in results:
+        sym, curr, sup, res, sl, tgt, rr, bs, rsi = row
+        rr_score  = min(rr * 20, 40)           # max 40pts
+        br_score  = bs * 0.4                    # max 40pts
+        rsi_score = 20 if rsi < 40 else 10 if rsi < 55 else 0  # max 20pts
+        score = round(rr_score + br_score + rsi_score, 1)
+        scored.append((sym, curr, sup, res, sl, tgt, rr, bs, rsi, score))
+    scored.sort(key=lambda x: x[9], reverse=True)
 
-    for sym, curr, sup, res, sl, tgt, rr, bs, rsi in results:
-        rsi_tag = 'OVERSOLD'   if rsi < 35 else 'OVERBOUGHT' if rsi > 70 else ''
-        rsi_col = 'green'      if rsi < 35 else 'red'        if rsi > 70 else 'white'
-        rr_col  = 'green'      if rr >= 2  else 'yellow'
-        br_col  = 'green'      if bs >= 80 else 'yellow'     if bs >= 50 else 'red'
+    table = Table(show_header=True, header_style='bold cyan', box=None, padding=(0,1))
+    table.add_column('Symbol',  style='bold', width=7)
+    table.add_column('Price',   justify='right', width=7)
+    table.add_column('Supp',    justify='right', width=7)
+    table.add_column('Res',     justify='right', width=7)
+    table.add_column('Stop',    justify='right', width=7)
+    table.add_column('Target',  justify='right', width=7)
+    table.add_column('R/R',     justify='right', width=6)
+    table.add_column('Brok%',   justify='right', width=6)
+    table.add_column('RSI',     justify='right', width=5)
+    table.add_column('Score',   justify='right', width=6)
+    table.add_column('Signal',  width=10)
+
+    for sym, curr, sup, res, sl, tgt, rr, bs, rsi, score in scored:
+        rsi_tag = 'OVERSOLD' if rsi < 35 else 'OVERBOUGHT' if rsi > 70 else ''
+        rsi_col = 'green'    if rsi < 35 else 'red'        if rsi > 70 else 'white'
+        rr_col  = 'green'    if rr >= 2  else 'yellow'
+        br_col  = 'green'    if bs >= 80 else 'yellow'     if bs >= 50 else 'red'
+        sc_col  = 'green'    if score >= 60 else 'yellow'  if score >= 40 else 'red'
         table.add_row(
             sym,
             f'{curr:,.0f}',
@@ -5803,9 +5846,10 @@ def analyze_best_rr(db_path='nepse_market_data.db'):
             f'{res:,.0f}',
             f'{sl:,.0f}',
             f'{tgt:,.0f}',
-            f'[{rr_col}]1:{rr}[/{rr_col}]',
+            f'[{rr_col}]1:{rr:.1f}[/{rr_col}]',
             f'[{br_col}]{bs}%[/{br_col}]',
             f'[{rsi_col}]{rsi}[/{rsi_col}]',
+            f'[{sc_col}]{score:.0f}[/{sc_col}]',
             f'[{rsi_col}]{rsi_tag}[/{rsi_col}]',
         )
 
