@@ -5921,7 +5921,7 @@ def analyze_best_rr(db_path='nepse_market_data.db'):
     from rich.console import Console
     from rich.table import Table
     from rich.rule import Rule
-    console = Console()
+    console = Console(width=120)
     import sqlite3
 
     console.print()
@@ -6063,64 +6063,183 @@ def analyze_best_rr(db_path='nepse_market_data.db'):
     conn.close()
     results.sort(key=lambda x: x[6], reverse=True)
 
+    # ── Sector phase map (from option 37 logic) ──
+    import datetime as _dt36
+    from collections import defaultdict as _dd36
+    _NAME_MAP36 = {
+        'Hydro Power':'Hydropower','Commercial Banks':'Commercial Banks',
+        'Development Banks':'Development Banks','Finance':'Finance',
+        'Microfinance':'Microfinance','Life Insurance':'Life Insurance',
+        'Non Life Insurance':'Non-Life Insurance',
+        'Manufacturing And Processing':'Manufacturing',
+        'Hotels And Tourism':'Hotel & Tourism',
+        'Investment':'Investment','Tradings':'Trading','Others':'Others',
+    }
+    _conn36 = sqlite3.connect(db_path)
+    _latest36 = _conn36.execute(
+        "SELECT MAX(date) FROM stock_prices WHERE close>0"
+    ).fetchone()[0]
+    _sect_rows36 = _conn36.execute(
+        "SELECT sp.symbol, c.sector, sp.close "
+        "FROM stock_prices sp JOIN companies c ON sp.symbol=c.symbol "
+        "WHERE sp.close>0 AND sp.date>=date(?,'-60 days') "
+        "ORDER BY sp.symbol, sp.date",
+        (_latest36,)
+    ).fetchall()
+    _sym_prices36 = _dd36(list)
+    _sym_sect36   = {}
+    for sym,sect,cl in _sect_rows36:
+        _sym_sect36[sym] = _NAME_MAP36.get(sect, sect)
+        _sym_prices36[sym].append(cl)
+    _sect_phase36 = {}
+    _sect_data36  = _dd36(lambda: {'above20':0,'total':0,'adv':0,'dec':0})
+    for sym,closes in _sym_prices36.items():
+        sect = _sym_sect36[sym]
+        if len(closes) < 20: continue
+        ma20 = sum(closes[-20:])/20
+        if closes[-1] > ma20: _sect_data36[sect]['above20'] += 1
+        _sect_data36[sect]['total'] += 1
+        if len(closes)>=2:
+            if closes[-1]>closes[-2]: _sect_data36[sect]['adv'] += 1
+            elif closes[-1]<closes[-2]: _sect_data36[sect]['dec'] += 1
+    for sect,sd in _sect_data36.items():
+        if sd['total'] < 3: continue
+        pab = sd['above20']/sd['total']*100
+        adr = sd['adv']/(sd['adv']+sd['dec'])*100 if (sd['adv']+sd['dec'])>0 else 50
+        sc = 0
+        if pab>=55: sc+=2
+        elif pab>=45: sc+=1
+        if adr>=55: sc+=2
+        elif adr>=45: sc+=1
+        if sc>=4: _sect_phase36[sect]='MARKUP'
+        elif sc>=3: _sect_phase36[sect]='ACCUM'
+        elif sc>=2: _sect_phase36[sect]='TRANSIT'
+        else: _sect_phase36[sect]='DISTRIB'
+
+    # ── Seasonal map for current month ──
+    _today36  = _dt36.date.today()
+    _curr_m36 = _today36.month
+    _nep_hist36 = _conn36.execute(
+        "SELECT date,close FROM stock_prices WHERE symbol='NEPSE' AND close>0 ORDER BY date"
+    ).fetchall()
+    _conn36.close()
+    _by_m36 = _dd36(list)
+    for _r36 in _nep_hist36:
+        _d36 = _dt36.date.fromisoformat(_r36[0])
+        if (_d36.year,_d36.month)==(_today36.year,_today36.month): continue
+        _mrows = [x for x in _nep_hist36 if x[0][:7]==f'{_d36.year}-{_d36.month:02d}']
+        if len(_mrows)>=10:
+            _ret36=(_mrows[-1][1]-_mrows[0][1])/_mrows[0][1]*100
+            if _ret36 not in _by_m36[_d36.month]: _by_m36[_d36.month].append(_ret36)
+    _curr_seas_avg = sum(_by_m36[_curr_m36])/len(_by_m36[_curr_m36]) if _by_m36[_curr_m36] else 0
+    _curr_seas_sig = 'S.BUY' if _curr_seas_avg>=5 else 'BUY' if _curr_seas_avg>=2 else 'NTRL' if _curr_seas_avg>=-1 else 'AVOID'
+
     console.print(f'  Stocks with R/R >= 1.5 at current price: [bold]{len(results)}[/bold]')
+    console.print(f'  Market seasonal ({_dt36.date.today().strftime("%b")}): [{("green" if _curr_seas_sig in ("S.BUY","BUY") else "yellow" if _curr_seas_sig=="NTRL" else "red")}]{_curr_seas_sig} ({_curr_seas_avg:+.1f}%)[/{"green" if _curr_seas_sig in ("S.BUY","BUY") else "yellow" if _curr_seas_sig=="NTRL" else "red"}]', highlight=False)
     console.print()
 
     if not results:
         console.print('  No stocks found with good R/R right now. Market may be extended.', style='yellow')
         return
 
-    # Composite score: R/R + broker + RSI position
+    # ── Get volume data per symbol ──
+    _conn_vol = sqlite3.connect(db_path)
+    _vol_map = {}
+    for sym,*_ in results:
+        _vrows = _conn_vol.execute(
+            "SELECT close, volume FROM stock_prices WHERE symbol=? AND close>0 ORDER BY date DESC LIMIT 20",
+            (sym,)
+        ).fetchall()
+        if len(_vrows) >= 10:
+            _closes_v = [r[0] for r in _vrows]
+            _vols_v   = [r[1] or 0 for r in _vrows]
+            # Volume trend: avg vol last 5 vs avg vol 6-20
+            _v5  = sum(_vols_v[:5])/5
+            _v15 = sum(_vols_v[5:15])/10 if len(_vols_v)>=15 else sum(_vols_v[5:])/max(len(_vols_v[5:]),1)
+            _vol_ratio = _v5/_v15 if _v15>0 else 1.0
+            # Up-volume vs down-volume last 10 days
+            _up_vol = sum(_vols_v[i] for i in range(1,min(10,len(_vrows))) if _closes_v[i]>_closes_v[i+1] if i+1<len(_closes_v))
+            _dn_vol = sum(_vols_v[i] for i in range(1,min(10,len(_vrows))) if _closes_v[i]<_closes_v[i+1] if i+1<len(_closes_v))
+            _vol_map[sym] = (_vol_ratio, _up_vol, _dn_vol)
+    _conn_vol.close()
+
+    # ── Get sector per symbol ──
+    _conn_s2 = sqlite3.connect(db_path)
+    _sym_to_sect = {}
+    for sym,*_ in results:
+        _sr = _conn_s2.execute("SELECT sector FROM companies WHERE symbol=?", (sym,)).fetchone()
+        if _sr: _sym_to_sect[sym] = _NAME_MAP36.get(_sr[0], _sr[0])
+    _conn_s2.close()
+
+    # ── Composite score with new factors ──
     scored = []
     for row in results:
         sym, curr, sup, res, sl, tgt, rr, bs, rsi, s5d = row
-        rr_score   = min(rr * 20, 40)           # max 40pts
-        br_score   = bs * 0.3                    # max 30pts
-        rsi_score  = 15 if rsi < 40 else 8 if rsi < 55 else 0  # max 15pts
-        sect_score = 15 if s5d >= 2 else 8 if s5d >= 0 else 0  # max 15pts
-        score = round(rr_score + br_score + rsi_score + sect_score, 1)
-        scored.append((sym, curr, sup, res, sl, tgt, rr, bs, rsi, s5d, score))
+        sect      = _sym_to_sect.get(sym, '')
+        phase     = _sect_phase36.get(sect, 'UNKNOWN')
+        vol_r, up_v, dn_v = _vol_map.get(sym, (1.0, 0, 0))
+
+        # Distance to support (tighter = better entry)
+        dist_sup  = (curr - sup) / curr * 100 if curr > 0 else 99
+
+        rr_score   = min(rr * 20, 40)                          # max 40
+        br_score   = bs * 0.3                                   # max 30
+        rsi_score  = 15 if rsi < 40 else 8 if rsi < 55 else 0  # max 15
+        sect_score = 10 if s5d >= 2 else 5 if s5d >= 0 else 0  # max 10
+        # Phase bonus
+        phase_score = 10 if phase in ('MARKUP','ACCUM') else 5 if phase=='TRANSIT' else 0  # max 10
+        # Volume confirmation bonus
+        vol_score  = 8 if vol_r >= 1.2 else 4 if vol_r >= 0.9 else 0  # max 8
+        # Proximity bonus: within 3% of support = best entry
+        prox_score = 7 if dist_sup <= 3 else 4 if dist_sup <= 6 else 0  # max 7
+
+        score = round(rr_score + br_score + rsi_score + sect_score + phase_score + vol_score + prox_score, 1)
+
+        # HOT tag: MARKUP/ACCUM phase + seasonal BUY/S.BUY + good R/R
+        hot = phase in ('MARKUP','ACCUM') and _curr_seas_sig in ('S.BUY','BUY') and rr >= 2.0
+        scored.append((sym, curr, sup, res, sl, tgt, rr, bs, rsi, s5d, score, phase, vol_r, dist_sup, hot))
     scored.sort(key=lambda x: x[10], reverse=True)
 
-    table = Table(show_header=True, header_style='bold cyan', box=None, padding=(0,1))
-    table.add_column('Sym',     style='bold', width=6)
-    table.add_column('Price',   justify='right', width=6)
-    table.add_column('Supp',    justify='right', width=6)
-    table.add_column('Res',     justify='right', width=6)
-    table.add_column('Stop',    justify='right', width=6)
-    table.add_column('Tgt',     justify='right', width=6)
-    table.add_column('R/R',     justify='right', width=6)
-    table.add_column('Brk%',    justify='right', width=5)
-    table.add_column('RSI',     justify='right', width=5)
-    table.add_column('Sec5d',   justify='right', width=6)
-    table.add_column('Score',   justify='right', width=6)
-    table.add_column('Sig',     width=9)
+    table = Table(show_header=True, header_style='bold cyan', box=None, padding=(0,1), min_width=80)
+    table.add_column('Sym',    style='bold', width=7, no_wrap=True)
+    table.add_column('Price',  justify='right', width=7, no_wrap=True)
+    table.add_column('Supp',   justify='right', width=7, no_wrap=True)
+    table.add_column('Stop',   justify='right', width=7, no_wrap=True)
+    table.add_column('Tgt',    justify='right', width=7, no_wrap=True)
+    table.add_column('R/R',    justify='right', width=6, no_wrap=True)
+    table.add_column('Dst%',   justify='right', width=6, no_wrap=True)
+    table.add_column('Vol',    justify='right', width=6, no_wrap=True)
+    table.add_column('RSI',    justify='right', width=4, no_wrap=True)
+    table.add_column('Phase',  width=8, no_wrap=True)
+    table.add_column('Sc',     justify='right', width=4, no_wrap=True)
+    table.add_column('Tag',    width=8, no_wrap=True)
 
-    for sym, curr, sup, res, sl, tgt, rr, bs, rsi, s5d, score in scored:
-        rsi_tag  = 'OVERSOLD' if rsi < 35 else 'OVERBOUGHT' if rsi > 70 else ''
-        rsi_col  = 'green'    if rsi < 35 else 'red'        if rsi > 70 else 'white'
-        rr_col   = 'green'    if rr >= 2  else 'yellow'
-        br_col   = 'green'    if bs >= 80 else 'yellow'     if bs >= 50 else 'red'
-        sc_col   = 'green'    if score >= 60 else 'yellow'  if score >= 40 else 'red'
-        sect_col = 'green'    if s5d >= 2 else 'red'        if s5d < 0  else 'yellow'
-        sect_str = f'{s5d:+.1f}%' if s5d != 0 else 'N/A'
+    for sym, curr, sup, res, sl, tgt, rr, bs, rsi, s5d, score, phase, vol_r, dist_sup, hot in scored:
+        rr_col   = 'green'  if rr >= 2    else 'yellow'
+        rsi_col  = 'green'  if rsi < 35   else 'red' if rsi > 70 else 'white'
+        sc_col   = 'green'  if score >= 70 else 'yellow' if score >= 50 else 'red'
+        ph_col   = 'green'  if phase in ('MARKUP','ACCUM') else 'yellow' if phase=='TRANSIT' else 'red'
+        vol_col  = 'green'  if vol_r >= 1.2 else 'yellow' if vol_r >= 0.9 else 'red'
+        dst_col  = 'green'  if dist_sup <= 3 else 'yellow' if dist_sup <= 6 else 'red'
+        tag = '[bold green]★ HOT[/bold green]' if hot else ('[green]OVERSOLD[/green]' if rsi < 35 else '[red]OVERBOUGHT[/red]' if rsi > 70 else '')
         table.add_row(
             sym,
             f'{curr:,.0f}',
             f'{sup:,.0f}',
-            f'{res:,.0f}',
             f'{sl:,.0f}',
             f'{tgt:,.0f}',
             f'[{rr_col}]1:{rr:.1f}[/{rr_col}]',
-            f'[{br_col}]{bs}%[/{br_col}]',
+            f'[{dst_col}]{dist_sup:.1f}%[/{dst_col}]',
+            f'[{vol_col}]{vol_r:.1f}x[/{vol_col}]',
             f'[{rsi_col}]{rsi}[/{rsi_col}]',
-            f'[{sect_col}]{sect_str}[/{sect_col}]',
+            f'[{ph_col}]{phase:<8}[/{ph_col}]',
             f'[{sc_col}]{score:.0f}[/{sc_col}]',
-            f'[{rsi_col}]{rsi_tag}[/{rsi_col}]',
+            tag,
         )
 
     console.print(table)
     console.print()
+    console.print('  [dim]Dst% = distance from support | Vol = 5d vs 15d volume ratio | ★ HOT = phase+seasonal+RR aligned[/dim]')
     console.print('  [dim]Tip: Run option 35 on any stock above for full trade plan.[/dim]')
     console.print()
 
