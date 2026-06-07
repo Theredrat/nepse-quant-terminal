@@ -3487,24 +3487,106 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
         _s_g_avg = _sg_c[0] if _sg_c else 0
         _s_b_avg = _sb_c[0] if _sb_c else 0
 
-        # Agreement score — both systems agree = stronger signal
-        _nepse_bull  = (_n_g_avg >= 2) + (_n_b_avg >= 2)
-        _nepse_bear  = (_n_g_avg <= -2) + (_n_b_avg <= -2)
-        _stock_bull  = (_s_g_avg >= 2) + (_s_b_avg >= 2)
-        _stock_bear  = (_s_g_avg <= -2) + (_s_b_avg <= -2)
+        # FYQ signal for current quarter
+        _fyq_stock_avg = 0
+        _fyq_nepse_avg = 0
+        try:
+            from datetime import date as _dtt
+            _bs_st2 = {2077:(2020,4,13),2078:(2021,4,14),2079:(2022,4,14),
+                       2080:(2023,4,14),2081:(2024,4,13),2082:(2025,4,14),2083:(2026,4,14)}
+            _bs_md2 = {2077:[31,31,31,32,31,31,30,29,30,29,30,30],
+                       2078:[31,31,32,31,31,31,30,29,30,29,30,30],
+                       2079:[31,32,31,32,31,30,30,29,30,29,30,30],
+                       2080:[31,31,31,32,31,31,30,29,30,29,30,30],
+                       2081:[31,31,32,31,31,31,30,29,30,29,30,30],
+                       2082:[31,32,31,32,31,30,30,29,30,29,30,30],
+                       2083:[31,31,31,32,31,31,30,29,30,29,30,30]}
+            _fq_map2 = {4:'FYQ1',5:'FYQ1',6:'FYQ1',7:'FYQ2',8:'FYQ2',9:'FYQ2',
+                        10:'FYQ3',11:'FYQ3',12:'FYQ3',1:'FYQ4',2:'FYQ4',3:'FYQ4'}
+            def _bs2(d):
+                for yr in sorted(_bs_st2.keys(),reverse=True):
+                    g=_bs_st2[yr]; s=_dtt(g[0],g[1],g[2])
+                    if d>=s:
+                        days=(d-s).days
+                        for mi,md in enumerate(_bs_md2.get(yr,[])):
+                            if days<md: return yr,mi+1
+                            days-=md
+                        return yr+1,1
+                return None,None
+            def _fly2(by,bm):
+                return by if bm in (4,5,6,7,8,9,10,11,12) else by-1
+            _today_bm2 = _bs2(_dtt.today())
+            _fyq_now = _fq_map2[_today_bm2[1]]
+            _curr_fk = (_fly2(_today_bm2[0],_today_bm2[1]), _fyq_now)
+            _first_d2 = _bs2(_dtt(2021,5,25))
+            _first_fk = (_fly2(_first_d2[0],_first_d2[1]), _fq_map2[_first_d2[1]])
+            # Build FYQ on the fly from _stock rows (already loaded)
+            from collections import defaultdict as _dd3
+            _fyq_s_raw = _dd3(list)
+            for _sd,_sc,_sh,_sl in _stock:
+                _sd2 = _dtt.fromisoformat(_sd)
+                _sby,_sbm = _bs2(_sd2)
+                if _sby and _sbm:
+                    _sfyq = _fq_map2[_sbm]
+                    _sfy  = _fly2(_sby,_sbm)
+                    _fyq_s_raw[(_sfy,_sfyq)].append(_sc)
+            _fyq_s_rets = []
+            for (_fk_fy,_fk_fq),_fk_entries in _fyq_s_raw.items():
+                if _fk_fq != _fyq_now: continue
+                if (_fk_fy,_fk_fq) == _curr_fk: continue
+                if (_fk_fy,_fk_fq) == _first_fk: continue
+                if len(_fk_entries) < 10: continue
+                _fyq_s_rets.append((_fk_entries[-1]-_fk_entries[0])/_fk_entries[0]*100)
+            _fyq_n_rets = []
+            # Build NEPSE FYQ inline
+            _nfyq_raw2 = _dd3(list)
+            _conn_nfyq = sqlite3.connect(db_path)
+            _nfyq_rows = _conn_nfyq.execute(
+                "SELECT date, close FROM stock_prices WHERE symbol='NEPSE' AND close>0 ORDER BY date"
+            ).fetchall()
+            _conn_nfyq.close()
+            for _nd, _nc in _nfyq_rows:
+                _nd2 = _dtt.fromisoformat(_nd)
+                _nby, _nbm = _bs2(_nd2)
+                if _nby and _nbm:
+                    _nfyq = _fq_map2[_nbm]
+                    _nfy  = _fly2(_nby, _nbm)
+                    _nfyq_raw2[(_nfy,_nfyq)].append(_nc)
+            for _k2,_v2 in _nfyq_raw2.items():
+                if len(_v2)<10: continue
+                if _k2 == _curr_fk: continue
+                if _k2 == _first_fk: continue
+                _nfy2,_nfyq2 = _k2
+                if _nfyq2 == _fyq_now:
+                    _fyq_n_rets.append((_v2[-1]-_v2[0])/_v2[0]*100)
+            if _fyq_s_rets: _fyq_stock_avg = sum(_fyq_s_rets)/len(_fyq_s_rets)
+            if _fyq_n_rets: _fyq_nepse_avg = sum(_fyq_n_rets)/len(_fyq_n_rets)
+        except: pass
 
-        if _nepse_bull == 2 and _stock_bull >= 1:
-            _sv = '[bold green]STRONG TAILWIND — both calendars show NEPSE bullish this period[/bold green]'
+        # Agreement score — Greg + BS monthly + FYQ quarterly (3 signals each)
+        _nepse_bull  = (_n_g_avg >= 2) + (_n_b_avg >= 2) + (_fyq_nepse_avg >= 1.5)
+        _nepse_bear  = (_n_g_avg <= -2) + (_n_b_avg <= -2) + (_fyq_nepse_avg <= -1.5)
+        _stock_bull  = (_s_g_avg >= 2) + (_s_b_avg >= 2) + (_fyq_stock_avg >= 1.5)
+        _stock_bear  = (_s_g_avg <= -2) + (_s_b_avg <= -2) + (_fyq_stock_avg <= -1.5)
+
+        if _nepse_bull >= 2 and _stock_bull >= 2:
+            _sv = '[bold green]STRONG TAILWIND — multiple calendars bullish for NEPSE and stock[/bold green]'
             _ss = 85
+        elif _nepse_bull >= 1 and _stock_bull >= 2:
+            _sv = '[bold green]TAILWIND — FYQ + BS/Greg confirm bullish seasonal edge[/bold green]'
+            _ss = 75
         elif _nepse_bull >= 1 and _stock_bull >= 1:
             _sv = '[bold green]TAILWIND — at least one calendar bullish for both NEPSE and stock[/bold green]'
-            _ss = 70
-        elif _nepse_bull == 2 and _stock_bear >= 1:
+            _ss = 65
+        elif _nepse_bull >= 2 and _stock_bear >= 1:
             _sv = '[bold yellow]MIXED — NEPSE strong but stock weak this period[/bold yellow]'
             _ss = 45
-        elif _nepse_bear == 2 and _stock_bear >= 1:
-            _sv = '[bold red]STRONG HEADWIND — both calendars show weakness this period[/bold red]'
-            _ss = 15
+        elif _nepse_bear >= 2 and _stock_bear >= 2:
+            _sv = '[bold red]STRONG HEADWIND — multiple calendars show weakness this period[/bold red]'
+            _ss = 10
+        elif _nepse_bear >= 1 and _stock_bear >= 1:
+            _sv = '[bold red]HEADWIND — seasonal weakness confirmed across calendars[/bold red]'
+            _ss = 20
         elif _nepse_bear >= 1 or _stock_bear >= 1:
             _sv = '[bold yellow]CAUTION — at least one calendar showing weakness[/bold yellow]'
             _ss = 40
