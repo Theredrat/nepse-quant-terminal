@@ -136,9 +136,9 @@ def show_report():
 
     console = Console(width=CONSOLE_WIDTH)
     console.print()
-    console.print("[bold cyan]╔══════════════════════════════════════════════════╗[/bold cyan]")
-    console.print("[bold cyan]║       SIGNAL PERFORMANCE TRACKER                ║[/bold cyan]")
-    console.print("[bold cyan]╚══════════════════════════════════════════════════╝[/bold cyan]")
+    console.print("[bold cyan]=================================================[/bold cyan]")
+    console.print("[bold cyan]       SIGNAL PERFORMANCE TRACKER              [/bold cyan]")
+    console.print("[bold cyan]=================================================[/bold cyan]")
     console.print(f"  Win target: +{WIN_TARGET}%  |  Total signals logged: {len(rows)}")
     console.print()
 
