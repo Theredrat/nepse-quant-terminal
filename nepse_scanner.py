@@ -5949,24 +5949,111 @@ def analyze_best_rr(db_path='nepse_market_data.db'):
 
 
 def analyze_sector_seasonality(db_path='nepse_market_data.db'):
-    """Option 40 - Sector Seasonality: best/worst months and quarters per sector."""
+    """Option 40 - Sector Seasonality: 5 systems with swing stats."""
     from rich.console import Console
     from rich.table import Table
     from rich.rule import Rule
     from rich import box
+    from rich.text import Text
     import sqlite3, datetime
+    from collections import defaultdict
 
     console = Console()
     console.print()
     console.rule('[bold yellow]Option 40 — Sector Seasonality[/bold yellow]', style='yellow')
     console.print()
-    console.print('  [dim]Historical avg return per sector by Gregorian month and FY quarter[/dim]')
+    console.print('  [dim]Greg monthly / Greg quarterly / BS monthly / BS quarterly / FYQ — with swing stats[/dim]')
     console.print()
 
-    # Load all sector prices (use long history)
+    # ── BS conversion tables ──
+    _baisakh_start = {
+        2077:(2020,4,13),2078:(2021,4,14),2079:(2022,4,14),
+        2080:(2023,4,14),2081:(2024,4,13),2082:(2025,4,14),2083:(2026,4,14),
+    }
+    _bs_month_days = {
+        2077:[31,31,31,32,31,31,30,29,30,29,30,30],
+        2078:[31,31,32,31,31,31,30,29,30,29,30,30],
+        2079:[31,32,31,32,31,30,30,29,30,29,30,30],
+        2080:[31,31,31,32,31,31,30,29,30,29,30,30],
+        2081:[31,31,32,31,31,31,30,29,30,29,30,30],
+        2082:[31,32,31,32,31,30,30,29,30,29,30,30],
+        2083:[31,31,31,32,31,31,30,29,30,29,30,30],
+    }
+    _bs_names = {1:'Baisakh',2:'Jestha',3:'Ashadh',4:'Shrawan',5:'Bhadra',
+                 6:'Ashwin',7:'Kartik',8:'Mangsir',9:'Poush',10:'Magh',
+                 11:'Falgun',12:'Chaitra'}
+    _date = datetime.date
+
+    def _to_bs(d):
+        for yr in sorted(_baisakh_start.keys(), reverse=True):
+            g = _baisakh_start[yr]
+            s = _date(g[0],g[1],g[2])
+            if d >= s:
+                days = (d-s).days
+                for mi,md in enumerate(_bs_month_days.get(yr,[])):
+                    if days < md: return yr, mi+1
+                    days -= md
+                return yr+1,1
+        return None,None
+
+    def _fyq_from_bs(bsm):
+        if   bsm in (1,2,3):   return 'FYQ4'   # Baisakh-Ashadh
+        elif bsm in (4,5,6):   return 'FYQ1'   # Shrawan-Ashwin
+        elif bsm in (7,8,9):   return 'FYQ2'   # Kartik-Poush
+        else:                   return 'FYQ3'   # Magh-Chaitra
+
+    def _nq_from_bs(bsm):
+        # NQ: Baisakh-based quarters
+        if   bsm in (1,2,3):   return 'NQ1'   # Baisakh-Ashadh
+        elif bsm in (4,5,6):   return 'NQ2'   # Shrawan-Ashwin
+        elif bsm in (7,8,9):   return 'NQ3'   # Kartik-Poush
+        else:                   return 'NQ4'   # Magh-Chaitra
+
+    def _greg_q(m):
+        if   m in (1,2,3):   return 'Q1'
+        elif m in (4,5,6):   return 'Q2'
+        elif m in (7,8,9):   return 'Q3'
+        else:                 return 'Q4'
+
+    def _sig(avg):
+        if avg >=  5: return 'STR.BUY','green'
+        if avg >=  2: return 'BUY','green'
+        if avg >= -1: return 'NTRL','yellow'
+        if avg >= -3: return 'AVOID','red'
+        return 'STR.AVD','red'
+
+    NAME_MAP = {
+        'Hydro Power':'Hydropower','Commercial Banks':'Commercial Banks',
+        'Development Banks':'Development Banks','Finance':'Finance',
+        'Microfinance':'Microfinance','Life Insurance':'Life Insurance',
+        'Non Life Insurance':'Non-Life Insurance',
+        'Manufacturing And Processing':'Manufacturing',
+        'Hotels And Tourism':'Hotel & Tourism',
+        'Investment':'Investment','Tradings':'Trading','Others':'Others',
+    }
+
+    today = datetime.date.today()
+    curr_gm = today.month
+    curr_gq = _greg_q(today.month)
+    bs_today = _to_bs(today)
+    curr_bsm = bs_today[1] if bs_today[0] else today.month
+    curr_nq  = _nq_from_bs(curr_bsm)
+    curr_fyq = _fyq_from_bs(curr_bsm)
+
+    MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+    BS_NAMES    = [_bs_names[i] for i in range(1,13)]
+    GQ_ORDER    = ['Q1','Q2','Q3','Q4']
+    NQ_ORDER    = ['NQ1','NQ2','NQ3','NQ4']
+    FYQ_ORDER   = ['FYQ1','FYQ2','FYQ3','FYQ4']
+
+    GQ_LABEL = {'Q1':'Jan-Mar','Q2':'Apr-Jun','Q3':'Jul-Sep','Q4':'Oct-Dec'}
+    NQ_LABEL = {'NQ1':'Bai-Ash','NQ2':'Shr-Ash','NQ3':'Kar-Pou','NQ4':'Mag-Cha'}
+    FYQ_LABEL= {'FYQ1':'Shr-Ash','FYQ2':'Kar-Pou','FYQ3':'Mag-Cha','FYQ4':'Bai-Ash'}
+
+    # ── Load all OHLC data ──
     conn = sqlite3.connect(db_path)
     rows = conn.execute("""
-        SELECT sp.symbol, c.sector, sp.date, sp.close
+        SELECT sp.symbol, c.sector, sp.date, sp.open, sp.high, sp.low, sp.close
         FROM stock_prices sp
         JOIN companies c ON sp.symbol = c.symbol
         WHERE sp.close > 0 AND sp.date >= '2021-01-01'
@@ -5978,214 +6065,304 @@ def analyze_sector_seasonality(db_path='nepse_market_data.db'):
         console.print('[red]No price data found.[/red]')
         return
 
-    # Group closes by sector -> symbol -> date
-    from collections import defaultdict
+    # Group by sector -> symbol -> date -> (open,high,low,close)
     sym_sector = {}
-    sym_dates  = defaultdict(dict)
-    for sym, sect, dt, cl in rows:
-        sym_sector[sym] = sect
-        sym_dates[sym][dt] = cl
+    sym_ohlc   = defaultdict(dict)
+    for sym, sect, dt, op, hi, lo, cl in rows:
+        sym_sector[sym] = NAME_MAP.get(sect, sect)
+        sym_ohlc[sym][dt] = (op or cl, hi or cl, lo or cl, cl)
 
-    # Build sector daily equal-weighted index: date -> sector -> avg_close
+    # Build sector daily equal-weighted OHLC index
     sect_daily = defaultdict(lambda: defaultdict(list))
-    for sym, dates in sym_dates.items():
+    for sym, dmap in sym_ohlc.items():
         sect = sym_sector[sym]
-        for dt, cl in dates.items():
-            sect_daily[sect][dt].append(cl)
+        for dt, ohlc in dmap.items():
+            sect_daily[sect][dt].append(ohlc)
 
-    sect_index = {}  # sector -> {date: avg_close}
+    # Average across stocks per day
+    sect_index = {}  # sect -> {date: (avg_open, avg_high, avg_low, avg_close)}
     for sect, dmap in sect_daily.items():
-        sect_index[sect] = {dt: sum(v)/len(v) for dt, v in dmap.items()}
+        sect_index[sect] = {}
+        for dt, ohlcs in dmap.items():
+            n = len(ohlcs)
+            sect_index[sect][dt] = (
+                sum(o[0] for o in ohlcs)/n,
+                sum(o[1] for o in ohlcs)/n,
+                sum(o[2] for o in ohlcs)/n,
+                sum(o[3] for o in ohlcs)/n,
+            )
 
-    # FYQ helpers
-    def _fyq(dt_str):
-        m = int(dt_str[5:7])
-        if   m in (4,5,6):   return 'FYQ4'
-        elif m in (7,8,9):   return 'FYQ1'
-        elif m in (10,11,12): return 'FYQ2'
-        else:                 return 'FYQ3'
+    # ── Helper: compute period stats from grouped daily data ──
+    # groups: key -> [(date, open, high, low, close)]
+    def _period_stats(groups, curr_key, first_key=None, min_days=10):
+        """Returns dict: key -> (avg_ret, wins, total, avg_up, avg_dn, avg_sw, best, worst)"""
+        result = {}
+        for key, entries in sorted(groups.items()):
+            if key == curr_key: continue
+            if first_key and key == first_key: continue
+            if len(entries) < min_days: continue
+            op = entries[0][1]   # first day open
+            cl = entries[-1][4]  # last day close
+            hi = max(e[2] for e in entries)
+            lo = min(e[3] for e in entries if e[3] > 0)
+            if op <= 0: continue
+            ret  = (cl - op) / op * 100
+            up   = (hi - op) / op * 100
+            dn   = (op - lo) / op * 100
+            sw   = (hi - lo) / lo * 100 if lo > 0 else 0
+            result[key] = (ret, up, dn, sw)
+        return result
 
-    today = datetime.date.today()
-    curr_greg_month = today.month
-    curr_fyq = _fyq(str(today))
+    # ── Build all 5 period groupings ──
+    # Each: sect -> period_key -> [(date, o, h, l, c)]
+    def _build_groups():
+        gm  = defaultdict(lambda: defaultdict(list))  # Greg monthly: (sect,(y,m))
+        gq  = defaultdict(lambda: defaultdict(list))  # Greg quarterly
+        bsm = defaultdict(lambda: defaultdict(list))  # BS monthly
+        nq  = defaultdict(lambda: defaultdict(list))  # BS quarterly
+        fyq = defaultdict(lambda: defaultdict(list))  # FYQ
 
-    NAME_MAP = {
-        'Hydro Power': 'Hydropower',
-        'Commercial Banks': 'Commercial Banks',
-        'Development Banks': 'Development Banks',
-        'Finance': 'Finance',
-        'Microfinance': 'Microfinance',
-        'Life Insurance': 'Life Insurance',
-        'Non Life Insurance': 'Non-Life Insurance',
-        'Manufacturing And Processing': 'Manufacturing',
-        'Hotels And Tourism': 'Hotel & Tourism',
-        'Investment': 'Investment',
-        'Tradings': 'Trading',
-        'Others': 'Others',
-    }
+        for sect, dmap in sect_index.items():
+            for dt_str in sorted(dmap.keys()):
+                d = datetime.date.fromisoformat(dt_str)
+                o,h,l,c = dmap[dt_str]
+                entry = (dt_str, o, h, l, c)
+                y,m = d.year, d.month
 
-    MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
-    FYQ_ORDER   = ['FYQ1','FYQ2','FYQ3','FYQ4']
+                gm[sect][(y,m)].append(entry)
+                gq[sect][(y, _greg_q(m))].append(entry)
 
-    # Compute monthly + FYQ returns per sector
-    sect_greg = defaultdict(lambda: defaultdict(list))  # sect -> month -> [ret%]
-    sect_fyq  = defaultdict(lambda: defaultdict(list))  # sect -> fyq   -> [ret%]
+                bsy, bsmo = _to_bs(d)
+                if bsy and bsmo:
+                    bsm[sect][(bsy,bsmo)].append(entry)
+                    fy = bsy if bsmo >= 4 else bsy-1  # FY starts Baisakh(4)? No - FY starts Shrawan(4 BS)
+                    # Actually FY starts Shrawan (BS month 4)
+                    fy_nq = bsy if bsmo >= 4 else bsy-1
+                    nq[sect][(fy_nq, _nq_from_bs(bsmo))].append(entry)
+                    fy_fyq = bsy if bsmo >= 4 else bsy-1
+                    fyq[sect][(fy_fyq, _fyq_from_bs(bsmo))].append(entry)
 
-    for sect, idx_map in sect_index.items():
-        display = NAME_MAP.get(sect, sect)
-        dates_sorted = sorted(idx_map.keys())
-        if len(dates_sorted) < 20:
-            continue
+        return gm, gq, bsm, nq, fyq
 
-        # Monthly returns
-        by_ym = defaultdict(list)
-        for dt in dates_sorted:
-            y, m = int(dt[:4]), int(dt[5:7])
-            by_ym[(y, m)].append(idx_map[dt])
+    with console.status('[cyan]Computing sector seasonality...[/cyan]'):
+        gm_g, gq_g, bsm_g, nq_g, fyq_g = _build_groups()
 
-        curr_ym = (today.year, today.month)
-        for (y, m), prices in by_ym.items():
-            if (y, m) == curr_ym: continue  # skip current incomplete month
-            if len(prices) < 10: continue
-            ret = (prices[-1] - prices[0]) / prices[0] * 100
-            sect_greg[display][m].append(ret)
+    # Current keys to exclude
+    curr_gm_key  = (today.year, today.month)
+    curr_gq_key  = (today.year, curr_gq)
+    bs_yr = bs_today[0] or today.year
+    curr_bsm_key = (bs_yr, curr_bsm)
+    curr_nq_key  = (bs_yr if curr_bsm >= 4 else bs_yr-1, curr_nq)
+    curr_fyq_key = (bs_yr if curr_bsm >= 4 else bs_yr-1, curr_fyq)
 
-        # FYQ returns
-        by_fyq_key = defaultdict(list)
-        for dt in dates_sorted:
-            y, m = int(dt[:4]), int(dt[5:7])
-            fy = y if m >= 7 else y - 1  # Nepal FY starts mid-July
-            q  = _fyq(dt)
-            by_fyq_key[(fy, q)].append(idx_map[dt])
+    # ── Helper: aggregate across years by period label ──
+    def _agg(groups_sect, label_fn, curr_key, min_days=10):
+        """label_fn(key) -> label string. Returns label -> (avg_ret, avg_up, avg_dn, avg_sw, n, best, worst)"""
+        by_label = defaultdict(list)
+        for sect_groups in [groups_sect]:
+            all_keys = sorted(sect_groups.keys())
+            first_key = all_keys[0] if all_keys else None
+            for key, entries in sect_groups.items():
+                if key == curr_key: continue
+                if key == first_key: continue
+                if len(entries) < min_days: continue
+                op = entries[0][1]
+                cl = entries[-1][4]
+                hi = max(e[2] for e in entries)
+                lo = min(e[3] for e in entries if e[3] > 0)
+                if op <= 0: continue
+                ret = (cl-op)/op*100
+                up  = (hi-op)/op*100
+                dn  = (op-lo)/op*100
+                sw  = (hi-lo)/lo*100 if lo>0 else 0
+                lbl = label_fn(key)
+                by_label[lbl].append((ret, up, dn, sw))
+        result = {}
+        for lbl, vals in by_label.items():
+            rets = [v[0] for v in vals]
+            ups  = [v[1] for v in vals]
+            dns  = [v[2] for v in vals]
+            sws  = [v[3] for v in vals]
+            n = len(rets)
+            result[lbl] = (
+                sum(rets)/n, sum(ups)/n, sum(dns)/n, sum(sws)/n,
+                n, max(rets), min(rets)
+            )
+        return result
 
-        curr_fy = today.year if today.month >= 7 else today.year - 1
-        curr_fk = (curr_fy, curr_fyq)
-        all_keys = sorted(by_fyq_key.keys())
-        first_fk = all_keys[0] if all_keys else None
+    # ── Display helper ──
+    def _fmt(v, curr=False):
+        if v is None: return '[dim]N/A[/dim]'
+        sig, col = _sig(v)
+        mk = '*' if curr else ''
+        return f'[{col}]{v:+.1f}%{mk}[/{col}]'
 
-        for fk, prices in by_fyq_key.items():
-            if fk == curr_fk: continue
-            if fk == first_fk: continue
-            if len(prices) < 15: continue
-            ret = (prices[-1] - prices[0]) / prices[0] * 100
-            sect_fyq[display][fk[1]].append(ret)
+    def _swing_str(up, dn):
+        return f'[green]+{up:.1f}%[/green]/[red]-{dn:.1f}%[/red]'
 
-    if not sect_greg:
-        console.print('[red]Not enough data to compute sector seasonality.[/red]')
-        return
-
-    # ── Monthly Table ──
-    console.rule('[bold cyan]Monthly Seasonality by Sector[/bold cyan]', style='cyan')
+    # ══════════════════════════════════════════
+    # TABLE 1: Greg Monthly
+    # ══════════════════════════════════════════
+    console.rule('[bold cyan]1. Greg Monthly Seasonality[/bold cyan]', style='cyan')
     console.print()
+    t1 = Table(show_header=True, header_style='bold cyan', box=box.SIMPLE_HEAVY,
+               border_style='cyan', padding=(0,1))
+    t1.add_column('Sector', width=18, no_wrap=True)
+    for i,mn in enumerate(MONTH_NAMES):
+        hdr = f'[bold]{mn}*[/bold]' if (i+1)==curr_gm else mn
+        t1.add_column(hdr, justify='right', width=6)
+    t1.add_column('Best', width=4)
+    t1.add_column('Worst', width=4)
 
-    def _sig(avg):
-        if avg >=  5: return 'STR.BUY', 'green'
-        if avg >=  2: return 'BUY',     'green'
-        if avg >= -1: return 'NTRL',    'yellow'
-        if avg >= -3: return 'AVOID',   'red'
-        return 'STR.AVD', 'red'
-
-    mtable = Table(show_header=True, header_style='bold cyan', box=box.SIMPLE_HEAVY,
-                   border_style='cyan', padding=(0,1))
-    mtable.add_column('Sector', width=20, no_wrap=True)
-    for i, mn in enumerate(MONTH_NAMES):
-        marker = f'[bold]{mn}*[/bold]' if (i+1) == curr_greg_month else mn
-        mtable.add_column(marker, justify='right', width=6)
-    mtable.add_column('Best', width=5)
-    mtable.add_column('Worst', width=5)
-
-    for sect in sorted(sect_greg.keys()):
-        mdata = sect_greg[sect]
-        avgs  = {}
-        for m in range(1, 13):
-            rets = mdata.get(m, [])
-            avgs[m] = sum(rets)/len(rets) if len(rets) >= 2 else None
-
+    for sect in sorted(gm_g.keys()):
+        agg = _agg(gm_g[sect], lambda k: MONTH_NAMES[k[1]-1], curr_gm_key)
         cells = []
-        for m in range(1, 13):
-            v = avgs[m]
-            if v is None:
-                cells.append('[dim]N/A[/dim]')
-            else:
-                sig, col = _sig(v)
-                mk = '*' if m == curr_greg_month else ''
-                cells.append(f'[{col}]{v:+.1f}%[/{col}]')
-
-        valid = {m: v for m, v in avgs.items() if v is not None}
-        if valid:
-            best_m  = max(valid, key=valid.get)
-            worst_m = min(valid, key=valid.get)
-            best_s  = MONTH_NAMES[best_m-1]
-            worst_s = MONTH_NAMES[worst_m-1]
-        else:
-            best_s = worst_s = 'N/A'
-
-        mtable.add_row(sect, *cells,
-                       f'[green]{best_s}[/green]',
-                       f'[red]{worst_s}[/red]')
-
-    console.print(mtable)
+        for i,mn in enumerate(MONTH_NAMES):
+            v = agg.get(mn)
+            cells.append(_fmt(v[0] if v else None, curr=(i+1)==curr_gm))
+        valid = {mn: agg[mn][0] for mn in agg}
+        bm = max(valid, key=valid.get) if valid else 'N/A'
+        wm = min(valid, key=valid.get) if valid else 'N/A'
+        t1.add_row(sect, *cells, f'[green]{bm}[/green]', f'[red]{wm}[/red]')
+    console.print(t1)
     console.print()
 
-    # ── FYQ Table ──
-    console.rule('[bold cyan]FY Quarter Seasonality by Sector[/bold cyan]', style='cyan')
+    # ══════════════════════════════════════════
+    # TABLE 2: Greg Quarterly
+    # ══════════════════════════════════════════
+    console.rule('[bold cyan]2. Greg Quarterly (Q1=Jan-Mar, Q2=Apr-Jun, Q3=Jul-Sep, Q4=Oct-Dec)[/bold cyan]', style='cyan')
+    console.print()
+    t2 = Table(show_header=True, header_style='bold cyan', box=box.SIMPLE_HEAVY,
+               border_style='cyan', padding=(0,1))
+    t2.add_column('Sector', width=18, no_wrap=True)
+    for gq in GQ_ORDER:
+        hdr = f'[bold]{gq}({GQ_LABEL[gq]})*[/bold]' if gq==curr_gq else f'{gq}({GQ_LABEL[gq]})'
+        t2.add_column(hdr, justify='right', width=14)
+    t2.add_column('Swing Up/Dn', width=14)
+    t2.add_column('Best', width=4)
+    t2.add_column('Worst', width=4)
+
+    for sect in sorted(gq_g.keys()):
+        agg = _agg(gq_g[sect], lambda k: k[1], curr_gq_key)
+        cells = []
+        for gq in GQ_ORDER:
+            v = agg.get(gq)
+            cells.append(_fmt(v[0] if v else None, curr=(gq==curr_gq)))
+        curr_v = agg.get(curr_gq)
+        sw_str = _swing_str(curr_v[1], curr_v[2]) if curr_v else '[dim]N/A[/dim]'
+        valid = {q: agg[q][0] for q in agg}
+        bq = max(valid, key=valid.get) if valid else 'N/A'
+        wq = min(valid, key=valid.get) if valid else 'N/A'
+        t2.add_row(sect, *cells, sw_str, f'[green]{bq}[/green]', f'[red]{wq}[/red]')
+    console.print(t2)
     console.print()
 
-    qtable = Table(show_header=True, header_style='bold cyan', box=box.SIMPLE_HEAVY,
-                   border_style='cyan', padding=(0,1))
-    qtable.add_column('Sector', width=20, no_wrap=True)
+    # ══════════════════════════════════════════
+    # TABLE 3: BS Monthly
+    # ══════════════════════════════════════════
+    console.rule('[bold cyan]3. BS Monthly Seasonality (Baisakh=1)[/bold cyan]', style='cyan')
+    console.print()
+    t3 = Table(show_header=True, header_style='bold cyan', box=box.SIMPLE_HEAVY,
+               border_style='cyan', padding=(0,1))
+    t3.add_column('Sector', width=18, no_wrap=True)
+    for i in range(1,13):
+        nm = _bs_names[i][:3]
+        hdr = f'[bold]{nm}*[/bold]' if i==curr_bsm else nm
+        t3.add_column(hdr, justify='right', width=6)
+    t3.add_column('Best', width=4)
+    t3.add_column('Worst', width=4)
+
+    for sect in sorted(bsm_g.keys()):
+        agg = _agg(bsm_g[sect], lambda k: k[1], curr_bsm_key)
+        cells = []
+        for i in range(1,13):
+            v = agg.get(i)
+            cells.append(_fmt(v[0] if v else None, curr=(i==curr_bsm)))
+        valid = {i: agg[i][0] for i in agg}
+        bi = max(valid, key=valid.get) if valid else 'N/A'
+        wi = min(valid, key=valid.get) if valid else 'N/A'
+        bn = _bs_names.get(bi, str(bi)) if isinstance(bi, int) else bi
+        wn = _bs_names.get(wi, str(wi)) if isinstance(wi, int) else wi
+        t3.add_row(sect, *cells, f'[green]{bn[:3]}[/green]', f'[red]{wn[:3]}[/red]')
+    console.print(t3)
+    console.print()
+
+    # ══════════════════════════════════════════
+    # TABLE 4: BS Quarterly (NQ)
+    # ══════════════════════════════════════════
+    console.rule('[bold cyan]4. BS Quarterly (NQ1=Bai-Ash, NQ2=Shr-Ash, NQ3=Kar-Pou, NQ4=Mag-Cha)[/bold cyan]', style='cyan')
+    console.print()
+    t4 = Table(show_header=True, header_style='bold cyan', box=box.SIMPLE_HEAVY,
+               border_style='cyan', padding=(0,1))
+    t4.add_column('Sector', width=18, no_wrap=True)
+    for nq in NQ_ORDER:
+        hdr = f'[bold]{nq}({NQ_LABEL[nq]})*[/bold]' if nq==curr_nq else f'{nq}({NQ_LABEL[nq]})'
+        t4.add_column(hdr, justify='right', width=14)
+    t4.add_column('Swing Up/Dn', width=14)
+    t4.add_column('Best', width=4)
+    t4.add_column('Worst', width=4)
+
+    for sect in sorted(nq_g.keys()):
+        agg = _agg(nq_g[sect], lambda k: k[1], curr_nq_key)
+        cells = []
+        for nq in NQ_ORDER:
+            v = agg.get(nq)
+            cells.append(_fmt(v[0] if v else None, curr=(nq==curr_nq)))
+        curr_v = agg.get(curr_nq)
+        sw_str = _swing_str(curr_v[1], curr_v[2]) if curr_v else '[dim]N/A[/dim]'
+        valid = {q: agg[q][0] for q in agg}
+        bq = max(valid, key=valid.get) if valid else 'N/A'
+        wq = min(valid, key=valid.get) if valid else 'N/A'
+        t4.add_row(sect, *cells, sw_str, f'[green]{bq}[/green]', f'[red]{wq}[/red]')
+    console.print(t4)
+    console.print()
+
+    # ══════════════════════════════════════════
+    # TABLE 5: FYQ (Shrawan-based)
+    # ══════════════════════════════════════════
+    console.rule('[bold cyan]5. FYQ Seasonality (FYQ1=Shr-Ash, FYQ2=Kar-Pou, FYQ3=Mag-Cha, FYQ4=Bai-Ash)[/bold cyan]', style='cyan')
+    console.print()
+    t5 = Table(show_header=True, header_style='bold cyan', box=box.SIMPLE_HEAVY,
+               border_style='cyan', padding=(0,1))
+    t5.add_column('Sector', width=18, no_wrap=True)
     for fq in FYQ_ORDER:
-        marker = f'[bold]{fq}*[/bold]' if fq == curr_fyq else fq
-        qtable.add_column(marker, justify='right', width=10)
-    qtable.add_column('Best Q', width=7)
-    qtable.add_column('Worst Q', width=7)
+        hdr = f'[bold]{fq}({FYQ_LABEL[fq]})*[/bold]' if fq==curr_fyq else f'{fq}({FYQ_LABEL[fq]})'
+        t5.add_column(hdr, justify='right', width=14)
+    t5.add_column('Swing Up/Dn', width=14)
+    t5.add_column('Best', width=4)
+    t5.add_column('Worst', width=4)
 
-    for sect in sorted(sect_fyq.keys()):
-        qdata = sect_fyq[sect]
-        qavgs = {}
+    for sect in sorted(fyq_g.keys()):
+        agg = _agg(fyq_g[sect], lambda k: k[1], curr_fyq_key)
+        cells = []
         for fq in FYQ_ORDER:
-            rets = qdata.get(fq, [])
-            qavgs[fq] = sum(rets)/len(rets) if len(rets) >= 2 else None
-
-        qcells = []
-        for fq in FYQ_ORDER:
-            v = qavgs[fq]
-            if v is None:
-                qcells.append('[dim]N/A[/dim]')
-            else:
-                sig, col = _sig(v)
-                mk = '*' if fq == curr_fyq else ''
-                n  = len(qdata.get(fq, []))
-                qcells.append(f'[{col}]{v:+.1f}%[/{col}] [dim]({n}y)[/dim]')
-
-        valid_q = {fq: v for fq, v in qavgs.items() if v is not None}
-        if valid_q:
-            best_q  = max(valid_q, key=valid_q.get)
-            worst_q = min(valid_q, key=valid_q.get)
-        else:
-            best_q = worst_q = 'N/A'
-
-        qtable.add_row(sect, *qcells,
-                       f'[green]{best_q}[/green]',
-                       f'[red]{worst_q}[/red]')
-
-    console.print(qtable)
+            v = agg.get(fq)
+            cells.append(_fmt(v[0] if v else None, curr=(fq==curr_fyq)))
+        curr_v = agg.get(curr_fyq)
+        sw_str = _swing_str(curr_v[1], curr_v[2]) if curr_v else '[dim]N/A[/dim]'
+        valid = {q: agg[q][0] for q in agg}
+        bq = max(valid, key=valid.get) if valid else 'N/A'
+        wq = min(valid, key=valid.get) if valid else 'N/A'
+        t5.add_row(sect, *cells, sw_str, f'[green]{bq}[/green]', f'[red]{wq}[/red]')
+    console.print(t5)
     console.print()
 
-    # ── NOW summary ──
-    console.rule(f'[bold]Current Period: {MONTH_NAMES[curr_greg_month-1]} / {curr_fyq}[/bold]')
+    # ══════════════════════════════════════════
+    # NOW SUMMARY
+    # ══════════════════════════════════════════
+    console.rule(f'[bold]Current Period Summary — {MONTH_NAMES[curr_gm-1]} / {curr_gq} / {_bs_names[curr_bsm][:3]} / {curr_nq} / {curr_fyq}[/bold]')
     console.print()
-    now_rows = []
-    for sect in sorted(sect_fyq.keys()):
-        qavgs = {fq: (sum(v)/len(v) if len(v) >= 2 else None)
-                 for fq, v in sect_fyq[sect].items()}
-        v = qavgs.get(curr_fyq)
-        if v is not None:
-            sig, col = _sig(v)
-            now_rows.append((v, sect, sig, col))
-    now_rows.sort(reverse=True)
-    for v, sect, sig, col in now_rows:
-        console.print(f'  [{col}]{sig:8s}[/{col}]  {sect:<22}  [{col}]{v:+.1f}% this {curr_fyq}[/{col}]')
+    # Use FYQ as primary signal
+    fyq_now_rows = []
+    for sect in sorted(fyq_g.keys()):
+        agg = _agg(fyq_g[sect], lambda k: k[1], curr_fyq_key)
+        v = agg.get(curr_fyq)
+        if v:
+            sig, col = _sig(v[0])
+            fyq_now_rows.append((v[0], sect, sig, col, v[1], v[2]))
+    fyq_now_rows.sort(reverse=True)
+    for ret, sect, sig, col, up, dn in fyq_now_rows:
+        console.print(f'  [{col}]{sig:8s}[/{col}]  {sect:<22}  [{col}]{ret:+.1f}%[/{col}]  [dim]up avg +{up:.1f}% / dn avg -{dn:.1f}%[/dim]')
     console.print()
     console.print('  [dim]Research only. Not financial advice.[/dim]')
     console.print()
