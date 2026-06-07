@@ -6390,6 +6390,74 @@ def analyze_sector_seasonality(db_path='nepse_market_data.db'):
         _print_rank(ngq_rows)
         console.print()
 
+    # ══ RECOMMENDATION ══
+    if choice == 'e':
+        console.rule('[bold green]▶ RECOMMENDATION[/bold green]', style='green')
+        console.print()
+
+        # Best current sectors — consensus across timeframes
+        score = defaultdict(int)
+        for sect in all_sectors:
+            for stats,key in [(gm_stats,today.month),(bsm_stats,curr_bsm),(fyq_stats,curr_fyq),(gq_stats,curr_gq)]:
+                v = stats.get(sect,{}).get(key)
+                if v:
+                    sig,_ = _sig(v[0])
+                    if sig == 'S.BUY': score[sect] += 2
+                    elif sig == 'BUY': score[sect] += 1
+                    elif sig == 'AVOID': score[sect] -= 1
+                    elif sig == 'S.AVD': score[sect] -= 2
+
+        ranked = sorted(score.items(), key=lambda x: -x[1])
+        top3    = [s for s,sc in ranked if sc > 0][:3]
+        avoid3  = [s for s,sc in ranked[::-1] if sc < 0][:3]
+
+        # Best upcoming sectors
+        uscore = defaultdict(int)
+        for sect in all_sectors:
+            for stats,key in [(gm_stats,next_gm),(bsm_stats,next_bsm),(fyq_stats,next_fyq),(gq_stats,next_gq)]:
+                v = stats.get(sect,{}).get(key)
+                if v:
+                    sig,_ = _sig(v[0])
+                    if sig == 'S.BUY': uscore[sect] += 2
+                    elif sig == 'BUY': uscore[sect] += 1
+                    elif sig == 'AVOID': uscore[sect] -= 1
+                    elif sig == 'S.AVD': uscore[sect] -= 2
+
+        uranked = sorted(uscore.items(), key=lambda x: -x[1])
+        utop3   = [s for s,sc in uranked if sc > 0][:3]
+        uavoid3 = [s for s,sc in uranked[::-1] if sc < 0][:3]
+
+        curr_mn   = MONTH_NAMES[today.month-1]
+        next_mn   = MONTH_NAMES[next_gm-1]
+
+        console.print(f'  [bold]NOW ({curr_mn} / {curr_fyq} / {curr_gq}):[/bold]')
+        if top3:
+            console.print(f'  [green]Best sectors:[/green] {", ".join(top3)}')
+            console.print(f'  [dim]These sectors score positively across monthly + quarterly timeframes. Historically favourable now.[/dim]')
+        if avoid3:
+            console.print(f'  [red]Avoid:[/red] {", ".join(avoid3)}')
+            console.print(f'  [dim]These sectors score negatively across multiple timeframes. Historically weak now.[/dim]')
+        console.print()
+
+        console.print(f'  [bold]UPCOMING ({next_mn} / {next_fyq} / {next_gq}):[/bold]')
+        if utop3:
+            console.print(f'  [green]Best sectors to position for:[/green] {", ".join(utop3)}')
+            console.print(f'  [dim]Strongest seasonal setup across all upcoming timeframes. Consider accumulating before period starts.[/dim]')
+        if uavoid3:
+            console.print(f'  [red]Avoid next period:[/red] {", ".join(uavoid3)}')
+            console.print(f'  [dim]Weak seasonal setup ahead. Consider reducing exposure.[/dim]')
+        console.print()
+
+        # Conflict check — sectors good now but bad upcoming
+        good_now_bad_next = [s for s in top3 if s in uavoid3]
+        bad_now_good_next = [s for s in avoid3 if s in utop3]
+        if good_now_bad_next:
+            console.print(f'  [yellow]⚠ Rotation alert:[/yellow] {", ".join(good_now_bad_next)} — good NOW but weak UPCOMING. Consider taking profits.')
+            console.print()
+        if bad_now_good_next:
+            console.print(f'  [cyan]⚡ Early entry alert:[/cyan] {", ".join(bad_now_good_next)} — weak NOW but strong UPCOMING. Accumulation opportunity.')
+            console.print()
+
     console.print('  [dim]All returns based on complete periods only. Research only. Not financial advice.[/dim]')
     console.print()
 
