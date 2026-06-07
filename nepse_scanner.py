@@ -3732,6 +3732,8 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
         console.print(f'  Verdict  : {_sv}')
         console.print(f'  [dim]{_greg_agree}[/dim]')
         console.print(f'  [dim]{_bs_agree}[/dim]')
+        _fyq_note = f'  [dim]FYQ: NEPSE {_fyq_nepse_avg:+.1f}% / {symbol} {_fyq_stock_avg:+.1f}% ({_fyq_now})[/dim]'
+        console.print(_fyq_note)
         console.print()
 
         _seas_col = 'green' if _ss>=70 else 'yellow' if _ss>=40 else 'red'
@@ -3949,7 +3951,15 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
     broker_s = next((s for n,s,v,c in section_verdicts if n == 'Broker Activity'), 50)
     tech_s = next((s for n,s,v,c in section_verdicts if n == 'Technical'), 50)
     fund_s = next((s for n,s,v,c in section_verdicts if n == 'Fundamentals'), 50)
-    if final_pct >= 70 or (broker_s >= 80 and tech_s >= 60):
+    if broker_s <= 40:
+        # Broker distributing — never show BUY regardless of other scores
+        if final_pct >= 55 and tech_s >= 70:
+            final_verdict = '[bold yellow]MOMENTUM ONLY — Price rising but institutions distributing. High risk.[/bold yellow]'
+        elif final_pct >= 45:
+            final_verdict = '[bold yellow]CAUTION — Institutions distributing. Avoid new entry.[/bold yellow]'
+        else:
+            final_verdict = '[bold red]AVOID / SELL — Distribution confirmed. Exit or avoid.[/bold red]'
+    elif final_pct >= 70 or (broker_s >= 80 and tech_s >= 60):
         final_verdict = '[bold green]STRONG BUY — Strong accumulation and momentum. Good entry.[/bold green]'
     elif final_pct >= 55 or (broker_s >= 70 and final_pct >= 45):
         final_verdict = '[bold green]BUY / ACCUMULATE — Institutional buying active. Consider entering.[/bold green]'
