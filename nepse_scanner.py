@@ -5735,6 +5735,186 @@ def analyze_market_phase(db_path='nepse_market_data.db'):
             console.print(f'  Volume: {vol_ratio}% of avg — needs rally on 110%+ volume to confirm reversal')
         console.print()
 
+    # === SECTION 6: SECTOR PHASE BREAKDOWN ===
+    import datetime
+    from collections import defaultdict as _dd
+
+    console.rule('[bold cyan]Sector Phase Breakdown[/bold cyan]', style='cyan')
+    console.print()
+
+    NAME_MAP2 = {
+        'Hydro Power':'Hydropower','Commercial Banks':'Commercial Banks',
+        'Development Banks':'Development Banks','Finance':'Finance',
+        'Microfinance':'Microfinance','Life Insurance':'Life Insurance',
+        'Non Life Insurance':'Non-Life Insurance',
+        'Manufacturing And Processing':'Manufacturing',
+        'Hotels And Tourism':'Hotel & Tourism',
+        'Investment':'Investment','Tradings':'Trading','Others':'Others',
+    }
+
+    conn2 = sqlite3.connect(db_path)
+    sect_rows = conn2.execute(
+        "SELECT sp.symbol, c.sector, sp.date, sp.close "
+        "FROM stock_prices sp JOIN companies c ON sp.symbol=c.symbol "
+        "WHERE sp.close>0 AND sp.date>=date(?,'-60 days') "
+        "ORDER BY sp.symbol, sp.date",
+        (dates[0],)
+    ).fetchall()
+
+    sym_prices2 = _dd(list)
+    sym_sector2 = {}
+    for sym,sect,dt,cl in sect_rows:
+        sym_sector2[sym] = NAME_MAP2.get(sect, sect)
+        sym_prices2[sym].append((dt,cl))
+
+    sect_data2 = _dd(lambda: {'above20':0,'total':0,'ret5d':[],'adv':0,'dec':0})
+    for sym,prices in sym_prices2.items():
+        sect = sym_sector2[sym]
+        if len(prices) < 20: continue
+        closes = [p[1] for p in prices]
+        ma20s = sum(closes[-20:])/20
+        if closes[-1] > ma20s: sect_data2[sect]['above20'] += 1
+        sect_data2[sect]['total'] += 1
+        if len(closes) >= 6:
+            ret = (closes[-1]-closes[-6])/closes[-6]*100
+            sect_data2[sect]['ret5d'].append(ret)
+        if len(closes) >= 2:
+            if closes[-1] > closes[-2]: sect_data2[sect]['adv'] += 1
+            elif closes[-1] < closes[-2]: sect_data2[sect]['dec'] += 1
+
+    sect_broker2 = _dd(int)
+    for d in dates[:5]:
+        brows = conn2.execute(
+            "SELECT ba.net_val, c.sector FROM broker_activity ba "
+            "JOIN companies c ON ba.symbol=c.symbol WHERE ba.date=?", (d,)
+        ).fetchall()
+        for val,sect in brows:
+            sect_broker2[NAME_MAP2.get(sect,sect)] += val if val else 0
+    conn2.close()
+
+    sect_phases2 = []
+    for sect in sorted(sect_data2.keys()):
+        sd = sect_data2[sect]
+        if sd['total'] < 3: continue
+        pct_ab2  = sd['above20']/sd['total']*100 if sd['total'] else 0
+        avg_ret2 = sum(sd['ret5d'])/len(sd['ret5d']) if sd['ret5d'] else 0
+        adv_r2   = sd['adv']/(sd['adv']+sd['dec'])*100 if (sd['adv']+sd['dec'])>0 else 50
+        bflow2   = sect_broker2.get(sect, 0)
+        sc2 = 0
+        if pct_ab2  >= 55: sc2 += 2
+        elif pct_ab2 >= 45: sc2 += 1
+        if avg_ret2 >= 2:  sc2 += 2
+        elif avg_ret2 >= 0: sc2 += 1
+        if adv_r2   >= 55: sc2 += 2
+        elif adv_r2 >= 45: sc2 += 1
+        if bflow2 > 0:     sc2 += 2
+        elif bflow2 == 0:  sc2 += 1
+        if sc2 >= 7:   sph='MARKUP';   sco='green'
+        elif sc2 >= 5: sph='ACCUM';    sco='cyan'
+        elif sc2 >= 3: sph='TRANSIT';  sco='yellow'
+        elif sc2 >= 1: sph='DISTRIB';  sco='red'
+        else:          sph='MARKDOWN'; sco='red'
+        sect_phases2.append((sc2,sect,sph,sco,pct_ab2,avg_ret2,bflow2))
+
+    sect_phases2.sort(reverse=True)
+    console.print(f'  {"Sector":<22} {"Phase":<10} {"%>MA20":>7} {"5d Ret":>7} {"Broker":>9}')
+    console.print(f'  {"-"*22} {"-"*10} {"-"*7} {"-"*7} {"-"*9}')
+    for sc2,sect,sph,sco,pct_ab2,avg_ret2,bflow2 in sect_phases2:
+        bf_s = f'+{bflow2/1e6:.1f}M' if bflow2>0 else f'{bflow2/1e6:.1f}M' if bflow2<0 else 'flat'
+        bf_c = 'green' if bflow2>0 else 'red' if bflow2<0 else 'dim'
+        console.print(
+            f'  [{sco}]{sect:<22}[/{sco}] [{sco}]{sph:<10}[/{sco}] '
+            f'[{"green" if pct_ab2>=55 else "red"}]{pct_ab2:>6.0f}%[/{"green" if pct_ab2>=55 else "red"}] '
+            f'[{"green" if avg_ret2>=0 else "red"}]{avg_ret2:>+6.1f}%[/{"green" if avg_ret2>=0 else "red"}] '
+            f'[{bf_c}]{bf_s:>9}[/{bf_c}]', highlight=False)
+    console.print()
+
+    # === SECTION 7: HISTORICAL PHASE COMPARISON ===
+    console.rule('[bold cyan]Historical Phase Comparison[/bold cyan]', style='cyan')
+    console.print()
+    hist_nepse2 = sqlite3.connect(db_path).execute(
+        "SELECT date,close FROM stock_prices WHERE symbol='NEPSE' AND close>0 ORDER BY date"
+    ).fetchall()
+    if len(hist_nepse2) >= 60:
+        hd = [r[0] for r in hist_nepse2]
+        hc = [r[1] for r in hist_nepse2]
+        similar = []
+        for i in range(50, len(hc)-20):
+            ma20h = sum(hc[i-20:i])/20
+            ma50h = sum(hc[i-50:i])/50
+            approx = (25 if hc[i]>ma20h else 0) + (25 if ma20h>ma50h else 0)
+            if abs(approx-total) <= 15:
+                fwd = (hc[i+20]-hc[i])/hc[i]*100
+                similar.append((hd[i], hc[i], approx, fwd))
+        if similar:
+            fwd_r = [p[3] for p in similar]
+            avg_f = sum(fwd_r)/len(fwd_r)
+            pos_c = sum(1 for r in fwd_r if r>0)
+            console.print(f'  Found {len(similar)} similar conditions  |  Avg 20d forward: [{"green" if avg_f>=0 else "red"}]{avg_f:+.1f}%[/{"green" if avg_f>=0 else "red"}]  |  Positive: {pos_c}/{len(similar)} ({pos_c/len(similar)*100:.0f}%)', highlight=False)
+            console.print()
+            console.print('  [dim]Recent similar periods:[/dim]')
+            for dt,px,sc3,fwd in sorted(similar,key=lambda x:x[0],reverse=True)[:5]:
+                col = 'green' if fwd>=0 else 'red'
+                console.print(f'  [dim]{dt}[/dim]  NEPSE:{px:,.0f}  Score~{sc3}  +20d: [{col}]{fwd:+.1f}%[/{col}]', highlight=False)
+        else:
+            console.print('  [dim]Not enough similar history found.[/dim]')
+    console.print()
+
+    # === SECTION 8: COMBINED PHASE + SEASONAL SIGNAL ===
+    console.rule('[bold yellow]Combined Signal — Phase + Seasonality[/bold yellow]', style='yellow')
+    console.print()
+    import datetime as _dt2
+    today2    = _dt2.date.today()
+    curr_m2   = today2.month
+    next_m2   = today2.month % 12 + 1
+    MN2       = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+    nep_hist2 = sqlite3.connect(db_path).execute(
+        "SELECT date,close FROM stock_prices WHERE symbol='NEPSE' AND close>0 ORDER BY date"
+    ).fetchall()
+    by_m2 = _dd(list)
+    for j in range(len(nep_hist2)):
+        r = nep_hist2[j]
+        d2 = _dt2.date.fromisoformat(r[0])
+        if (d2.year,d2.month)==(today2.year,today2.month): continue
+        month_rows2 = [x for x in nep_hist2 if x[0][:7]==f'{d2.year}-{d2.month:02d}']
+        if len(month_rows2)>=10:
+            ret2=(month_rows2[-1][1]-month_rows2[0][1])/month_rows2[0][1]*100
+            if ret2 not in by_m2[d2.month]: by_m2[d2.month].append(ret2)
+
+    def _msig2(m):
+        rets=by_m2.get(m,[])
+        if not rets: return 'UNKN','dim',0,0
+        avg=sum(rets)/len(rets); wins=sum(1 for r in rets if r>0)
+        if avg>=5:  return 'S.BUY','green',avg,wins
+        if avg>=2:  return 'BUY','green',avg,wins
+        if avg>=-1: return 'NTRL','yellow',avg,wins
+        if avg>=-3: return 'AVOID','red',avg,wins
+        return 'S.AVD','red',avg,wins
+
+    cs,cc,ca,cw = _msig2(curr_m2)
+    ns,nc,na,nw = _msig2(next_m2)
+    nm = len(by_m2.get(curr_m2,[]))
+    nnm= len(by_m2.get(next_m2,[]))
+    console.print(f'  Phase:          [{phase_col}]{phase} ({total}/100)[/{phase_col}]')
+    console.print(f'  This month ({MN2[curr_m2-1]}):  [{cc}]{cs} ({ca:+.1f}% avg, {cw}/{nm} up)[/{cc}]')
+    console.print(f'  Next month ({MN2[next_m2-1]}):  [{nc}]{ns} ({na:+.1f}% avg, {nw}/{nnm} up)[/{nc}]')
+    console.print()
+    pb = phase in ('MARKUP','ACCUMULATION')
+    pba= phase in ('MARKDOWN','DISTRIBUTION')
+    sb = cs in ('S.BUY','BUY'); sba= cs in ('S.AVD','AVOID')
+    nb = ns in ('S.BUY','BUY'); nba= ns in ('S.AVD','AVOID')
+    console.print('  [bold]Combined Action:[/bold]')
+    if pb and sb:    console.print('  [green]STRONG BUY — Phase bullish + seasonal bullish. Full size.[/green]')
+    elif pb and sba: console.print('  [yellow]CAUTION — Phase bullish but seasonal weak. Half size, tight stops.[/yellow]')
+    elif pba and sba:console.print('  [red]STRONG AVOID — Phase bearish + seasonal bearish. Cash only.[/red]')
+    elif pba and sb: console.print('  [yellow]CONFLICT — Phase bearish but seasonal strong. Wait for phase to improve.[/yellow]')
+    elif sb:         console.print('  [cyan]SELECTIVE — Transition + seasonal support. Best setups only.[/cyan]')
+    else:            console.print('  [yellow]MIXED — No clear edge. Reduce exposure.[/yellow]')
+    console.print()
+    if nb and pba:   console.print(f'  [cyan]PREPARE — {MN2[next_m2-1]} seasonal {ns}. Watch for entries as phase improves.[/cyan]')
+    elif nba and pb: console.print(f'  [yellow]WARNING — {MN2[next_m2-1]} seasonal {ns}. Consider taking profits soon.[/yellow]')
+    console.print()
+
 
 def analyze_best_rr(db_path='nepse_market_data.db'):
     """Option 36 - Best R/R Scanner: finds stocks with good R/R at current price"""
