@@ -5820,7 +5820,7 @@ def analyze_market_phase(db_path='nepse_market_data.db'):
     console.print(f'  {"Sector":<22} {"Phase":<10} {"%>MA20":>7} {"5d Ret":>7} {"Broker":>9}')
     console.print(f'  {"-"*22} {"-"*10} {"-"*7} {"-"*7} {"-"*9}')
     for sc2,sect,sph,sco,pct_ab2,avg_ret2,bflow2 in sect_phases2:
-        bf_s = f'+{bflow2/1e6:.1f}M' if bflow2>0 else f'{bflow2/1e6:.1f}M' if bflow2<0 else 'flat'
+        bf_s = f'+{bflow2/1e3:.0f}K' if bflow2>1000 else f'{bflow2/1e3:.0f}K' if bflow2<-1000 else 'flat'
         bf_c = 'green' if bflow2>0 else 'red' if bflow2<0 else 'dim'
         console.print(
             f'  [{sco}]{sect:<22}[/{sco}] [{sco}]{sph:<10}[/{sco}] '
