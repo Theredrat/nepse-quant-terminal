@@ -1,252 +1,211 @@
-﻿"""
-Signal Performance Tracker for NEPSE Scanner
-Logs signals and checks if they hit +5% in 3/5/10 days
 """
-import json, os, sys
-from datetime import datetime, timedelta
-import requests
+Signal Performance Tracker for NEPSE Scanner
+Uses SQLite DB (stock_prices table) for outcome checking — no live API needed.
+"""
+import sys, os, sqlite3
+from datetime import datetime, date, timedelta
 from rich.console import Console
 from rich.table import Table
 
-console = Console()
-LOG_FILE = "signal_log.json"
+DB_PATH = 'nepse_market_data.db'
 WIN_TARGET = 5.0  # +5% = win
+CONSOLE_WIDTH = 120
 
-def load_log():
-    if os.path.exists(LOG_FILE):
-        with open(LOG_FILE, encoding="utf-8") as f:
-            return json.load(f)
-    return []
+def get_conn():
+    return sqlite3.connect(DB_PATH)
 
-def save_log(data):
-    with open(LOG_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+def ensure_table():
+    conn = get_conn()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS signal_log (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            date     TEXT NOT NULL,
+            symbol   TEXT NOT NULL,
+            signal   TEXT NOT NULL,
+            source   TEXT DEFAULT '',
+            entry_price REAL NOT NULL,
+            score    REAL DEFAULT 0,
+            reason   TEXT DEFAULT '',
+            result_3d  REAL,
+            result_7d  REAL,
+            result_14d REAL,
+            UNIQUE(date, symbol, signal)
+        )
+    """)
+    conn.commit()
+    conn.close()
 
-def get_current_price(symbol):
-    try:
-        url = f'https://nepalstock.com.np/api/nots/security/{symbol}'
-        r = requests.get(url, timeout=10)
-        data = r.json()
-        price = float(data.get('securityDailyTradeDto', {}).get('closingPrice', 0))
-        if price > 0:
-            return price
-    except:
-        pass
-    try:
-        import sqlite3
-        conn = sqlite3.connect('nepse_market_data')
-        for table in ['daily_prices', 'ohlcv', 'prices']:
-            try:
-                row = conn.execute(f'SELECT close FROM {table} WHERE symbol=? ORDER BY date DESC LIMIT 1', (symbol,)).fetchone()
-                if row and row[0]:
-                    conn.close()
-                    return float(row[0])
-            except:
-                continue
-        conn.close()
-    except:
-        pass
-    return None
-
-def get_entry_price(symbol, live_prices):
-    price = live_prices.get(symbol, 0)
-    if price > 0:
-        return price
-    return get_current_price(symbol) or 0
-
-
-def log_signals_raw(signals: list):
-    """Log signals from TUI - accepts list of dicts"""
+def log_signals_raw(signals: list, source: str = ''):
+    """Log signals. signals = list of dicts with keys: symbol, signal, ltp/entry_price, score, reason"""
+    ensure_table()
     if not signals:
         return
-    log = load_log()
-    if isinstance(log, list):
-        log = {}
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now().strftime('%Y-%m-%d')
+    conn = get_conn()
     new_count = 0
     for s in signals:
-        sym = str(s.get("symbol") or "")
-        sig = str(s.get("signal") or "")
-        ltp = float(s.get("ltp") or 0)
-        reason = str(s.get("reason") or "")
-        score = float(s.get("score") or 0)
-        if not sym:
+        sym   = str(s.get('symbol') or '').strip()
+        sig   = str(s.get('signal') or '').strip()
+        price = float(s.get('ltp') or s.get('entry_price') or 0)
+        score = float(s.get('score') or 0)
+        reason = str(s.get('reason') or '')
+        if not sym or price <= 0:
             continue
-        key = f"{today}_{sym}_{sig}"
-        if key in log:
-            continue
-        log[key] = {
-            "symbol": sym,
-            "signal": sig,
-            "entry_price": ltp,
-            "score": score,
-            "reason": reason,
-            "date": today,
-            "result": None,
-            "exit_price": None,
-            "pct_change": None,
-        }
-        new_count += 1
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO signal_log (date,symbol,signal,source,entry_price,score,reason) VALUES (?,?,?,?,?,?,?)",
+                (today, sym, sig, source, price, score, reason)
+            )
+            if conn.total_changes > 0:
+                new_count += 1
+        except Exception as e:
+            pass
+    conn.commit()
+    conn.close()
     if new_count:
-        save_log(log)
         print(f"[signal_tracker] Logged {new_count} new signals.")
 
-
-def log_signals(candidates):
-    """Call this after run_signals() to record signals"""
-    if candidates is None or candidates.empty:
+def log_signals(candidates, source: str = ''):
+    """Compatibility wrapper for DataFrame-based callers"""
+    if candidates is None:
         return
-    log = load_log()
-    today = datetime.now().strftime("%Y-%m-%d")
-    new_count = 0
-    for _, row in candidates.iterrows():
-        sym = row.get("symbol", "")
-        sig = row.get("signal", "")
-        ltp = float(row.get("ltp", 0))
-        if not sym:
-            continue
-        # Avoid duplicate logging same symbol+signal on same day
-        already = any(
-            e["symbol"] == sym and e["signal"] == sig and e["date"] == today
-            for e in log
-        )
-        if not already:
-            log.append({
-                "symbol": sym,
-                "signal": sig,
-                "date": today,
-                "entry_price": ltp,
-                "score": float(row.get("score", 0)),
-                "reason": row.get("reason", ""),
-                "result_3d": None,
-                "result_5d": None,
-                "result_10d": None,
-                "checked_3d": False,
-                "checked_5d": False,
-                "checked_10d": False,
+    try:
+        import pandas as pd
+        if isinstance(candidates, pd.DataFrame) and candidates.empty:
+            return
+    except ImportError:
+        pass
+    rows = []
+    if hasattr(candidates, 'iterrows'):
+        for _, row in candidates.iterrows():
+            rows.append({
+                'symbol': row.get('symbol', ''),
+                'signal': row.get('signal', ''),
+                'ltp': row.get('ltp', 0),
+                'score': row.get('score', 0),
+                'reason': row.get('reason', ''),
             })
-            new_count += 1
-    save_log(log)
-    if new_count:
-        console.print(f"  [dim]📝 Logged {new_count} new signals to signal_log.json[/dim]")
+    elif isinstance(candidates, list):
+        rows = candidates
+    log_signals_raw(rows, source=source)
+
+def _get_price_after(conn, symbol, from_date_str, trading_days):
+    """Get close price N trading days after from_date using stock_prices table."""
+    rows = conn.execute(
+        "SELECT close FROM stock_prices WHERE symbol=? AND date>? ORDER BY date ASC LIMIT ?",
+        (symbol, from_date_str, trading_days + 5)
+    ).fetchall()
+    if len(rows) >= trading_days:
+        return rows[trading_days - 1][0]
+    if rows:
+        return rows[-1][0]
+    return None
 
 def update_results():
-    """Check pending signals and update results"""
-    log = load_log()
-    today = datetime.now()
+    """Fill in result_3d/7d/14d for any entries that now have enough price history."""
+    ensure_table()
+    conn = get_conn()
+    pending = conn.execute(
+        "SELECT id, date, symbol, entry_price FROM signal_log WHERE result_3d IS NULL OR result_7d IS NULL OR result_14d IS NULL"
+    ).fetchall()
     updated = 0
-    for entry in log.values():
-        entry_date = datetime.strptime(entry["date"], "%Y-%m-%d")
-        days_passed = (today - entry_date).days
-        sym = entry["symbol"]
-        price = None
-
-        for days, key_checked, key_result in [
-            (3, "checked_3d", "result_3d"),
-            (5, "checked_5d", "result_5d"),
-            (10, "checked_10d", "result_10d"),
-        ]:
-            if days_passed >= days and not entry[key_checked]:
-                if price is None:
-                    price = get_current_price(sym)
-                if price and entry["entry_price"] > 0:
-                    pct = ((price - entry["entry_price"]) / entry["entry_price"]) * 100
-                    entry[key_result] = round(pct, 2)
-                    entry[key_checked] = True
-                    updated += 1
-
-    if updated:
-        save_log(log)
-        console.print(f"  [green]✅ Updated {updated} signal results[/green]")
-    return updated
+    for row_id, sig_date, symbol, entry_price in pending:
+        if not entry_price or entry_price <= 0:
+            continue
+        updates = {}
+        for col, days in [('result_3d', 3), ('result_7d', 7), ('result_14d', 14)]:
+            price = _get_price_after(conn, symbol, sig_date, days)
+            if price and price > 0:
+                updates[col] = round((price - entry_price) / entry_price * 100, 2)
+        if updates:
+            set_clause = ', '.join(f"{k}=?" for k in updates)
+            conn.execute(f"UPDATE signal_log SET {set_clause} WHERE id=?", list(updates.values()) + [row_id])
+            updated += 1
+    conn.commit()
+    conn.close()
+    print(f"[signal_tracker] Updated {updated} entries.")
 
 def show_report():
-    """Display signal accuracy report"""
+    ensure_table()
     update_results()
-    log = load_log()
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT date, symbol, signal, source, entry_price, score, reason, result_3d, result_7d, result_14d FROM signal_log ORDER BY date DESC, id DESC"
+    ).fetchall()
+    conn.close()
 
-    if not log:
-        console.print("[yellow]No signals logged yet. Run option 1, 4, or 5 first.[/yellow]")
-        return
-
+    console = Console(width=CONSOLE_WIDTH)
     console.print()
     console.print("[bold cyan]╔══════════════════════════════════════════════════╗[/bold cyan]")
     console.print("[bold cyan]║       SIGNAL PERFORMANCE TRACKER                ║[/bold cyan]")
     console.print("[bold cyan]╚══════════════════════════════════════════════════╝[/bold cyan]")
-    console.print(f"  Win target: +{WIN_TARGET}%  |  Total signals logged: {len(log)}")
+    console.print(f"  Win target: +{WIN_TARGET}%  |  Total signals logged: {len(rows)}")
     console.print()
 
-    # Group by signal type
+    if not rows:
+        console.print("  [yellow]No signals logged yet. Signals are auto-logged when you run options 4, 5, 7b, 17f.[/yellow]")
+        console.print()
+        return
+
+    # Build stats per signal type
     from collections import defaultdict
-    stats = defaultdict(lambda: {"3d": [], "5d": [], "10d": []})
-    for e in log.values():
-        sig = e["signal"]
-        if e.get("result_3d") is not None:
-            stats[sig]["3d"].append(e.get("result_3d"))
-        if e.get("result_5d") is not None:
-            stats[sig]["5d"].append(e.get("result_5d"))
-        if e.get("result_10d") is not None:
-            stats[sig]["10d"].append(e.get("result_10d"))
+    stats = defaultdict(lambda: {'3d': [], '7d': [], '14d': []})
+    for r in rows:
+        sig = r[2]
+        if r[7] is not None: stats[sig]['3d'].append(r[7])
+        if r[8] is not None: stats[sig]['7d'].append(r[8])
+        if r[9] is not None: stats[sig]['14d'].append(r[9])
 
-    table = Table(show_header=True, header_style="bold white")
-    table.add_column("Signal Type", style="cyan", width=22)
-    table.add_column("3d Acc", justify="center", width=10)
-    table.add_column("5d Acc", justify="center", width=10)
-    table.add_column("10d Acc", justify="center", width=10)
-    table.add_column("Trades", justify="center", width=8)
+    def acc(results):
+        if not results: return '[dim]--[/dim]'
+        wins = sum(1 for x in results if x >= WIN_TARGET)
+        pct = wins / len(results) * 100
+        col = 'green' if pct >= 60 else 'yellow' if pct >= 40 else 'red'
+        return f'[{col}]{pct:.0f}%[/{col}] ({len(results)})'
 
-    all_results_5d = []
-    for sig, data in sorted(stats.items()):
-        def acc(results):
-            if not results: return "[dim]--[/dim]"
-            wins = sum(1 for r in results if r >= WIN_TARGET)
-            pct = (wins / len(results)) * 100
-            color = "green" if pct >= 60 else "yellow" if pct >= 40 else "red"
-            return f"[{color}]{pct:.0f}%[/{color}]"
+    table = Table(show_header=True, header_style='bold white', box=None, padding=(0,1))
+    table.add_column('Signal Type',  style='cyan', width=24, no_wrap=True)
+    table.add_column('3d Acc',  justify='center', width=12)
+    table.add_column('7d Acc',  justify='center', width=12)
+    table.add_column('14d Acc', justify='center', width=12)
 
-        trades = max(len(data["3d"]), len(data["5d"]), len(data["10d"]))
-        table.add_row(sig, acc(data["3d"]), acc(data["5d"]), acc(data["10d"]), str(trades))
-        all_results_5d.extend(data["5d"])
+    all_7d = []
+    for sig, d in sorted(stats.items()):
+        table.add_row(sig, acc(d['3d']), acc(d['7d']), acc(d['14d']))
+        all_7d.extend(d['7d'])
 
     console.print(table)
 
-    if all_results_5d:
-        overall = sum(1 for r in all_results_5d if r >= WIN_TARGET) / len(all_results_5d) * 100
-        color = "green" if overall >= 60 else "yellow" if overall >= 40 else "red"
-        console.print(f"\n  Overall 5-day accuracy: [{color}]{overall:.0f}%[/{color}] ({len(all_results_5d)} resolved trades)")
+    if all_7d:
+        overall = sum(1 for x in all_7d if x >= WIN_TARGET) / len(all_7d) * 100
+        col = 'green' if overall >= 60 else 'yellow' if overall >= 40 else 'red'
+        console.print(f"\n  Overall 7-day accuracy: [{col}]{overall:.0f}%[/{col}] ({len(all_7d)} resolved trades)")
 
-    # Recent signals
+    # Recent 15 signals
     console.print()
-    console.print("[bold white]  Recent Signals (last 10):[/bold white]")
-    recent = Table(show_header=True, header_style="bold white", box=None)
-    recent.add_column("Date", width=12)
-    recent.add_column("Symbol", width=10)
-    recent.add_column("Signal", width=22)
-    recent.add_column("Entry", justify="right", width=10)
-    recent.add_column("3d", justify="center", width=8)
-    recent.add_column("5d", justify="center", width=8)
-    recent.add_column("10d", justify="center", width=8)
+    console.print('[bold white]  Recent Signals (last 15):[/bold white]')
+    rec = Table(show_header=True, header_style='bold white', box=None, padding=(0,1))
+    rec.add_column('Date',   width=12, no_wrap=True)
+    rec.add_column('Symbol', width=8,  no_wrap=True)
+    rec.add_column('Signal', width=22, no_wrap=True)
+    rec.add_column('Entry',  justify='right', width=8, no_wrap=True)
+    rec.add_column('3d',     justify='center', width=8, no_wrap=True)
+    rec.add_column('7d',     justify='center', width=8, no_wrap=True)
+    rec.add_column('14d',    justify='center', width=9, no_wrap=True)
+    rec.add_column('Src',    width=8,  no_wrap=True)
 
-    def fmt_result(r):
-        if r is None: return "[dim]--[/dim]"
-        color = "green" if r >= WIN_TARGET else "red" if r < 0 else "yellow"
-        return f"[{color}]{r:+.1f}%[/{color}]"
+    def fmt(r):
+        if r is None: return '[dim]--[/dim]'
+        col = 'green' if r >= WIN_TARGET else 'red' if r < 0 else 'yellow'
+        return f'[{col}]{r:+.1f}%[/{col}]'
 
-    for e in list(log.values())[-10:][::-1]:
-        recent.add_row(
-            e["date"], e["symbol"], e["signal"],
-            f"Rs {e['entry_price']:.2f}",
-            fmt_result(e.get("result_3d")),
-            fmt_result(e.get("result_5d")),
-            fmt_result(e.get("result_10d")),
-        )
-    console.print(recent)
+    for r in rows[:15]:
+        rec.add_row(r[0], r[1], r[2], f'{r[4]:.0f}', fmt(r[7]), fmt(r[8]), fmt(r[9]), r[3] or '')
+    console.print(rec)
     console.print()
 
-if __name__ == "__main__":
-    if "--report" in sys.argv:
-        show_report()
-    elif "--update" in sys.argv:
+if __name__ == '__main__':
+    if '--update' in sys.argv:
         update_results()
     else:
         show_report()

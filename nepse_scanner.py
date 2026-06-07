@@ -1949,6 +1949,7 @@ def analyze_smart_pick(live_df, full_df, top_n=10):
         "Upside = distance to 52W high (realistic target in 1 month)[/dim]",
         border_style="cyan"
     ))
+    return final_scores
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 
@@ -6968,11 +6969,21 @@ def main():
         console.print()
 
     if args.quickpick:
-        analyze_quick_pick(live_df, offline=getattr(args, "offline", False))
+        _qp = analyze_quick_pick(live_df, offline=getattr(args, "offline", False))
+        try:
+            from signal_tracker import log_signals_raw
+            log_signals_raw([{"symbol": r["symbol"], "signal": "QUICK_PICK", "ltp": r.get("ltp",0), "score": r.get("score",0), "reason": r.get("reasons","")} for r in (_qp or [])], source="4")
+        except Exception:
+            pass
         console.print()
 
     if args.smartpick:
-        analyze_smart_pick(live_df, full_fs)
+        _sp = analyze_smart_pick(live_df, full_fs)
+        try:
+            from signal_tracker import log_signals_raw
+            log_signals_raw([{"symbol": r["symbol"], "signal": "SMART_PICK", "ltp": r.get("ltp",0), "score": r.get("score",0), "reason": r.get("reasons","")} for r in (_sp or [])], source="5")
+        except Exception:
+            pass
         console.print()
 
     if args.sr:
@@ -9285,6 +9296,12 @@ def analyze_momentum_hunter(days=7, top_n=15, min_days=2, db_path='nepse_market_
         console.print()
         console.print('[dim]Best entries: STRONG BUY stocks near support (option 18). Confirm with 17c.[/dim]')
         console.print()
+        try:
+            from signal_tracker import log_signals_raw
+            to_log = [{'symbol': c['symbol'], 'signal': 'MOMENTUM_HUNTER', 'ltp': c.get('price', 0), 'score': c.get('momentum', 0), 'reason': str(c.get('consec',0))+'d consec buy'} for c in candidates]
+            log_signals_raw(to_log, source='17f')
+        except Exception:
+            pass
     except Exception as e:
         console.print('  Error: ' + str(e), style='red')
         import traceback
@@ -9560,6 +9577,17 @@ def analyze_deployment_planner(db_path='nepse_market_data.db'):
     console.print()
     console.print(f'  [bold]Current phase:[/bold] [{curr_col}]{curr_sig} this month[/{curr_col}] → [{next_col}]{next_sig} next month ({MONTH_NAMES[next_month-1]})[/{next_col}]', highlight=False)
     console.print()
+    try:
+        from signal_tracker import log_signals_raw
+        to_log = []
+        for row in hot_list:
+            to_log.append({'symbol': row[0], 'signal': 'DEPLOY_HOT', 'ltp': row[1], 'score': row[7], 'reason': 'HOT phase+seasonal+rr'})
+        for row in july_list[:10]:
+            if row[0] not in [h[0] for h in hot_list]:
+                to_log.append({'symbol': row[0], 'signal': 'DEPLOY_READY', 'ltp': row[1], 'score': row[9], 'reason': 'READY next month'})
+        log_signals_raw(to_log, source='41')
+    except Exception:
+        pass
     if hot_list:
         console.print(f'  [green]ACTION NOW:[/green] {len(hot_list)} stocks are HOT. Enter with full position + tight stop.')
     else:
