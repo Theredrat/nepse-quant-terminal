@@ -3561,13 +3561,21 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
                     _fyq_n_rets.append((_v2[-1]-_v2[0])/_v2[0]*100)
             if _fyq_s_rets: _fyq_stock_avg = sum(_fyq_s_rets)/len(_fyq_s_rets)
             if _fyq_n_rets: _fyq_nepse_avg = sum(_fyq_n_rets)/len(_fyq_n_rets)
+            _fyq_stock_sufficient = len(_fyq_s_rets) >= 3
+            _fyq_nepse_sufficient = len(_fyq_n_rets) >= 3
         except: pass
 
         # Agreement score — Greg + BS monthly + FYQ quarterly (3 signals each)
-        _nepse_bull  = (_n_g_avg >= 2) + (_n_b_avg >= 2) + (_fyq_nepse_avg >= 1.5)
-        _nepse_bear  = (_n_g_avg <= -2) + (_n_b_avg <= -2) + (_fyq_nepse_avg <= -1.5)
-        _stock_bull  = (_s_g_avg >= 2) + (_s_b_avg >= 2) + (_fyq_stock_avg >= 1.5)
-        _stock_bear  = (_s_g_avg <= -2) + (_s_b_avg <= -2) + (_fyq_stock_avg <= -1.5)
+        # Only include FYQ in scoring if sufficient history (>=3 complete quarters)
+        _fyq_nepse_ok = getattr(_fyq_nepse_avg, '__ok__', None) or _fyq_nepse_sufficient if '_fyq_nepse_sufficient' in dir() else False
+        try: _fyq_nepse_ok = _fyq_nepse_sufficient
+        except: _fyq_nepse_ok = False
+        try: _fyq_stock_ok = _fyq_stock_sufficient
+        except: _fyq_stock_ok = False
+        _nepse_bull  = (_n_g_avg >= 2) + (_n_b_avg >= 2) + ((_fyq_nepse_avg >= 1.5) if _fyq_nepse_ok else 0)
+        _nepse_bear  = (_n_g_avg <= -2) + (_n_b_avg <= -2) + ((_fyq_nepse_avg <= -1.5) if _fyq_nepse_ok else 0)
+        _stock_bull  = (_s_g_avg >= 2) + (_s_b_avg >= 2) + ((_fyq_stock_avg >= 1.5) if _fyq_stock_ok else 0)
+        _stock_bear  = (_s_g_avg <= -2) + (_s_b_avg <= -2) + ((_fyq_stock_avg <= -1.5) if _fyq_stock_ok else 0)
 
         if _nepse_bull >= 2 and _stock_bull >= 2:
             _sv = '[bold green]STRONG TAILWIND — multiple calendars bullish for NEPSE and stock[/bold green]'
@@ -3732,8 +3740,15 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
         console.print(f'  Verdict  : {_sv}')
         console.print(f'  [dim]{_greg_agree}[/dim]')
         console.print(f'  [dim]{_bs_agree}[/dim]')
-        _fyq_note = f'  [dim]FYQ: NEPSE {_fyq_nepse_avg:+.1f}% / {symbol} {_fyq_stock_avg:+.1f}% ({_fyq_now})[/dim]'
+        try:
+            _fyq_s_str = f'{_fyq_stock_avg:+.1f}%' if _fyq_stock_ok else 'N/A (<3 qtrs)'
+            _fyq_n_str = f'{_fyq_nepse_avg:+.1f}%' if _fyq_nepse_ok else 'N/A'
+            _fyq_note = f'  [dim]FYQ: NEPSE {_fyq_n_str} / {symbol} {_fyq_s_str} ({_fyq_now})[/dim]'
+        except:
+            _fyq_note = f'  [dim]FYQ: insufficient data[/dim]'
         console.print(_fyq_note)
+        if not _fyq_stock_ok:
+            console.print(f'  [dim yellow]Note: {symbol} listed <3 years — seasonal data limited, using NEPSE signals only[/dim yellow]')
         console.print()
 
         _seas_col = 'green' if _ss>=70 else 'yellow' if _ss>=40 else 'red'
@@ -3881,8 +3896,9 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
         sig    = 'STR.BUY' if avg>=5 else 'BUY' if avg>=2 else 'NTRL' if avg>=-1 else 'AVOID' if avg>=-4 else 'STR.AVD'
         marker = ' <-NOW' if fyq==curr_fyq else (' <-NXT' if fyq==next_fyq else '')
         sw_str = f'{avg_sw:.1f}%({min_sw:.0f}-{max_sw:.0f}%)'
+        lim_tag = ' [dim](limited)[/dim]' if len(rets) < 3 else ''
         fyqtable.add_row(
-            f'[bold]{fyq}{marker}[/bold]',
+            f'[bold]{fyq}{marker}[/bold]{lim_tag}',
             f'[{col}]{avg:+.1f}%[/{col}]',
             f'[{col}]{wins}/{len(rets)}[/{col}]',
             f'[green]{best:+.1f}%[/green]',
@@ -5377,8 +5393,9 @@ def analyze_nepali_seasonality(db_path='nepse_market_data.db'):
         sig    = 'STR.BUY' if avg>=5 else 'BUY' if avg>=2 else 'NTRL' if avg>=-1 else 'AVOID' if avg>=-4 else 'STR.AVD'
         marker = ' <-NOW' if fyq==curr_fyq else (' <-NXT' if fyq==next_fyq else '')
         sw_str = f'{avg_sw:.1f}%({min_sw:.0f}-{max_sw:.0f}%)'
+        lim_tag = ' [dim](limited)[/dim]' if len(rets) < 3 else ''
         fyqtable.add_row(
-            f'[bold]{fyq}{marker}[/bold]',
+            f'[bold]{fyq}{marker}[/bold]{lim_tag}',
             f'[{col}]{avg:+.1f}%[/{col}]',
             f'[{col}]{wins}/{len(rets)}[/{col}]',
             f'[green]{best:+.1f}%[/green]',
@@ -8813,8 +8830,9 @@ def analyze_broker_date(symbol=None, date_str=None, db_path='nepse_market_data.d
         sig    = 'STR.BUY' if avg>=5 else 'BUY' if avg>=2 else 'NTRL' if avg>=-1 else 'AVOID' if avg>=-4 else 'STR.AVD'
         marker = ' <-NOW' if fyq==curr_fyq else (' <-NXT' if fyq==next_fyq else '')
         sw_str = f'{avg_sw:.1f}%({min_sw:.0f}-{max_sw:.0f}%)'
+        lim_tag = ' [dim](limited)[/dim]' if len(rets) < 3 else ''
         fyqtable.add_row(
-            f'[bold]{fyq}{marker}[/bold]',
+            f'[bold]{fyq}{marker}[/bold]{lim_tag}',
             f'[{col}]{avg:+.1f}%[/{col}]',
             f'[{col}]{wins}/{len(rets)}[/{col}]',
             f'[green]{best:+.1f}%[/green]',
