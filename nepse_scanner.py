@@ -3122,6 +3122,57 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
         except Exception:
             pass
 
+        # ── Sector Momentum ──
+        try:
+            _sect_prices = _load_sector_prices(db_path=db_path, days=35)
+            _sect_rets = _sector_returns(_sect_prices)
+            # Find this stock's sector
+            import sqlite3 as _sq3
+            _sc3 = _sq3.connect(db_path)
+            _stock_sector = (_sc3.execute(
+                "SELECT sector FROM companies WHERE symbol=?", (symbol,)
+            ).fetchone() or [None])[0]
+            _sc3.close()
+            if _stock_sector and _sect_rets:
+                # Normalize sector name
+                _NAME_MAP = {
+                    "Hydro Power": "Hydropower",
+                    "Commercial Banks": "Commercial Banks",
+                    "Development Banks": "Development Banks",
+                    "Finance": "Finance",
+                    "Microfinance": "Microfinance",
+                    "Life Insurance": "Life Insurance",
+                    "Non Life Insurance": "Non-Life Insurance",
+                    "Manufacturing And Processing": "Manufacturing",
+                    "Hotels And Tourism": "Hotel & Tourism",
+                    "Investment": "Investment",
+                    "Tradings": "Trading",
+                    "Others": "Others",
+                }
+                _sect_key = _NAME_MAP.get(_stock_sector, _stock_sector)
+                _sd = _sect_rets.get(_sect_key) or _sect_rets.get(_stock_sector)
+                if _sd:
+                    _s5  = _sd.get(5)
+                    _s10 = _sd.get(10)
+                    _s20 = _sd.get(20)
+                    _s5s  = f'{_s5:+.1f}%'  if _s5  is not None else 'N/A'
+                    _s10s = f'{_s10:+.1f}%' if _s10 is not None else 'N/A'
+                    _s20s = f'{_s20:+.1f}%' if _s20 is not None else 'N/A'
+                    _sc  = 'green' if (_s5 or 0) > 0 else 'red' if (_s5 or 0) < 0 else 'yellow'
+                    _sc2 = 'green' if (_s20 or 0) > 0 else 'red' if (_s20 or 0) < 0 else 'yellow'
+                    console.print(f'  Sector ({_stock_sector}): 5d [{_sc}]{_s5s}[/{_sc}]  10d {_s10s}  20d [{_sc2}]{_s20s}[/{_sc2}]')
+                    # Sector momentum signal
+                    if (_s5 or 0) > 1 and (_s20 or 0) > 1:
+                        console.print('  [dim green]-> Sector in uptrend — tailwind for stock[/dim green]')
+                        tech_score = min(tech_score + 5, 100)
+                    elif (_s5 or 0) < -1 and (_s20 or 0) < -1:
+                        console.print('  [dim red]-> Sector in downtrend — headwind for stock[/dim red]')
+                        tech_score = max(tech_score - 5, 0)
+                    else:
+                        console.print('  [dim]-> Sector mixed — no strong directional bias[/dim]')
+        except Exception:
+            pass
+
         section_verdicts.append(('Technical', tech_score, t_verdict, t_col))
         total_score += tech_score
         max_score += 100
