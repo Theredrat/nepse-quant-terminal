@@ -1975,6 +1975,7 @@ def parse_args():
     p.add_argument('--guide',       action='store_true', dest='buy_sell_guide')
     p.add_argument('--full-report',  metavar='SYMBOL', dest='full_report', default=None)
     p.add_argument('--best-rr',       action='store_true', dest='best_rr', help='Best R/R scanner')
+    p.add_argument('--sector-season', action='store_true', dest='sector_season', help='Sector seasonality')
     p.add_argument('--market-phase',   action='store_true', dest='market_phase', help='Market phase detector')
     p.add_argument('--seasonality',    action='store_true', dest='seasonality', help='Seasonality analysis')
     p.add_argument('--nepali-season', action='store_true', dest='nepali_season', help='Nepali calendar seasonality')
@@ -5945,6 +5946,250 @@ def analyze_best_rr(db_path='nepse_market_data.db'):
 
 
 
+
+
+def analyze_sector_seasonality(db_path='nepse_market_data.db'):
+    """Option 40 - Sector Seasonality: best/worst months and quarters per sector."""
+    from rich.console import Console
+    from rich.table import Table
+    from rich.rule import Rule
+    from rich import box
+    import sqlite3, datetime
+
+    console = Console()
+    console.print()
+    console.rule('[bold yellow]Option 40 — Sector Seasonality[/bold yellow]', style='yellow')
+    console.print()
+    console.print('  [dim]Historical avg return per sector by Gregorian month and FY quarter[/dim]')
+    console.print()
+
+    # Load all sector prices (use long history)
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute("""
+        SELECT sp.symbol, c.sector, sp.date, sp.close
+        FROM stock_prices sp
+        JOIN companies c ON sp.symbol = c.symbol
+        WHERE sp.close > 0 AND sp.date >= '2021-01-01'
+        ORDER BY sp.symbol, sp.date
+    """).fetchall()
+    conn.close()
+
+    if not rows:
+        console.print('[red]No price data found.[/red]')
+        return
+
+    # Group closes by sector -> symbol -> date
+    from collections import defaultdict
+    sym_sector = {}
+    sym_dates  = defaultdict(dict)
+    for sym, sect, dt, cl in rows:
+        sym_sector[sym] = sect
+        sym_dates[sym][dt] = cl
+
+    # Build sector daily equal-weighted index: date -> sector -> avg_close
+    sect_daily = defaultdict(lambda: defaultdict(list))
+    for sym, dates in sym_dates.items():
+        sect = sym_sector[sym]
+        for dt, cl in dates.items():
+            sect_daily[sect][dt].append(cl)
+
+    sect_index = {}  # sector -> {date: avg_close}
+    for sect, dmap in sect_daily.items():
+        sect_index[sect] = {dt: sum(v)/len(v) for dt, v in dmap.items()}
+
+    # FYQ helpers
+    def _fyq(dt_str):
+        m = int(dt_str[5:7])
+        if   m in (4,5,6):   return 'FYQ4'
+        elif m in (7,8,9):   return 'FYQ1'
+        elif m in (10,11,12): return 'FYQ2'
+        else:                 return 'FYQ3'
+
+    today = datetime.date.today()
+    curr_greg_month = today.month
+    curr_fyq = _fyq(str(today))
+
+    NAME_MAP = {
+        'Hydro Power': 'Hydropower',
+        'Commercial Banks': 'Commercial Banks',
+        'Development Banks': 'Development Banks',
+        'Finance': 'Finance',
+        'Microfinance': 'Microfinance',
+        'Life Insurance': 'Life Insurance',
+        'Non Life Insurance': 'Non-Life Insurance',
+        'Manufacturing And Processing': 'Manufacturing',
+        'Hotels And Tourism': 'Hotel & Tourism',
+        'Investment': 'Investment',
+        'Tradings': 'Trading',
+        'Others': 'Others',
+    }
+
+    MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+    FYQ_ORDER   = ['FYQ1','FYQ2','FYQ3','FYQ4']
+
+    # Compute monthly + FYQ returns per sector
+    sect_greg = defaultdict(lambda: defaultdict(list))  # sect -> month -> [ret%]
+    sect_fyq  = defaultdict(lambda: defaultdict(list))  # sect -> fyq   -> [ret%]
+
+    for sect, idx_map in sect_index.items():
+        display = NAME_MAP.get(sect, sect)
+        dates_sorted = sorted(idx_map.keys())
+        if len(dates_sorted) < 20:
+            continue
+
+        # Monthly returns
+        by_ym = defaultdict(list)
+        for dt in dates_sorted:
+            y, m = int(dt[:4]), int(dt[5:7])
+            by_ym[(y, m)].append(idx_map[dt])
+
+        curr_ym = (today.year, today.month)
+        for (y, m), prices in by_ym.items():
+            if (y, m) == curr_ym: continue  # skip current incomplete month
+            if len(prices) < 10: continue
+            ret = (prices[-1] - prices[0]) / prices[0] * 100
+            sect_greg[display][m].append(ret)
+
+        # FYQ returns
+        by_fyq_key = defaultdict(list)
+        for dt in dates_sorted:
+            y, m = int(dt[:4]), int(dt[5:7])
+            fy = y if m >= 7 else y - 1  # Nepal FY starts mid-July
+            q  = _fyq(dt)
+            by_fyq_key[(fy, q)].append(idx_map[dt])
+
+        curr_fy = today.year if today.month >= 7 else today.year - 1
+        curr_fk = (curr_fy, curr_fyq)
+        all_keys = sorted(by_fyq_key.keys())
+        first_fk = all_keys[0] if all_keys else None
+
+        for fk, prices in by_fyq_key.items():
+            if fk == curr_fk: continue
+            if fk == first_fk: continue
+            if len(prices) < 15: continue
+            ret = (prices[-1] - prices[0]) / prices[0] * 100
+            sect_fyq[display][fk[1]].append(ret)
+
+    if not sect_greg:
+        console.print('[red]Not enough data to compute sector seasonality.[/red]')
+        return
+
+    # ── Monthly Table ──
+    console.rule('[bold cyan]Monthly Seasonality by Sector[/bold cyan]', style='cyan')
+    console.print()
+
+    def _sig(avg):
+        if avg >=  5: return 'STR.BUY', 'green'
+        if avg >=  2: return 'BUY',     'green'
+        if avg >= -1: return 'NTRL',    'yellow'
+        if avg >= -3: return 'AVOID',   'red'
+        return 'STR.AVD', 'red'
+
+    mtable = Table(show_header=True, header_style='bold cyan', box=box.SIMPLE_HEAVY,
+                   border_style='cyan', padding=(0,1))
+    mtable.add_column('Sector', width=20, no_wrap=True)
+    for i, mn in enumerate(MONTH_NAMES):
+        marker = f'[bold]{mn}*[/bold]' if (i+1) == curr_greg_month else mn
+        mtable.add_column(marker, justify='right', width=6)
+    mtable.add_column('Best', width=5)
+    mtable.add_column('Worst', width=5)
+
+    for sect in sorted(sect_greg.keys()):
+        mdata = sect_greg[sect]
+        avgs  = {}
+        for m in range(1, 13):
+            rets = mdata.get(m, [])
+            avgs[m] = sum(rets)/len(rets) if len(rets) >= 2 else None
+
+        cells = []
+        for m in range(1, 13):
+            v = avgs[m]
+            if v is None:
+                cells.append('[dim]N/A[/dim]')
+            else:
+                sig, col = _sig(v)
+                mk = '*' if m == curr_greg_month else ''
+                cells.append(f'[{col}]{v:+.1f}%[/{col}]')
+
+        valid = {m: v for m, v in avgs.items() if v is not None}
+        if valid:
+            best_m  = max(valid, key=valid.get)
+            worst_m = min(valid, key=valid.get)
+            best_s  = MONTH_NAMES[best_m-1]
+            worst_s = MONTH_NAMES[worst_m-1]
+        else:
+            best_s = worst_s = 'N/A'
+
+        mtable.add_row(sect, *cells,
+                       f'[green]{best_s}[/green]',
+                       f'[red]{worst_s}[/red]')
+
+    console.print(mtable)
+    console.print()
+
+    # ── FYQ Table ──
+    console.rule('[bold cyan]FY Quarter Seasonality by Sector[/bold cyan]', style='cyan')
+    console.print()
+
+    qtable = Table(show_header=True, header_style='bold cyan', box=box.SIMPLE_HEAVY,
+                   border_style='cyan', padding=(0,1))
+    qtable.add_column('Sector', width=20, no_wrap=True)
+    for fq in FYQ_ORDER:
+        marker = f'[bold]{fq}*[/bold]' if fq == curr_fyq else fq
+        qtable.add_column(marker, justify='right', width=10)
+    qtable.add_column('Best Q', width=7)
+    qtable.add_column('Worst Q', width=7)
+
+    for sect in sorted(sect_fyq.keys()):
+        qdata = sect_fyq[sect]
+        qavgs = {}
+        for fq in FYQ_ORDER:
+            rets = qdata.get(fq, [])
+            qavgs[fq] = sum(rets)/len(rets) if len(rets) >= 2 else None
+
+        qcells = []
+        for fq in FYQ_ORDER:
+            v = qavgs[fq]
+            if v is None:
+                qcells.append('[dim]N/A[/dim]')
+            else:
+                sig, col = _sig(v)
+                mk = '*' if fq == curr_fyq else ''
+                n  = len(qdata.get(fq, []))
+                qcells.append(f'[{col}]{v:+.1f}%[/{col}] [dim]({n}y)[/dim]')
+
+        valid_q = {fq: v for fq, v in qavgs.items() if v is not None}
+        if valid_q:
+            best_q  = max(valid_q, key=valid_q.get)
+            worst_q = min(valid_q, key=valid_q.get)
+        else:
+            best_q = worst_q = 'N/A'
+
+        qtable.add_row(sect, *qcells,
+                       f'[green]{best_q}[/green]',
+                       f'[red]{worst_q}[/red]')
+
+    console.print(qtable)
+    console.print()
+
+    # ── NOW summary ──
+    console.rule(f'[bold]Current Period: {MONTH_NAMES[curr_greg_month-1]} / {curr_fyq}[/bold]')
+    console.print()
+    now_rows = []
+    for sect in sorted(sect_fyq.keys()):
+        qavgs = {fq: (sum(v)/len(v) if len(v) >= 2 else None)
+                 for fq, v in sect_fyq[sect].items()}
+        v = qavgs.get(curr_fyq)
+        if v is not None:
+            sig, col = _sig(v)
+            now_rows.append((v, sect, sig, col))
+    now_rows.sort(reverse=True)
+    for v, sect, sig, col in now_rows:
+        console.print(f'  [{col}]{sig:8s}[/{col}]  {sect:<22}  [{col}]{v:+.1f}% this {curr_fyq}[/{col}]')
+    console.print()
+    console.print('  [dim]Research only. Not financial advice.[/dim]')
+    console.print()
+
 def main():
     args = parse_args()
 
@@ -5961,6 +6206,9 @@ def main():
         return
     elif getattr(args, 'best_rr', False):
         analyze_best_rr()
+        return
+    elif getattr(args, 'sector_season', False):
+        analyze_sector_seasonality()
         return
     elif getattr(args, 'market_phase', False):
         analyze_market_phase()
