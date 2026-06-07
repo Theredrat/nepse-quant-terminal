@@ -3736,10 +3736,34 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
         else: return bs_yr - 1
 
     # Build FY quarterly data from monthly data
-    by_fyq      = defaultdict(list)
-    by_fyq_hl   = defaultdict(list)
-
     from collections import defaultdict as _dd2
+    from datetime import date as _dt_fyq2
+    _bs_start_fyq = {
+        2077:(2020,4,13),2078:(2021,4,14),2079:(2022,4,14),
+        2080:(2023,4,14),2081:(2024,4,13),2082:(2025,4,14),2083:(2026,4,14),
+    }
+    _bs_mdays_fyq = {
+        2077:[31,31,31,32,31,31,30,29,30,29,30,30],
+        2078:[31,31,32,31,31,31,30,29,30,29,30,30],
+        2079:[31,32,31,32,31,30,30,29,30,29,30,30],
+        2080:[31,31,31,32,31,31,30,29,30,29,30,30],
+        2081:[31,31,32,31,31,31,30,29,30,29,30,30],
+        2082:[31,32,31,32,31,30,30,29,30,29,30,30],
+        2083:[31,31,31,32,31,31,30,29,30,29,30,30],
+    }
+    def _to_bs_fyq(d):
+        for yr in sorted(_bs_start_fyq.keys(), reverse=True):
+            g = _bs_start_fyq[yr]
+            s = _dt_fyq2(g[0],g[1],g[2])
+            if d >= s:
+                days = (d-s).days
+                for mi,md in enumerate(_bs_mdays_fyq.get(yr,[])):
+                    if days < md: return yr, mi+1
+                    days -= md
+                return yr+1,1
+        return None,None
+    by_fyq      = _dd2(list)
+    by_fyq_hl   = _dd2(list)
     _fyq_raw = _dd2(list)
     _fyq_hl_raw = _dd2(list)
 
@@ -3748,14 +3772,14 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
     conn2.row_factory = sqlite3.Row
     rows2 = conn2.execute(
         "SELECT date, close, high, low FROM stock_prices "
-        "WHERE symbol='NEPSE' AND close>0 ORDER BY date"
+        "WHERE symbol=? AND close>0 ORDER BY date", (symbol,)
     ).fetchall()
     conn2.close()
 
     for r in rows2:
         try:
-            d = date.fromisoformat(r['date'])
-            bs_yr2, bs_m2 = gregorian_to_bs(d)
+            d = _dt_fyq2.fromisoformat(r['date'])
+            bs_yr2, bs_m2 = _to_bs_fyq(d)
             if bs_yr2 and bs_m2:
                 fyq  = fy_q_map[bs_m2]
                 fy   = _fy_label(bs_yr2, bs_m2)
@@ -3764,9 +3788,10 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
         except: pass
 
     # DB first and current FY quarter to skip
-    _today_bs2 = gregorian_to_bs(date.today())
+    from datetime import date as _dt_fyq
+    _today_bs2 = _to_bs_fyq(_dt_fyq2.today())
     _curr_fyq_key = (_fy_label(_today_bs2[0], _today_bs2[1]), fy_q_map[_today_bs2[1]])
-    _first_bs2 = gregorian_to_bs(date(2021,5,25))
+    _first_bs2 = _to_bs_fyq(_dt_fyq2(2021,5,25))
     _first_fyq_key = (_fy_label(_first_bs2[0], _first_bs2[1]), fy_q_map[_first_bs2[1]])
 
     for key, entries in sorted(_fyq_raw.items()):
@@ -3785,7 +3810,7 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
         by_fyq_hl[fyq].append((fy, swing, up, dn))
 
     # Current and next FY quarter
-    curr_fyq = fy_q_map[curr_bs_m]
+    curr_fyq = fy_q_map[_today_bs2[1]]
     fyq_order = ['FYQ1','FYQ2','FYQ3','FYQ4']
     curr_fyq_idx = fyq_order.index(curr_fyq)
     next_fyq = fyq_order[(curr_fyq_idx+1) % 4]
@@ -5153,10 +5178,34 @@ def analyze_nepali_seasonality(db_path='nepse_market_data.db'):
         else: return bs_yr - 1
 
     # Build FY quarterly data from monthly data
-    by_fyq      = defaultdict(list)
-    by_fyq_hl   = defaultdict(list)
-
     from collections import defaultdict as _dd2
+    from datetime import date as _dt_fyq2
+    _bs_start_fyq = {
+        2077:(2020,4,13),2078:(2021,4,14),2079:(2022,4,14),
+        2080:(2023,4,14),2081:(2024,4,13),2082:(2025,4,14),2083:(2026,4,14),
+    }
+    _bs_mdays_fyq = {
+        2077:[31,31,31,32,31,31,30,29,30,29,30,30],
+        2078:[31,31,32,31,31,31,30,29,30,29,30,30],
+        2079:[31,32,31,32,31,30,30,29,30,29,30,30],
+        2080:[31,31,31,32,31,31,30,29,30,29,30,30],
+        2081:[31,31,32,31,31,31,30,29,30,29,30,30],
+        2082:[31,32,31,32,31,30,30,29,30,29,30,30],
+        2083:[31,31,31,32,31,31,30,29,30,29,30,30],
+    }
+    def _to_bs_fyq(d):
+        for yr in sorted(_bs_start_fyq.keys(), reverse=True):
+            g = _bs_start_fyq[yr]
+            s = _dt_fyq2(g[0],g[1],g[2])
+            if d >= s:
+                days = (d-s).days
+                for mi,md in enumerate(_bs_mdays_fyq.get(yr,[])):
+                    if days < md: return yr, mi+1
+                    days -= md
+                return yr+1,1
+        return None,None
+    by_fyq      = _dd2(list)
+    by_fyq_hl   = _dd2(list)
     _fyq_raw = _dd2(list)
     _fyq_hl_raw = _dd2(list)
 
@@ -5165,14 +5214,14 @@ def analyze_nepali_seasonality(db_path='nepse_market_data.db'):
     conn2.row_factory = sqlite3.Row
     rows2 = conn2.execute(
         "SELECT date, close, high, low FROM stock_prices "
-        "WHERE symbol='NEPSE' AND close>0 ORDER BY date"
+        "WHERE symbol=? AND close>0 ORDER BY date", (symbol,)
     ).fetchall()
     conn2.close()
 
     for r in rows2:
         try:
-            d = date.fromisoformat(r['date'])
-            bs_yr2, bs_m2 = gregorian_to_bs(d)
+            d = _dt_fyq2.fromisoformat(r['date'])
+            bs_yr2, bs_m2 = _to_bs_fyq(d)
             if bs_yr2 and bs_m2:
                 fyq  = fy_q_map[bs_m2]
                 fy   = _fy_label(bs_yr2, bs_m2)
@@ -5181,9 +5230,10 @@ def analyze_nepali_seasonality(db_path='nepse_market_data.db'):
         except: pass
 
     # DB first and current FY quarter to skip
-    _today_bs2 = gregorian_to_bs(date.today())
+    from datetime import date as _dt_fyq
+    _today_bs2 = _to_bs_fyq(_dt_fyq2.today())
     _curr_fyq_key = (_fy_label(_today_bs2[0], _today_bs2[1]), fy_q_map[_today_bs2[1]])
-    _first_bs2 = gregorian_to_bs(date(2021,5,25))
+    _first_bs2 = _to_bs_fyq(_dt_fyq2(2021,5,25))
     _first_fyq_key = (_fy_label(_first_bs2[0], _first_bs2[1]), fy_q_map[_first_bs2[1]])
 
     for key, entries in sorted(_fyq_raw.items()):
@@ -5202,7 +5252,7 @@ def analyze_nepali_seasonality(db_path='nepse_market_data.db'):
         by_fyq_hl[fyq].append((fy, swing, up, dn))
 
     # Current and next FY quarter
-    curr_fyq = fy_q_map[curr_bs_m]
+    curr_fyq = fy_q_map[_today_bs2[1]]
     fyq_order = ['FYQ1','FYQ2','FYQ3','FYQ4']
     curr_fyq_idx = fyq_order.index(curr_fyq)
     next_fyq = fyq_order[(curr_fyq_idx+1) % 4]
@@ -8564,10 +8614,34 @@ def analyze_broker_date(symbol=None, date_str=None, db_path='nepse_market_data.d
         else: return bs_yr - 1
 
     # Build FY quarterly data from monthly data
-    by_fyq      = defaultdict(list)
-    by_fyq_hl   = defaultdict(list)
-
     from collections import defaultdict as _dd2
+    from datetime import date as _dt_fyq2
+    _bs_start_fyq = {
+        2077:(2020,4,13),2078:(2021,4,14),2079:(2022,4,14),
+        2080:(2023,4,14),2081:(2024,4,13),2082:(2025,4,14),2083:(2026,4,14),
+    }
+    _bs_mdays_fyq = {
+        2077:[31,31,31,32,31,31,30,29,30,29,30,30],
+        2078:[31,31,32,31,31,31,30,29,30,29,30,30],
+        2079:[31,32,31,32,31,30,30,29,30,29,30,30],
+        2080:[31,31,31,32,31,31,30,29,30,29,30,30],
+        2081:[31,31,32,31,31,31,30,29,30,29,30,30],
+        2082:[31,32,31,32,31,30,30,29,30,29,30,30],
+        2083:[31,31,31,32,31,31,30,29,30,29,30,30],
+    }
+    def _to_bs_fyq(d):
+        for yr in sorted(_bs_start_fyq.keys(), reverse=True):
+            g = _bs_start_fyq[yr]
+            s = _dt_fyq2(g[0],g[1],g[2])
+            if d >= s:
+                days = (d-s).days
+                for mi,md in enumerate(_bs_mdays_fyq.get(yr,[])):
+                    if days < md: return yr, mi+1
+                    days -= md
+                return yr+1,1
+        return None,None
+    by_fyq      = _dd2(list)
+    by_fyq_hl   = _dd2(list)
     _fyq_raw = _dd2(list)
     _fyq_hl_raw = _dd2(list)
 
@@ -8576,14 +8650,14 @@ def analyze_broker_date(symbol=None, date_str=None, db_path='nepse_market_data.d
     conn2.row_factory = sqlite3.Row
     rows2 = conn2.execute(
         "SELECT date, close, high, low FROM stock_prices "
-        "WHERE symbol='NEPSE' AND close>0 ORDER BY date"
+        "WHERE symbol=? AND close>0 ORDER BY date", (symbol,)
     ).fetchall()
     conn2.close()
 
     for r in rows2:
         try:
-            d = date.fromisoformat(r['date'])
-            bs_yr2, bs_m2 = gregorian_to_bs(d)
+            d = _dt_fyq2.fromisoformat(r['date'])
+            bs_yr2, bs_m2 = _to_bs_fyq(d)
             if bs_yr2 and bs_m2:
                 fyq  = fy_q_map[bs_m2]
                 fy   = _fy_label(bs_yr2, bs_m2)
@@ -8592,9 +8666,10 @@ def analyze_broker_date(symbol=None, date_str=None, db_path='nepse_market_data.d
         except: pass
 
     # DB first and current FY quarter to skip
-    _today_bs2 = gregorian_to_bs(date.today())
+    from datetime import date as _dt_fyq
+    _today_bs2 = _to_bs_fyq(_dt_fyq2.today())
     _curr_fyq_key = (_fy_label(_today_bs2[0], _today_bs2[1]), fy_q_map[_today_bs2[1]])
-    _first_bs2 = gregorian_to_bs(date(2021,5,25))
+    _first_bs2 = _to_bs_fyq(_dt_fyq2(2021,5,25))
     _first_fyq_key = (_fy_label(_first_bs2[0], _first_bs2[1]), fy_q_map[_first_bs2[1]])
 
     for key, entries in sorted(_fyq_raw.items()):
@@ -8613,7 +8688,7 @@ def analyze_broker_date(symbol=None, date_str=None, db_path='nepse_market_data.d
         by_fyq_hl[fyq].append((fy, swing, up, dn))
 
     # Current and next FY quarter
-    curr_fyq = fy_q_map[curr_bs_m]
+    curr_fyq = fy_q_map[_today_bs2[1]]
     fyq_order = ['FYQ1','FYQ2','FYQ3','FYQ4']
     curr_fyq_idx = fyq_order.index(curr_fyq)
     next_fyq = fyq_order[(curr_fyq_idx+1) % 4]
