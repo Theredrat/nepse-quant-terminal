@@ -6108,6 +6108,7 @@ def analyze_sector_seasonality(db_path='nepse_market_data.db'):
     fyq_g = defaultdict(lambda: defaultdict(list))
     nq_g  = defaultdict(lambda: defaultdict(list))
     gq_g  = defaultdict(lambda: defaultdict(list))
+    gm_g  = defaultdict(lambda: defaultdict(list))
 
     for sect,dmap in sect_index.items():
         for dt_str in sorted(dmap.keys()):
@@ -6120,6 +6121,7 @@ def analyze_sector_seasonality(db_path='nepse_market_data.db'):
                 fyq_g[sect][(fy, _fyq(bsm))].append(entry)
                 nq_g [sect][(fy, _nq(bsm) )].append(entry)
             gq_g[sect][(d.year, _gq(d.month))].append(entry)
+            gm_g[sect][(d.year, d.month)].append(entry)
 
     # ── Compute period stats ──
     # Returns: label -> (avg_ret, wins, total, best, worst, avg_up, avg_dn, avg_sw, min_sw, max_sw, [(fy,ret)])
@@ -6164,7 +6166,7 @@ def analyze_sector_seasonality(db_path='nepse_market_data.db'):
         t = Table(show_header=True, header_style='bold cyan', box=box.SIMPLE_HEAVY,
                   border_style='cyan', padding=(0,1))
         t.add_column('Period',     width=20, justify='left',   no_wrap=True)
-        t.add_column('Ret',        width=7,  justify='right',  no_wrap=True)
+        t.add_column('Ret',        width=8,  justify='right',  no_wrap=True)
         t.add_column('W/T',        width=5,  justify='center', no_wrap=True)
         t.add_column('Sig',        width=7,  justify='left',   no_wrap=True)
         t.add_column('Swing(rng)', width=12, justify='left',   no_wrap=True)
@@ -6192,15 +6194,41 @@ def analyze_sector_seasonality(db_path='nepse_market_data.db'):
 
     all_sectors = sorted(sect_index.keys())
 
+    MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+
     with console.status('[cyan]Computing sector seasonality...[/cyan]'):
         # Pre-compute all stats
         fyq_stats = {}
         nq_stats  = {}
         gq_stats  = {}
+        gm_stats  = {}
         for sect in all_sectors:
             fyq_stats[sect] = _calc(fyq_g[sect], curr_fyq_key, lambda k: k[1])
             nq_stats [sect] = _calc(nq_g [sect], curr_nq_key,  lambda k: k[1])
             gq_stats [sect] = _calc(gq_g [sect], curr_gq_key,  lambda k: k[1])
+            gm_stats [sect] = _calc(gm_g [sect], (today.year, today.month), lambda k: k[1])
+
+    # ══ MONTHLY SECTION ══
+    console.rule('[bold cyan]Greg Monthly Seasonality[/bold cyan]', style='cyan')
+    console.print()
+    for sect in all_sectors:
+        stats = gm_stats[sect]
+        if not stats: continue
+        console.print(f'  [bold white]{sect}[/bold white]')
+        t = _make_table()
+        for m in range(1,13):
+            if m not in stats: continue
+            mn = MONTH_NAMES[m-1]
+            marker = ' <-NOW' if m==today.month else (' <-NXT' if m==(today.month%12)+1 else '')
+            _,col = _sig(stats[m][0])
+            t.add_row(*_row(f'{mn}', stats[m], marker, col))
+        console.print(t)
+        for m in range(1,13):
+            if m not in stats: continue
+            mn = MONTH_NAMES[m-1]
+            marker = ' <-NOW' if m==today.month else (' <-NXT' if m==(today.month%12)+1 else '')
+            console.print(f'   [dim]{mn}{marker}: {_hist_line(stats[m])}[/dim]')
+        console.print()
 
     # ══ FYQ SECTION ══
     console.rule('[bold cyan]FYQ Seasonality — Shrawan-based Fiscal Year Quarters[/bold cyan]', style='cyan')
@@ -6221,26 +6249,6 @@ def analyze_sector_seasonality(db_path='nepse_market_data.db'):
             _,col = _sig(stats[fq][0])
             marker = ' <-NOW' if fq==curr_fyq else (' <-NXT' if fq==next_fyq else '')
             console.print(f'   [dim]{fq}{marker}: {_hist_line(stats[fq])}[/dim]')
-        console.print()
-
-    # ══ NQ SECTION ══
-    console.rule('[bold cyan]NQ Seasonality — Baisakh-based Nepali Quarters[/bold cyan]', style='cyan')
-    console.print()
-    for sect in all_sectors:
-        stats = nq_stats[sect]
-        if not stats: continue
-        console.print(f'  [bold white]{sect}[/bold white]')
-        t = _make_table()
-        for nq in NQ_ORDER:
-            if nq not in stats: continue
-            marker = ' <-NOW' if nq==curr_nq else (' <-NXT' if nq==next_nq else '')
-            _,col = _sig(stats[nq][0])
-            t.add_row(*_row(f'{nq}({NQ_LABELS[nq]})', stats[nq], marker, col))
-        console.print(t)
-        for nq in NQ_ORDER:
-            if nq not in stats: continue
-            marker = ' <-NOW' if nq==curr_nq else (' <-NXT' if nq==next_nq else '')
-            console.print(f'   [dim]{nq}{marker}: {_hist_line(stats[nq])}[/dim]')
         console.print()
 
     # ══ GREG QUARTERLY SECTION ══
