@@ -1975,7 +1975,7 @@ def parse_args():
     p.add_argument('--guide',       action='store_true', dest='buy_sell_guide')
     p.add_argument('--full-report',  metavar='SYMBOL', dest='full_report', default=None)
     p.add_argument('--best-rr',       action='store_true', dest='best_rr', help='Best R/R scanner')
-    p.add_argument('--july-planner',  action='store_true', dest='july_planner', help='July deployment planner')
+    p.add_argument('--deployment-planner',  action='store_true', dest='deployment_planner', help='July deployment planner')
     p.add_argument('--sector-season', action='store_true', dest='sector_season', help='Sector seasonality')
     p.add_argument('--market-phase',   action='store_true', dest='market_phase', help='Market phase detector')
     p.add_argument('--seasonality',    action='store_true', dest='seasonality', help='Seasonality analysis')
@@ -6779,8 +6779,8 @@ def main():
     elif getattr(args, 'best_rr', False):
         analyze_best_rr()
         return
-    elif getattr(args, 'july_planner', False):
-        analyze_july_planner()
+    elif getattr(args, 'deployment_planner', False):
+        analyze_deployment_planner()
         return
     elif getattr(args, 'sector_season', False):
         analyze_sector_seasonality()
@@ -9290,8 +9290,8 @@ def analyze_momentum_hunter(days=7, top_n=15, min_days=2, db_path='nepse_market_
         import traceback
         traceback.print_exc()
 
-def analyze_july_planner(db_path='nepse_market_data.db'):
-    """Option 41 - July Deployment Planner + Watchlist Monitor"""
+def analyze_deployment_planner(db_path='nepse_market_data.db'):
+    """Option 41 - Deployment Planner + Watchlist Monitor"""
     from rich.console import Console
     from rich.table import Table
     from rich.rule import Rule
@@ -9305,7 +9305,7 @@ def analyze_july_planner(db_path='nepse_market_data.db'):
     MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
 
     console.print()
-    console.rule('[bold yellow]Option 41 — July Deployment Planner + Watchlist Monitor[/bold yellow]', style='yellow')
+    console.rule('[bold yellow]Option 41 — Deployment Planner + Watchlist Monitor[/bold yellow]', style='yellow')
     console.print()
 
     conn = sqlite3.connect(db_path)
@@ -9467,7 +9467,7 @@ def analyze_july_planner(db_path='nepse_market_data.db'):
             sect = NAME_MAP.get(sr[0],sr[0]) if sr else ''
             phase = sect_phase_map.get(sect,'UNKNOWN')
 
-            # July readiness score
+            # Next month readiness score
             rr_sc    = min(rr*15,30)                                      # max 30
             prox_sc  = 10 if dist_sup<=2 else 7 if dist_sup<=5 else 3     # max 10 — close to support
             vol_sc   = 10 if vol_ratio>=1.3 else 6 if vol_ratio>=1.0 else 0 # max 10 — volume building
@@ -9552,7 +9552,7 @@ def analyze_july_planner(db_path='nepse_market_data.db'):
         console.print('  [dim]No HOT NOW stocks — market in DISTRIBUTION, wait for phase to improve.[/dim]')
         console.print()
 
-    _print_table(july_list[:20], f'▶ JULY READY — Prepare to Buy in July ({min(len(july_list),20)} shown)', 'cyan')
+    _print_table(july_list[:20], f'▶ JULY READY — Prepare to Buy Next Month ({min(len(july_list),20)} shown)', 'cyan')
     _print_table(watch_list,     f'◎ WATCHLIST — Monitor Daily ({len(watch_list)} shown)', 'yellow')
 
     # ── Summary recommendation ──
@@ -9569,7 +9569,7 @@ def analyze_july_planner(db_path='nepse_market_data.db'):
         console.print(f'  [cyan]PREPARE FOR {MONTH_NAMES[next_month-1].upper()}:[/cyan] Top picks — {", ".join(top5)}')
         console.print(f'  [dim]Set price alerts on these. Enter when phase turns ACCUM + volume confirms.[/dim]')
     console.print()
-    console.print('  [dim]JulSc = July readiness score (0-100) | Dst% = distance from support | Vol = volume ratio[/dim]')
+    console.print('  [dim]JulSc = Next month readiness score (0-100) | Dst% = distance from support | Vol = volume ratio[/dim]')
     console.print('  [dim]HOT = phase ACCUM/MARKUP + seasonal BUY + R/R≥2 | READY = JulSc≥50 + R/R≥1.5 + RSI<75[/dim]')
     console.print()
 
