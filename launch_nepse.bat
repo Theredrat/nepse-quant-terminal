@@ -100,7 +100,8 @@ echo   --- FULL ANALYSIS ---
   echo   38. Seasonality          (best and worst months to trade NEPSE)
   echo   39. Nepali Seasonality     (Baisakh-based true Nepali month analysis)
   echo   40. Sector Seasonality     (best/worst months per sector)
-  echo   41. Deployment Planner     (watchlist + next month readiness)
+  echo   41. Deployment Planner     (watchlist + next month readiness)
+  echo   43. Market Regime Analyzer (regimes, leaders, pre-move detector)
   echo.
   echo   --- HELP ---
 echo   21. Signal Legend / Help
@@ -145,7 +146,8 @@ if "%choice%"=="37" goto MARKET_PHASE
 if "%choice%"=="38" goto SEASONALITY
 if "%choice%"=="39" goto NEPALI_SEASON
 if "%choice%"=="40" goto SECTOR_SEASON
-if "%choice%"=="41" goto DEPLOYMENT_PLANNER
+if "%choice%"=="41" goto DEPLOYMENT_PLANNER
+if "%choice%"=="43" goto MARKET_REGIME
 if "%choice%"=="22" start python nepse_alerts.py & goto AGAIN
 if "%choice%"=="23" python nepse_scanner.py --corr & goto AGAIN
 if "%choice%"=="24" python nepse_scanner.py --portfolio & goto AGAIN
@@ -322,6 +324,11 @@ goto AGAIN
 python nepse_scanner.py --deployment-planner
 goto AGAIN
 
+
+:MARKET_REGIME
+  python nepse_scanner.py --market-regime
+  pause
+  goto MENU
 :AGAIN
 echo.
 echo  ============================================
