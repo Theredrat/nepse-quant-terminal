@@ -1978,6 +1978,7 @@ def parse_args():
     p.add_argument('--best-rr',       action='store_true', dest='best_rr', help='Best R/R scanner')
     p.add_argument('--deployment-planner',  action='store_true', dest='deployment_planner', help='July deployment planner')
     p.add_argument('--sector-season', action='store_true', dest='sector_season', help='Sector seasonality')
+    p.add_argument('--market-regime',  action='store_true', dest='market_regime',  help='Market regime analyzer')
     p.add_argument('--market-phase',   action='store_true', dest='market_phase', help='Market phase detector')
     p.add_argument('--seasonality',    action='store_true', dest='seasonality', help='Seasonality analysis')
     p.add_argument('--nepali-season', action='store_true', dest='nepali_season', help='Nepali calendar seasonality')
@@ -7007,6 +7008,415 @@ def analyze_sector_seasonality(db_path='nepse_market_data.db'):
     console.print()
 
 
+
+def analyze_market_regime(conn, console):
+    """Option 43 — Market Regime Analyzer"""
+    from rich.table import Table
+    import datetime
+
+    REGIMES = [
+        ('DOWNTREND', '2021-05-01', '2022-10-31', 'red',    18, -40),
+        ('SIDEWAYS',  '2022-11-01', '2023-05-31', 'yellow',  7,   0),
+        ('UPTREND',   '2023-06-01', '2024-08-31', 'green',  15, +59),
+        ('WEAK',      '2024-09-01', '2026-06-05', 'red',    21, -14),
+    ]
+
+    def _get_sector_ret(d1, d2):
+        rows = conn.execute("""
+            SELECT c.sector,
+                   AVG((sp2.close-sp1.close)/sp1.close*100) as ret,
+                   COUNT(DISTINCT sp1.symbol) as n
+            FROM stock_prices sp1
+            JOIN stock_prices sp2 ON sp1.symbol=sp2.symbol
+            JOIN companies c ON sp1.symbol=c.symbol
+            WHERE sp1.date=(SELECT MIN(date) FROM stock_prices
+                WHERE symbol=sp1.symbol AND date>=? AND close>0)
+            AND sp2.date=(SELECT MAX(date) FROM stock_prices
+                WHERE symbol=sp2.symbol AND date<=? AND close>0)
+            AND sp1.close>0 AND sp2.close>0 AND sp2.date>sp1.date
+            GROUP BY c.sector ORDER BY ret DESC
+        """, (d1, d2)).fetchall()
+        return {r[0]: (r[1], r[2]) for r in rows}
+
+    def _get_top_stocks(d1, d2, limit=15, order='DESC'):
+        return conn.execute("""
+            SELECT sp1.symbol, c.sector,
+                   ROUND((sp2.close-sp1.close)/sp1.close*100,1) as ret,
+                   sp1.close, sp2.close
+            FROM stock_prices sp1
+            JOIN stock_prices sp2 ON sp1.symbol=sp2.symbol
+            JOIN companies c ON sp1.symbol=c.symbol
+            WHERE sp1.date=(SELECT MIN(date) FROM stock_prices
+                WHERE symbol=sp1.symbol AND date>=? AND close>0)
+            AND sp2.date=(SELECT MAX(date) FROM stock_prices
+                WHERE symbol=sp2.symbol AND date<=? AND close>0)
+            AND sp1.close>0 AND sp2.close>0 AND sp2.date>sp1.date
+            AND (julianday(sp2.date)-julianday(sp1.date)) > 20
+            ORDER BY ret """ + order + """ LIMIT ?
+        """, (d1, d2, limit)).fetchall()
+
+    def _get_avg_volume(d1, d2):
+        r = conn.execute("""
+            SELECT AVG(volume) FROM stock_prices
+            WHERE date>=? AND date<=? AND close>0 AND volume>0
+        """, (d1, d2)).fetchone()
+        return r[0] or 0
+
+    def _current_conditions():
+        today = datetime.date.today().isoformat()
+        d30  = (datetime.date.today() - datetime.timedelta(days=30)).isoformat()
+        d90  = (datetime.date.today() - datetime.timedelta(days=90)).isoformat()
+        d180 = (datetime.date.today() - datetime.timedelta(days=180)).isoformat()
+
+        vol_now = _get_avg_volume(d30, today)
+        vol_3m  = _get_avg_volume(d90, d30)
+        vol_6m  = _get_avg_volume(d180, d90)
+
+        r = conn.execute("""
+            SELECT COUNT(DISTINCT s.symbol) as total,
+                   SUM(CASE WHEN s.close > a.avg20 THEN 1 ELSE 0 END) as above
+            FROM stock_prices s
+            JOIN (
+                SELECT symbol, AVG(close) as avg20
+                FROM stock_prices
+                WHERE date >= date('now','-20 days') AND close>0
+                GROUP BY symbol
+            ) a ON s.symbol=a.symbol
+            WHERE s.date=(SELECT MAX(date) FROM stock_prices WHERE close>0)
+            AND s.close>0
+        """).fetchone()
+        breadth = (r[1]/r[0]*100) if (r[0] and r[0] > 0) else 0
+
+        r2 = conn.execute("SELECT AVG(close) FROM stock_prices WHERE date=(SELECT MAX(date) FROM stock_prices WHERE close>0) AND close>0").fetchone()
+        r3 = conn.execute("SELECT AVG(close) FROM stock_prices WHERE date=(SELECT MAX(date) FROM stock_prices WHERE date<=? AND close>0) AND close>0", (d90,)).fetchone()
+        price_chg = ((r2[0]-r3[0])/r3[0]*100) if (r2[0] and r3[0]) else 0
+
+        return {
+            'vol_now': vol_now, 'vol_3m': vol_3m, 'vol_6m': vol_6m,
+            'vol_ratio_3m': vol_now/vol_3m if vol_3m else 0,
+            'breadth': breadth, 'price_chg_3m': price_chg,
+        }
+
+    def _early_leaders():
+        d60 = (datetime.date.today() - datetime.timedelta(days=60)).isoformat()
+        d5  = (datetime.date.today() - datetime.timedelta(days=5)).isoformat()
+        d20 = (datetime.date.today() - datetime.timedelta(days=20)).isoformat()
+
+        rows = conn.execute("""
+            SELECT s.symbol, c.sector,
+                   s.close as cur_close,
+                   mn.min60, mx.max60,
+                   v5.vol5, v60.vol60,
+                   chg.ret5
+            FROM stock_prices s
+            JOIN companies c ON s.symbol=c.symbol
+            JOIN (SELECT symbol, MIN(close) as min60 FROM stock_prices
+                  WHERE date>=? AND close>0 GROUP BY symbol) mn ON s.symbol=mn.symbol
+            JOIN (SELECT symbol, MAX(close) as max60 FROM stock_prices
+                  WHERE date>=? AND close>0 GROUP BY symbol) mx ON s.symbol=mx.symbol
+            JOIN (SELECT symbol, AVG(volume) as vol5 FROM stock_prices
+                  WHERE date>=? AND volume>0 GROUP BY symbol) v5 ON s.symbol=v5.symbol
+            JOIN (SELECT symbol, AVG(volume) as vol60 FROM stock_prices
+                  WHERE date>=? AND volume>0 GROUP BY symbol) v60 ON s.symbol=v60.symbol
+            JOIN (SELECT sp1.symbol,
+                         (sp2.close-sp1.close)/sp1.close*100 as ret5
+                  FROM stock_prices sp1
+                  JOIN stock_prices sp2 ON sp1.symbol=sp2.symbol
+                  WHERE sp1.date=(SELECT MAX(date) FROM stock_prices WHERE date<=? AND close>0)
+                  AND sp2.date=(SELECT MAX(date) FROM stock_prices WHERE close>0)
+                  AND sp1.close>0 AND sp2.close>0) chg ON s.symbol=chg.symbol
+            WHERE s.date=(SELECT MAX(date) FROM stock_prices WHERE close>0)
+            AND s.close>0
+        """, (d60, d60, d5, d60, d20)).fetchall()
+
+        scored = []
+        for sym, sec, cur, mn, mx, v5, v60, ret5 in rows:
+            if not all([mn, mx, v5, v60, cur]): continue
+            rng = mx - mn
+            if rng == 0: continue
+            pos = (cur - mn) / rng
+            vol_r = v5 / v60 if v60 else 1
+            score = 0
+            if pos < 0.35: score += 3
+            elif pos < 0.50: score += 1
+            if vol_r > 1.5: score += 3
+            elif vol_r > 1.0: score += 1
+            if -2 <= ret5 <= 5: score += 1
+            if score >= 4:
+                scored.append((score, sym, sec, cur, pos*100, vol_r, ret5))
+        scored.sort(reverse=True)
+        return scored[:20]
+
+    # ── MENU ──
+    console.print()
+    console.rule('[bold cyan]Option 43 — Market Regime Analyzer[/bold cyan]')
+    console.print()
+    console.print('  [cyan]a[/cyan]  Regime History       (all regimes, duration, volume signature)')
+    console.print('  [cyan]b[/cyan]  Regime Playbook      (sector performance per regime)')
+    console.print('  [cyan]c[/cyan]  Stock Leaders        (top/bottom/first-mover stocks per regime)')
+    console.print('  [cyan]d[/cyan]  Pre-Move Detector    (current vs historical pre-rally patterns)')
+    console.print('  [cyan]e[/cyan]  Early Leaders Now    (stocks matching pre-uptrend setup today)')
+    console.print('  [cyan]f[/cyan]  Full Report          (everything + current recommendation)')
+    console.print()
+    choice = console.input('  Choice [a-f]: ').strip().lower()
+    console.print()
+
+    # ── A: Regime History ──
+    if choice == 'a':
+        console.rule('Regime History (2021–2026)')
+        console.print()
+        vol_all = _get_avg_volume('2021-05-01', '2026-06-05')
+        chars = {
+            'DOWNTREND': 'High vol→crash, Insurance/Banks hardest hit',
+            'SIDEWAYS':  'Low vol, Hotels/Hydro hold, market chops',
+            'UPTREND':   'Vol spike, Finance/Others lead, broad rally',
+            'WEAK':      'Dying vol, Mfg/Hotels defensive, compressed',
+        }
+        t = Table(show_header=True, header_style='bold cyan', box=None, padding=(0,2))
+        t.add_column('Regime',      style='bold', width=12)
+        t.add_column('Period',      width=26)
+        t.add_column('Duration',    justify='right', width=10)
+        t.add_column('Move',        justify='right', width=8)
+        t.add_column('Avg Vol',     justify='right', width=10)
+        t.add_column('vs Baseline', justify='right', width=12)
+        t.add_column('Signature',   width=42)
+        for name, d1, d2, col, dur, move in REGIMES:
+            avg_vol = _get_avg_volume(d1, d2)
+            ratio = avg_vol / vol_all if vol_all else 0
+            mc = 'green' if move > 0 else 'red'
+            t.add_row(
+                f'[{col}]{name}[/{col}]',
+                f'{d1}  →  {d2}',
+                f'{dur} months',
+                f'[{mc}]{move:+d}%[/{mc}]',
+                f'{avg_vol/1e6:.1f}M',
+                f'{ratio:.2f}x',
+                f'[dim]{chars[name]}[/dim]'
+            )
+        console.print(t)
+        console.print()
+        console.print('  [dim]Current WEAK regime (21m) is longer than historical downtrend avg (18m).[/dim]')
+        console.print('  [dim]Extended weak phases have historically preceded sharp recoveries.[/dim]')
+
+    # ── B: Regime Playbook ──
+    elif choice == 'b':
+        console.rule('Regime Playbook — Sector Performance per Regime')
+        console.print()
+        sec_data = {name: _get_sector_ret(d1, d2) for name, d1, d2, *_ in REGIMES}
+        all_secs = sorted(set(s for d in sec_data.values() for s in d.keys()))
+
+        t = Table(show_header=True, header_style='bold cyan', box=None, padding=(0,1))
+        t.add_column('Sector', width=32)
+        for name, *_ in REGIMES:
+            t.add_column(name, justify='right', width=12)
+        t.add_column('Best In', width=12)
+
+        for sec in all_secs:
+            best_val, best_name, best_col = -9999, '', 'white'
+            cells = []
+            for name, _, _, col, _, _ in REGIMES:
+                v = sec_data[name].get(sec)
+                ret = v[0] if v else None
+                if ret is not None and ret > best_val:
+                    best_val, best_name, best_col = ret, name, col
+                if ret is None:
+                    cells.append('[dim]n/a[/dim]')
+                else:
+                    c = 'green' if ret > 10 else ('red' if ret < -10 else ('yellow' if ret < 0 else 'white'))
+                    cells.append(f'[{c}]{ret:+.0f}%[/{c}]')
+            t.add_row(sec, *cells, f'[{best_col}]{best_name}[/{best_col}]')
+        console.print(t)
+        console.print()
+        console.print('  [bold cyan]Key patterns:[/bold cyan]')
+        console.print('  [dim]Uptrend leaders: Finance, Others, Investment — buy these when regime flips[/dim]')
+        console.print('  [dim]First movers: Hotels + Insurance (most beaten → most bounce at turn)[/dim]')
+        console.print('  [dim]Bear defense: Microfinance new listings, small Hydro[/dim]')
+
+    # ── C: Stock Leaders ──
+    elif choice == 'c':
+        console.rule('Stock Leaders by Regime')
+        console.print()
+
+        console.print('[bold green]TOP 15 in UPTREND (Jun 2023 – Aug 2024):[/bold green]')
+        t = Table(show_header=True, header_style='bold', box=None, padding=(0,2))
+        t.add_column('Symbol', width=10); t.add_column('Sector', width=32); t.add_column('Return', justify='right', width=10)
+        for sym, sec, ret, *_ in _get_top_stocks('2023-06-01', '2024-08-31', 15, 'DESC'):
+            c = 'green' if ret > 0 else 'red'
+            t.add_row(f'[bold]{sym}[/bold]', f'[dim]{sec}[/dim]', f'[{c}]{ret:+.0f}%[/{c}]')
+        console.print(t); console.print()
+
+        console.print('[bold yellow]FIRST MOVERS — first 30 days of uptrend (Jun 2023):[/bold yellow]')
+        console.print('[dim]  These move BEFORE the main rally — watch these sectors first[/dim]')
+        t2 = Table(show_header=True, header_style='bold', box=None, padding=(0,2))
+        t2.add_column('Symbol', width=10); t2.add_column('Sector', width=32); t2.add_column('30d Return', justify='right', width=12)
+        for sym, sec, ret, *_ in _get_top_stocks('2023-06-01', '2023-06-30', 12, 'DESC'):
+            c = 'green' if ret > 0 else 'red'
+            t2.add_row(f'[bold]{sym}[/bold]', f'[dim]{sec}[/dim]', f'[{c}]{ret:+.0f}%[/{c}]')
+        console.print(t2); console.print()
+
+        console.print('[bold red]WORST in DOWNTREND (May 2021 – Oct 2022) — avoid in bear:[/bold red]')
+        t3 = Table(show_header=True, header_style='bold', box=None, padding=(0,2))
+        t3.add_column('Symbol', width=10); t3.add_column('Sector', width=32); t3.add_column('Return', justify='right', width=10)
+        for sym, sec, ret, *_ in _get_top_stocks('2021-05-01', '2022-10-31', 10, 'ASC'):
+            t3.add_row(f'[bold]{sym}[/bold]', f'[dim]{sec}[/dim]', f'[red]{ret:+.0f}%[/red]')
+        console.print(t3); console.print()
+
+        console.print('[bold cyan]MOST RESILIENT in DOWNTREND — hold/accumulate in bear:[/bold cyan]')
+        t4 = Table(show_header=True, header_style='bold', box=None, padding=(0,2))
+        t4.add_column('Symbol', width=10); t4.add_column('Sector', width=32); t4.add_column('Return', justify='right', width=10)
+        for sym, sec, ret, *_ in _get_top_stocks('2021-05-01', '2022-10-31', 10, 'DESC'):
+            c = 'green' if ret > 0 else 'yellow'
+            t4.add_row(f'[bold]{sym}[/bold]', f'[dim]{sec}[/dim]', f'[{c}]{ret:+.0f}%[/{c}]')
+        console.print(t4)
+
+    # ── D: Pre-Move Detector ──
+    elif choice == 'd':
+        console.rule('Pre-Move Detector — Current vs Historical Patterns')
+        console.print()
+        cc = _current_conditions()
+
+        def chk(val, cond):
+            ok = cond(val)
+            return ('[green]✓[/green]' if ok else '[red]✗[/red]'), ok
+
+        console.print('[bold yellow]Pre-UPTREND Checklist (based on Oct 2022 → Jun 2023 bottom pattern):[/bold yellow]')
+        console.print()
+        s1, ok1 = chk(cc['vol_ratio_3m'], lambda v: 0.7 <= v <= 2.5)
+        s2, ok2 = chk(cc['breadth'],      lambda v: v < 52)
+        s3, ok3 = chk(cc['price_chg_3m'], lambda v: v < 8)
+        console.print(f'  {s1}  Volume ratio {cc["vol_ratio_3m"]:.2f}x  [dim](need 0.7–2.5x; pre-rally was ~1.1x)[/dim]')
+        console.print(f'  {s2}  Breadth {cc["breadth"]:.0f}%  [dim](need <52%; pre-rally was ~42%)[/dim]')
+        console.print(f'  {s3}  Price 3m change {cc["price_chg_3m"]:+.1f}%  [dim](need <8%; pre-rally was -8%)[/dim]')
+        score = sum([ok1, ok2, ok3])
+        col = 'green' if score == 3 else ('yellow' if score == 2 else 'red')
+        console.print()
+        console.print(f'  Pre-Uptrend Score: [{col}]{score}/3[/{col}]  ' + ('█'*score + '░'*(3-score)))
+        if score == 3:
+            console.print('  [bold green]→ CONDITIONS MATCH pre-rally pattern — watch for volume spike to confirm[/bold green]')
+        elif score == 2:
+            console.print('  [yellow]→ Partial match — conditions approaching but not fully aligned[/yellow]')
+        else:
+            console.print('  [red]→ Does not match pre-rally pattern yet[/red]')
+        console.print()
+
+        console.print('[bold red]Pre-TOP Warning Checklist (based on Jun–Aug 2024 top pattern):[/bold red]')
+        console.print()
+        w1, wok1 = chk(cc['vol_ratio_3m'], lambda v: v > 1.8)
+        w2, wok2 = chk(cc['breadth'],      lambda v: v > 65)
+        w3, wok3 = chk(cc['price_chg_3m'], lambda v: v > 15)
+        console.print(f'  {w1}  Volume spike {cc["vol_ratio_3m"]:.2f}x  [dim](warning if >1.8x; top was 2.1x)[/dim]')
+        console.print(f'  {w2}  Breadth {cc["breadth"]:.0f}%  [dim](warning if >65%; top was ~71%)[/dim]')
+        console.print(f'  {w3}  Price 3m {cc["price_chg_3m"]:+.1f}%  [dim](warning if >15%; top was +18%)[/dim]')
+        top_score = sum([wok1, wok2, wok3])
+        col2 = 'red' if top_score >= 2 else ('yellow' if top_score == 1 else 'green')
+        console.print()
+        console.print(f'  Top Warning Score: [{col2}]{top_score}/3[/{col2}]')
+        if top_score >= 2:
+            console.print('  [bold red]→ TOP WARNING — reduce exposure[/bold red]')
+        else:
+            console.print('  [green]→ Low top risk currently[/green]')
+
+    # ── E: Early Leaders Now ──
+    elif choice == 'e':
+        console.rule('Early Leaders Now — Pre-Uptrend Setup Stocks')
+        console.print('[dim]  Near 60d support + volume building + not yet running = early leader pattern[/dim]')
+        console.print('[dim]  Matches stocks that led the Jun 2023 rally in its first weeks[/dim]')
+        console.print()
+        leaders = _early_leaders()
+        if not leaders:
+            console.print('  [yellow]No stocks currently match the early leader pattern.[/yellow]')
+        else:
+            t = Table(show_header=True, header_style='bold cyan', box=None, padding=(0,2))
+            t.add_column('Score', justify='center', width=7)
+            t.add_column('Symbol', width=10)
+            t.add_column('Sector', width=32)
+            t.add_column('Price', justify='right', width=8)
+            t.add_column('60d Pos', justify='right', width=9)
+            t.add_column('Vol Ratio', justify='right', width=10)
+            t.add_column('5d Ret', justify='right', width=9)
+            for score, sym, sec, cur, pos, vol_r, ret5 in leaders:
+                pc = 'green' if pos < 35 else ('yellow' if pos < 50 else 'white')
+                vc = 'green' if vol_r > 1.5 else 'yellow'
+                rc = 'green' if ret5 > 0 else ('red' if ret5 < -3 else 'yellow')
+                t.add_row(
+                    f'[bold]{score}[/bold]',
+                    f'[bold cyan]{sym}[/bold cyan]',
+                    f'[dim]{sec}[/dim]',
+                    f'{cur:.0f}',
+                    f'[{pc}]{pos:.0f}%[/{pc}]',
+                    f'[{vc}]{vol_r:.2f}x[/{vc}]',
+                    f'[{rc}]{ret5:+.1f}%[/{rc}]'
+                )
+            console.print(t)
+            console.print()
+            console.print('  [dim]Score 6=strongest  |  60d Pos <35%=near support  |  Vol >1.5x=building[/dim]')
+
+    # ── F: Full Report ──
+    elif choice == 'f':
+        console.rule('[bold]Full Market Regime Report + Recommendation[/bold]')
+        console.print()
+        cc = _current_conditions()
+
+        console.print('[bold cyan]═══ CURRENT MARKET STATE ═══[/bold cyan]')
+        console.print()
+        vc = 'red' if cc['vol_ratio_3m'] < 0.5 else ('yellow' if cc['vol_ratio_3m'] < 1.0 else 'green')
+        bc = 'green' if cc['breadth'] > 55 else ('red' if cc['breadth'] < 40 else 'yellow')
+        pc = 'green' if cc['price_chg_3m'] > 0 else 'red'
+        console.print(f'  Regime:       [red]WEAK/DISTRIBUTION[/red] (21 months — longest in dataset)')
+        console.print(f'  Volume:       [{vc}]{cc["vol_now"]/1e6:.2f}M[/{vc}] now  vs  {cc["vol_3m"]/1e6:.2f}M 3m avg  =  [{vc}]{cc["vol_ratio_3m"]:.2f}x[/{vc}]')
+        console.print(f'  Breadth:      [{bc}]{cc["breadth"]:.0f}%[/{bc}] stocks above 20d avg')
+        console.print(f'  Price 3m:     [{pc}]{cc["price_chg_3m"]:+.1f}%[/{pc}]')
+        console.print()
+
+        console.print('[bold cyan]═══ CLOSEST HISTORICAL ANALOGUE ═══[/bold cyan]')
+        console.print()
+        console.print('  [yellow]Oct 2022 — end of 18-month downtrend (most similar to now)[/yellow]')
+        console.print('  [dim]  • Volume had collapsed to ~3M avg[/dim]')
+        console.print('  [dim]  • Breadth was at ~38%[/dim]')
+        console.print('  [dim]  • 7 months of sideways consolidation followed[/dim]')
+        console.print('  [dim]  • Then +59% uptrend started Jun 2023[/dim]')
+        console.print('  [dim]  • First sectors: Hotels, Insurance, Finance[/dim]')
+        console.print()
+
+        console.print('[bold cyan]═══ SECTOR STRATEGY ═══[/bold cyan]')
+        console.print()
+        console.print('  [bold]While WEAK continues (base case):[/bold]')
+        console.print('  [green]  HOLD/BUY:[/green] Manufacturing (+154%), Hotels (+92%), Dev Banks')
+        console.print('  [red]  AVOID:[/red]    Finance (-23%), Tradings (-6%), Comm Banks (-3%)')
+        console.print()
+        console.print('  [bold]When UPTREND starts — deploy in this order:[/bold]')
+        console.print('  [green]  Week 1-2:[/green] Hotels & Tourism, Life Insurance, Non-Life Insurance')
+        console.print('  [dim]           (most beaten sectors → biggest bounce at the turn)[/dim]')
+        console.print('  [green]  Week 3-4:[/green] Finance, Microfinance, Investment')
+        console.print('  [green]  Month 2+:[/green] Hydro Power, Dev Banks, Comm Banks, Others')
+        console.print()
+
+        console.print('[bold cyan]═══ TRIGGER SIGNALS TO WATCH ═══[/bold cyan]')
+        console.print()
+        vol_trig = cc['vol_3m'] * 2.0
+        console.print(f'  Volume trigger:    [yellow]{vol_trig/1e6:.1f}M+[/yellow] daily avg sustained 2 weeks  [dim](now {cc["vol_now"]/1e6:.2f}M)[/dim]')
+        console.print(f'  Breadth trigger:   [yellow]55%+[/yellow] stocks above 20d avg  [dim](now {cc["breadth"]:.0f}%)[/dim]')
+        console.print(f'  Seasonal trigger:  [yellow]Jul S.BUY[/yellow] signal  [dim](historically 5/5 up for index)[/dim]')
+        console.print(f'  Phase trigger:     [yellow]Option 37 score > 55[/yellow]  [dim](accumulation confirmed)[/dim]')
+        console.print()
+
+        leaders = _early_leaders()
+        if leaders:
+            console.print('[bold cyan]═══ TOP EARLY LEADER CANDIDATES ═══[/bold cyan]')
+            console.print('[dim]  Near support + volume building = potential first movers[/dim]')
+            console.print()
+            for score, sym, sec, cur, pos, vol_r, ret5 in leaders[:8]:
+                console.print(f'  [bold cyan]{sym:<10}[/bold cyan] {sec:<30} [dim]score:{score}  pos:{pos:.0f}%  vol:{vol_r:.1f}x  5d:{ret5:+.1f}%[/dim]')
+
+        console.print()
+        console.print('  [dim]All analysis based on 2021–2026 data (5 years). Research only. Not financial advice.[/dim]')
+
+    else:
+        console.print('[yellow]Invalid choice. Enter a-f.[/yellow]')
+
+    console.print()
+
+
 def main():
     args = parse_args()
 
@@ -7026,6 +7436,14 @@ def main():
         return
     elif getattr(args, 'deployment_planner', False):
         analyze_deployment_planner()
+        return
+    elif getattr(args, 'market_regime', False):
+        import sqlite3
+        from rich.console import Console
+        conn = sqlite3.connect('nepse_market_data.db')
+        console = Console()
+        analyze_market_regime(conn, console)
+        conn.close()
         return
     elif getattr(args, 'sector_season', False):
         analyze_sector_seasonality()
