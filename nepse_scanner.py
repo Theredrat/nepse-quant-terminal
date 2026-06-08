@@ -6518,7 +6518,100 @@ def analyze_sector_seasonality(db_path='nepse_market_data.db'):
         hist = stats[10]
         return f'   [dim]{label}: ' + '  '.join(f'{fy}:{r:+.0f}%' for fy,r in hist) + '[/dim]'
 
-    def _print_section(title, all_sectors, stats_map, order, label_fn, curr_lbl, next_lbl):
+    def _actual_vs_expected(sect, curr_lbl, stats_map, period_type):
+        """Calculate actual return so far for current period vs historical expectation."""
+        try:
+            # Get historical expectation
+            hist_stats = stats_map.get(sect, {}).get(curr_lbl)
+            if not hist_stats: return None
+            exp_avg, exp_wins, exp_total, exp_best, exp_worst, exp_up, exp_dn, exp_sw, min_sw, max_sw, _ = hist_stats
+
+            # Get actual data for current period
+            if period_type == 'gm':
+                date_from = f'{today.year}-{today.month:02d}-01'
+            elif period_type == 'gq':
+                qstart = {'Q1':1,'Q2':4,'Q3':7,'Q4':10}.get(str(curr_lbl), today.month)
+                date_from = f'{today.year}-{qstart:02d}-01'
+            elif period_type == 'fyq':
+                fyq_starts = {'FYQ1':4,'FYQ2':7,'FYQ3':10,'FYQ4':1}
+                bsm_start = fyq_starts[curr_fyq]
+                # Convert BS month start to Greg approximate
+                date_from = f'{today.year}-{today.month:02d}-01'  # approximate
+            else:
+                date_from = f'{today.year}-{today.month:02d}-01'
+
+            # Get sector index for current period
+            sect_rows = []
+            for dt_str in sorted(sect_index.get(sect, {}).keys()):
+                if dt_str >= date_from:
+                    sect_rows.append((dt_str, sect_index[sect][dt_str]))
+
+            if len(sect_rows) < 2: return None
+
+            first_dt, first_ohlc = sect_rows[0]
+            last_dt,  last_ohlc  = sect_rows[-1]
+            open_p  = first_ohlc[0]  # open of first day
+            close_p = last_ohlc[3]   # close of last day
+            high_p  = max(o[1] for _,o in sect_rows)
+            low_p   = min(o[2] for _,o in sect_rows if o[2]>0)
+
+            if open_p <= 0: return None
+            act_ret = (close_p - open_p) / open_p * 100
+            act_up  = (high_p  - open_p) / open_p * 100
+            act_dn  = (open_p  - low_p)  / open_p * 100 if low_p > 0 else 0
+            act_sw  = (high_p  - low_p)  / low_p  * 100 if low_p > 0 else 0
+            n_days  = len(sect_rows)
+
+            # Volume ratio (actual vs expected avg)
+            # Use last 5 days vs prior 20 days from sect_index
+            all_dates = sorted(sect_index.get(sect, {}).keys())
+            curr_idx  = all_dates.index(last_dt) if last_dt in all_dates else -1
+            if curr_idx >= 5:
+                # approximate volume from stock_prices
+                pass
+
+            # Status
+            diff = act_ret - exp_avg
+            if abs(diff) <= 2:        status = 'AS EXPECTED ↔'
+            elif diff > 5:            status = 'OUTPERFORMING ▲▲'
+            elif diff > 2:            status = 'OUTPERFORMING ▲'
+            elif diff < -5:           status = 'UNDERPERFORMING ▼▼'
+            else:                     status = 'UNDERPERFORMING ▼'
+
+            # Color
+            if act_ret >= exp_avg - 1: col = 'green'
+            elif act_ret >= 0:          col = 'yellow'
+            else:                       col = 'red'
+
+            st_col = 'green' if '▲' in status else 'red' if '▼' in status else 'yellow'
+
+            return {
+                'exp_avg': exp_avg, 'exp_up': exp_up, 'exp_dn': exp_dn, 'exp_sw': exp_sw,
+                'act_ret': act_ret, 'act_up': act_up, 'act_dn': act_dn, 'act_sw': act_sw,
+                'n_days': n_days, 'status': status, 'col': col, 'st_col': st_col,
+                'exp_wins': exp_wins, 'exp_total': exp_total,
+            }
+        except:
+            return None
+
+    def _print_actual(sect, curr_lbl, stats_map, period_type):
+        """Print actual vs expected line under the table."""
+        av = _actual_vs_expected(sect, curr_lbl, stats_map, period_type)
+        if not av: return
+        col    = av['col']
+        st_col = av['st_col']
+        console.print(
+            f'   [bold]2026 actual[/bold] ({av["n_days"]}d):  '
+            f'[{col}]{av["act_ret"]:+.1f}%[/{col}]  '
+            f'Swing:{av["act_sw"]:.0f}%  '
+            f'Up:[green]+{av["act_up"]:.1f}%[/green]  '
+            f'Dn:[red]-{av["act_dn"]:.1f}%[/red]  '
+            f'vs Expected:[dim]{av["exp_avg"]:+.1f}% ({av["exp_wins"]}/{av["exp_total"]} up)[/dim]  '
+            f'[{st_col}]{av["status"]}[/{st_col}]',
+            highlight=False
+        )
+
+    def _print_section(title, all_sectors, stats_map, order, label_fn, curr_lbl, next_lbl, period_type='gm'):
         console.rule(f'[bold cyan]{title}[/bold cyan]', style='cyan')
         console.print()
         for sect in all_sectors:
@@ -6538,6 +6631,8 @@ def analyze_sector_seasonality(db_path='nepse_market_data.db'):
                 lbl = label_fn(key)
                 marker = ' <-NOW' if key==curr_lbl else (' <-NXT' if key==next_lbl else '')
                 console.print(_hist(stats[key], f'{lbl}{marker}'))
+                if key == curr_lbl:
+                    _print_actual(sect, curr_lbl, stats_map, period_type)
             console.print()
 
     all_sectors = sorted(sect_index.keys())
@@ -6560,22 +6655,22 @@ def analyze_sector_seasonality(db_path='nepse_market_data.db'):
     if choice == 'a':
         _print_section('Greg Monthly Seasonality', all_sectors, gm_stats,
             list(range(1,13)), lambda k: MONTH_NAMES[k-1],
-            today.month, next_gm)
+            today.month, next_gm, 'gm')
 
     elif choice == 'b':
         _print_section('Nepali Monthly Seasonality (BS)', all_sectors, bsm_stats,
             list(range(1,13)), lambda k: _bs_names.get(k, str(k)),
-            curr_bsm, next_bsm)
+            curr_bsm, next_bsm, 'bsm')
 
     elif choice == 'c':
         _print_section('FYQ Seasonality — Shrawan-based Quarters', all_sectors, fyq_stats,
             FYQ_ORDER, lambda k: f'{k}({FYQ_LABELS[k]})',
-            curr_fyq, next_fyq)
+            curr_fyq, next_fyq, 'fyq')
 
     elif choice == 'd':
         _print_section('Greg Quarterly Seasonality', all_sectors, gq_stats,
             GQ_ORDER, lambda k: f'{k}({GQ_LABELS[k]})',
-            curr_gq, next_gq)
+            curr_gq, next_gq, 'gq')
 
     elif choice == 'e':
         # ══ FULL SUMMARY ══
