@@ -1658,12 +1658,62 @@ def analyze_quick_pick(live_df, top_n=10, db_path="nepse_market_data.db", offlin
     console.print("[dim]Best stocks for 10%+ gain in 7 days to 1 month — signals only[/dim]\n")
 
     console.print(f"[dim]offline={offline} live_df rows={len(live_df) if live_df is not None else 0}[/dim]")
+    # ── Offline fallback: build synthetic df from DB ──────────────────────────
     if live_df is None or live_df.empty:
-        console.print("[red]No live data.[/red]")
-        return []
-
-    df = live_df.copy()
-    df = df[df["ltp"].notna() & df["volume"].notna() & (df["ltp"] > 0)].copy()
+        try:
+            import pandas as _pd
+            _conn = __import__("sqlite3").connect(db_path)
+            _c = _conn.cursor()
+            _latest = _c.execute("SELECT MAX(date) FROM stock_prices").fetchone()[0]
+            if not _latest:
+                console.print("[red]No live data and DB is empty.[/red]")
+                _conn.close()
+                return []
+            _prev = _c.execute(
+                "SELECT MAX(date) FROM stock_prices WHERE date < ?", (_latest,)
+            ).fetchone()[0]
+            _rows = _c.execute(
+                "SELECT symbol, close, high, low, volume, open FROM stock_prices WHERE date=?",
+                (_latest,)
+            ).fetchall()
+            _base = {r[0]: {"symbol": r[0], "ltp": r[1], "high": r[2], "low": r[3],
+                             "volume": r[4], "open": r[5]} for r in _rows}
+            if _prev:
+                for sym, cl in _c.execute(
+                    "SELECT symbol, close FROM stock_prices WHERE date=?", (_prev,)
+                ).fetchall():
+                    if sym in _base:
+                        _base[sym]["prev_close"] = cl
+            for sym, h52, l52 in _c.execute(
+                "SELECT symbol, MAX(high), MIN(low) FROM stock_prices "
+                "WHERE date >= date(?, '-365 days') GROUP BY symbol", (_latest,)
+            ).fetchall():
+                if sym in _base:
+                    _base[sym]["week52_high"] = h52
+                    _base[sym]["week52_low"] = l52
+            _conn.close()
+            _df_rows = list(_base.values())
+            if not _df_rows:
+                console.print("[red]No data in DB.[/red]")
+                return []
+            df = _pd.DataFrame(_df_rows)
+            df["change_pct"] = df.apply(
+                lambda r: ((r["ltp"] - r.get("prev_close", 0)) / r["prev_close"] * 100)
+                if r.get("prev_close", 0) > 0 else 0.0, axis=1
+            )
+            df["turnover"] = df["ltp"] * df["volume"]
+            df["h52"] = df.get("week52_high", df["high"])
+            df["l52"] = df.get("week52_low", df["low"])
+            offline = True
+            console.print(
+                f"[yellow]⚠ Offline mode — using DB data ({_latest})[/yellow]"
+            )
+        except Exception as _e:
+            console.print(f"[red]No live data. DB fallback failed: {_e}[/red]")
+            return []
+    else:
+        df = live_df.copy()
+        df = df[df["ltp"].notna() & df["volume"].notna() & (df["ltp"] > 0)].copy()
 
     # --- Load DB data ---
     db_vol_avg = {}
@@ -1687,19 +1737,22 @@ def analyze_quick_pick(live_df, top_n=10, db_path="nepse_market_data.db", offlin
         for sym, avg_vol in c.fetchall():
             db_vol_avg[sym] = avg_vol or 0
 
-        # RS proxy from fundamentals (ROE - sector avg ROE)
-        c.execute("SELECT symbol, roe, sector FROM fundamentals WHERE date = (SELECT MAX(date) FROM fundamentals)")
-        rows = c.fetchall()
-        sector_roe = {}
-        for sym, roe, sector in rows:
-            if roe and sector:
-                if sector not in sector_roe:
-                    sector_roe[sector] = []
-                sector_roe[sector].append(roe)
-        sector_roe_avg = {s: sum(v)/len(v) for s,v in sector_roe.items() if v}
-        for sym, roe, sector in rows:
-            if roe and sector and sector in sector_roe_avg:
-                db_rs[sym] = roe - sector_roe_avg[sector]
+        # RS from price history: weighted 5d/10d/20d return vs market average
+        _latest_d = c.execute("SELECT MAX(date) FROM stock_prices").fetchone()[0]
+        for _days, _w in ((5, 0.5), (10, 0.3), (20, 0.2)):
+            _past_row = c.execute(
+                "SELECT date FROM (SELECT DISTINCT date FROM stock_prices "
+                "ORDER BY date DESC) LIMIT 1 OFFSET ?", (_days,)
+            ).fetchone()
+            if not _past_row:
+                continue
+            _past_d = _past_row[0]
+            _cur  = dict(c.execute("SELECT symbol, close FROM stock_prices WHERE date=?", (_latest_d,)).fetchall())
+            _old  = dict(c.execute("SELECT symbol, close FROM stock_prices WHERE date=?", (_past_d,)).fetchall())
+            _rets = {s: ((_cur[s]-_old[s])/_old[s]*100) for s in _cur if s in _old and _old[s]>0}
+            _avg  = sum(_rets.values())/len(_rets) if _rets else 0
+            for sym, ret in _rets.items():
+                db_rs[sym] = db_rs.get(sym, 0) + (ret - _avg) * _w
 
         # Broker net buy (last 3 days)
         c.execute("""
@@ -1747,14 +1800,26 @@ def analyze_quick_pick(live_df, top_n=10, db_path="nepse_market_data.db", offlin
         reasons = []
 
         # 1. Momentum (max 25 pts)
-        if chg >= 5:
-            score += 25; reasons.append("Strong momentum")
-        elif chg >= 3:
-            score += 18; reasons.append("Good momentum")
-        elif chg >= 1:
-            score += 10; reasons.append("Positive")
-        elif chg < 0:
-            score -= 10
+        if offline:
+            # Offline: weighted 5d/10d/20d price RS vs market average
+            rs_val = db_rs.get(sym, 0) or 0
+            if rs_val >= 3:
+                score += 25; reasons.append(f"RS strong ({rs_val:.1f}%)")
+            elif rs_val >= 1:
+                score += 18; reasons.append(f"RS good ({rs_val:.1f}%)")
+            elif rs_val >= 0:
+                score += 10; reasons.append(f"RS positive ({rs_val:.1f}%)")
+            else:
+                score -= 5
+        else:
+            if chg >= 5:
+                score += 25; reasons.append("Strong momentum")
+            elif chg >= 3:
+                score += 18; reasons.append("Good momentum")
+            elif chg >= 1:
+                score += 10; reasons.append("Positive")
+            elif chg < 0:
+                score -= 10
 
         # 2. Volume surge — use stock own 20D avg if available (max 25 pts)
         own_avg_vol = db_vol_avg.get(sym, 0)
@@ -1833,7 +1898,7 @@ def analyze_quick_pick(live_df, top_n=10, db_path="nepse_market_data.db", offlin
 
         # Filter - relax in offline mode
         if offline:
-            if score < 15: continue
+            if score < 10: continue
         else:
             if chg <= 0 or score < 30: continue
 
@@ -1892,12 +1957,13 @@ def analyze_smart_pick(live_df, full_df, top_n=10):
     console.print(Rule("[bold cyan]Smart Stock Pick[/bold cyan]", style="cyan"))
     console.print("[dim]Best stocks for 10%+ gain — signals + broker activity + whale confirmation[/dim]\n")
 
-    if live_df is None or live_df.empty:
-        console.print("[red]No live data.[/red]")
-        return
+    # ── Offline: pass None so Quick Pick builds its own DB df ────────────────
+    _live = live_df if (live_df is not None and not live_df.empty) else None
+    if _live is None:
+        console.print("[yellow]⚠ Offline mode — using DB data for Smart Pick[/yellow]")
 
     # Start with quick pick scores as base
-    quick_scores = analyze_quick_pick(live_df, top_n=50)
+    quick_scores = analyze_quick_pick(_live, top_n=50)
     if not quick_scores:
         return
 

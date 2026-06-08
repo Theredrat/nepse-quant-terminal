@@ -112,8 +112,8 @@ set /p choice=  Pick a number and press Enter:
 if "%choice%"=="1" goto RUN_FULLSCAN
 if "%choice%"=="2" goto RUN_MOVERS
 if "%choice%"=="3" goto RUN_WATCHLIST
-if "%choice%"=="4"  python nepse_scanner.py --quickpick & goto AGAIN
-if "%choice%"=="5"  python nepse_scanner.py --smartpick & goto AGAIN
+if "%choice%"=="4" goto RUN_QUICKPICK
+if "%choice%"=="5" goto RUN_SMARTPICK
 if "%choice%"=="6"  python nepse_scanner.py --powersell & goto AGAIN
 if "%choice%"=="7"  python nepse_scanner.py --sector & goto AGAIN
 if "%choice%"=="7t" python nepse_scanner.py --sector-trend & goto AGAIN
@@ -337,3 +337,16 @@ goto MENU
 
 
 
+
+
+:RUN_QUICKPICK
+python _marketcheck.py
+if errorlevel 1 python nepse_scanner.py --quickpick --offline & goto AGAIN
+python nepse_scanner.py --quickpick
+goto AGAIN
+
+:RUN_SMARTPICK
+python _marketcheck.py
+if errorlevel 1 python nepse_scanner.py --smartpick --offline & goto AGAIN
+python nepse_scanner.py --smartpick
+goto AGAIN
