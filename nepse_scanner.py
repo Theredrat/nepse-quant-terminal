@@ -328,7 +328,7 @@ def auto_update_watchlist(rs_data, full_fs, db_path, top_n=15, silent=False):
                     eps_growth_map[sym] = (eps_list[-1] - eps_list[-2]) / abs(eps_list[-2]) * 100
     except: pass
 
-    # Broker net activity
+    # Broker: 1-day + 5-day trend
     broker_map = {}
     try:
         latest = conn.execute('SELECT MAX(date) FROM broker_activity').fetchone()[0]
@@ -342,14 +342,35 @@ def auto_update_watchlist(rs_data, full_fs, db_path, top_n=15, silent=False):
             for sym, net_qty, net_val in rows:
                 nq = net_qty or 0
                 nv = net_val or 0
-                broker_map[sym] = {'net_qty': nq, 'net_val': nv, 'top20': abs(nv) >= threshold and nv > 0}
+                broker_map[sym] = {'net_qty': nq, 'net_val': nv, 'top20': abs(nv) >= threshold and nv > 0, 'trend_days': 0}
+            dates5 = [r[0] for r in conn.execute(
+                'SELECT DISTINCT date FROM broker_activity ORDER BY date DESC LIMIT 5'
+            ).fetchall()]
+            if len(dates5) >= 2:
+                ph = ','.join('?' * len(dates5))
+                trend_rows = conn.execute(
+                    'SELECT symbol, date, SUM(net_qty) FROM broker_activity WHERE date IN (' + ph + ') GROUP BY symbol, date',
+                    dates5
+                ).fetchall()
+                trend_count = defaultdict(int)
+                for sym, dt, nq in trend_rows:
+                    if (nq or 0) > 0:
+                        trend_count[sym] += 1
+                for sym, days in trend_count.items():
+                    if sym in broker_map:
+                        broker_map[sym]['trend_days'] = days
+                    else:
+                        broker_map[sym] = {'net_qty': 0, 'net_val': 0, 'top20': False, 'trend_days': days}
     except: pass
 
-    # Volume spike vs 20d avg
+    # Volume: spike + 3-day rising
     vol_map = {}
     try:
         latest_price = conn.execute('SELECT MAX(date) FROM stock_prices').fetchone()[0]
         if latest_price:
+            dates3 = [r[0] for r in conn.execute(
+                'SELECT DISTINCT date FROM stock_prices ORDER BY date DESC LIMIT 3'
+            ).fetchall()]
             cur_vol = {r[0]: r[1] for r in conn.execute(
                 'SELECT symbol, volume FROM stock_prices WHERE date=?', (latest_price,)
             ).fetchall()}
@@ -357,10 +378,57 @@ def auto_update_watchlist(rs_data, full_fs, db_path, top_n=15, silent=False):
                 'SELECT symbol, AVG(volume) FROM stock_prices WHERE date >= date(?, "-20 days") GROUP BY symbol',
                 (latest_price,)
             ).fetchall()}
+            day_vols = defaultdict(dict)
+            if len(dates3) >= 2:
+                ph = ','.join('?' * len(dates3))
+                for sym, dt, vol in conn.execute(
+                    'SELECT symbol, date, volume FROM stock_prices WHERE date IN (' + ph + ')',
+                    dates3
+                ).fetchall():
+                    day_vols[sym][dt] = vol or 0
             for sym, avg in avg_vol.items():
                 vol = cur_vol.get(sym) or 0
-                vol_map[sym] = {'spike': vol > avg * 1.5 if avg > 0 else False, 'avg': avg}
+                spike = vol > avg * 1.5 if avg > 0 else False
+                sym_vols = [day_vols[sym].get(d, 0) for d in sorted(dates3)]
+                rising = (len(sym_vols) >= 2
+                          and all(sym_vols[i] > sym_vols[i-1] for i in range(1, len(sym_vols)))
+                          and sym_vols[-1] > 0)
+                vol_map[sym] = {'spike': spike, 'rising': rising, 'avg': avg}
     except: pass
+
+    # Price position vs 52w range
+    price_pos_map = {}
+    try:
+        latest_price = conn.execute('SELECT MAX(date) FROM stock_prices').fetchone()[0]
+        if latest_price:
+            rows = conn.execute(
+                'SELECT symbol, close FROM stock_prices WHERE date=?',
+                (latest_price,)
+            ).fetchall()
+            hi52 = {}
+            lo52 = {}
+            for sym, lo, hi in conn.execute(
+                'SELECT symbol, MIN(close), MAX(close) FROM stock_prices'
+                ' WHERE date >= date(?, "-252 days") GROUP BY symbol',
+                (latest_price,)
+            ).fetchall():
+                lo52[sym] = lo
+                hi52[sym] = hi
+            for sym, close in rows:
+                lo = lo52.get(sym)
+                hi = hi52.get(sym)
+                if close and lo and hi and hi > lo:
+                    pos_pct = (close - lo) / (hi - lo) * 100
+                    price_pos_map[sym] = pos_pct
+    except: pass
+
+    # RS momentum: rs5 > rs10 > rs20*0.8 = improving trend
+    rs_momentum_map = {}
+    for sym, rs in rs_map.items():
+        rs5  = rs.get('rs5',  0) or 0
+        rs10 = rs.get('rs10', 0) or 0
+        rs20 = rs.get('rs20', 0) or 0
+        rs_momentum_map[sym] = rs5 > rs10 and rs10 > rs20 * 0.8
 
     conn.close()
 
@@ -369,6 +437,8 @@ def auto_update_watchlist(rs_data, full_fs, db_path, top_n=15, silent=False):
     scores = {}
     for sym in all_syms:
         sc = 0
+
+        # RS level (max 35)
         rs = rs_map.get(sym, {})
         rs5  = rs.get('rs5',  0) or 0
         rs10 = rs.get('rs10', 0) or 0
@@ -379,12 +449,31 @@ def auto_update_watchlist(rs_data, full_fs, db_path, top_n=15, silent=False):
         elif rs10 > 1: sc += 5
         if rs20 > 2:  sc += 5
 
+        # RS momentum (max 15)
+        if rs_momentum_map.get(sym, False):
+            sc += 15
+
+        # Broker (max 25)
         bk = broker_map.get(sym, {})
         if bk.get('net_qty', 0) > 0: sc += 10
         if bk.get('top20', False):   sc += 5
+        td = bk.get('trend_days', 0)
+        if td >= 4:   sc += 10
+        elif td >= 3: sc += 7
+        elif td >= 2: sc += 3
 
-        if vol_map.get(sym, {}).get('spike', False): sc += 10
+        # Volume (max 20)
+        vm = vol_map.get(sym, {})
+        if vm.get('spike',  False): sc += 10
+        if vm.get('rising', False): sc += 10
 
+        # Price position near support (max 15)
+        pos = price_pos_map.get(sym, 50)
+        if pos <= 10:   sc += 15
+        elif pos <= 20: sc += 10
+        elif pos <= 35: sc += 5
+
+        # Fundamentals (max 33)
         fn = fund_map.get(sym, {})
         roe = fn.get('roe', 0) or 0
         pe  = fn.get('pe',  0) or 0
@@ -405,7 +494,9 @@ def auto_update_watchlist(rs_data, full_fs, db_path, top_n=15, silent=False):
             scores[sym] = sc
 
     ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-    top = [sym for sym, sc in ranked if vol_map.get(sym, {}).get('avg', 0) >= 2000 and rs_map.get(sym, {}).get('rs5', 0) > -2][:top_n]
+    top = [sym for sym, sc in ranked
+           if vol_map.get(sym, {}).get('avg', 0) >= 2000
+           and rs_map.get(sym, {}).get('rs5', 0) > -2][:top_n]
 
     if not top:
         if not silent: print('Watchlist: no candidates found')
@@ -419,7 +510,7 @@ def auto_update_watchlist(rs_data, full_fs, db_path, top_n=15, silent=False):
     WL_PATH.parent.mkdir(parents=True, exist_ok=True)
     json.dump(watchlist, open(str(WL_PATH), 'w', encoding='utf-8'), indent=2)
     if not silent:
-        print('Watchlist auto-updated ? top ' + str(len(top)) + ' by RS+Broker+Vol+ROE+EPS')
+        print('Watchlist auto-updated ✓ top ' + str(len(top)) + ' by RS+Momentum+Broker+Vol+Support+Fundamentals')
         if top: print('  Top: ' + ', '.join(top[:5]) + ('...' if len(top) > 5 else ''))
 
 def analyze_power_sell(full_df, live_df):
@@ -7419,6 +7510,8 @@ def analyze_market_regime(conn, console):
 
 def main():
     args = parse_args()
+    from rich.console import Console
+    console = Console()
 
     if getattr(args, 'preopen', None) is not None:
         cmd_preopen(args.preopen if args.preopen else None)
@@ -7439,11 +7532,7 @@ def main():
         return
     elif getattr(args, 'market_regime', False):
         import sqlite3
-        from rich.console import Console
-        conn = sqlite3.connect('nepse_market_data.db')
-        console = Console()
-        analyze_market_regime(conn, console)
-        conn.close()
+        analyze_market_regime(sqlite3.connect('nepse_market_data.db'), console)
         return
     elif getattr(args, 'sector_season', False):
         analyze_sector_seasonality()
