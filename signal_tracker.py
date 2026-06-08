@@ -1,20 +1,14 @@
 """
-signal_tracker.py  —  NEPSE Signal Performance Tracker
+signal_tracker.py  —  NEPSE Signal Performance Tracker  v3
 Option 32 in nepse_scanner.py menu
-
-Tracks signals from:
-  Option 4   → QUICK_PICK       target +7%   hold 3-5d
-  Option 5   → SMART_PICK       target +10%  hold 7-10d
-  Option 17f → MOMENTUM_HUNTER  target +12%  hold 10-14d
-  Option 41  → DEPLOY_READY     target +20%  hold 21-30d
-  Option 41  → DEPLOY_HOT       target +15%  hold 7-14d
 
 Features:
   - Per-signal win targets
   - Streak tracking (consecutive days + reappearance after gap)
   - Times picked in last 14 days
   - Move% from first logged price
-  - Entry status: OK / CAUTION / LATE / PULLBACK
+  - Entry status: OK / STRONG / RE-ENTRY / PULLBACK-BUY / CAUTION / LATE / AVOID
+  - Historical backtest score per symbol (from backtest_scores table)
   - 3d/7d/14d accuracy (all signals)
   - 30d accuracy (DEPLOY_READY / DEPLOY_HOT only)
 """
@@ -56,7 +50,6 @@ def get_conn():
             UNIQUE(date, symbol, signal)
         )
     """)
-    # Add result_30d column if missing (migration)
     try:
         conn.execute("ALTER TABLE signal_log ADD COLUMN result_30d REAL")
         conn.commit()
@@ -65,16 +58,12 @@ def get_conn():
     conn.commit()
     return conn
 
-# ── Logging API (called from nepse_scanner.py) ────────────────────────────────
+# ── Logging API ───────────────────────────────────────────────────────────────
 def log_signals_raw(signals, source='?'):
-    """
-    signals: list of dicts with keys: symbol, signal, ltp, score, reason
-    """
     if not signals:
         return
     conn = get_conn()
     today = datetime.now().strftime('%Y-%m-%d')
-    inserted = 0
     for s in signals:
         sym    = str(s.get('symbol', '')).strip().upper()
         sig    = str(s.get('signal', '')).strip().upper()
@@ -88,7 +77,6 @@ def log_signals_raw(signals, source='?'):
                 "INSERT OR IGNORE INTO signal_log (date,symbol,signal,source,entry_price,score,reason) VALUES (?,?,?,?,?,?,?)",
                 (today, sym, sig, source, ltp, score, reason)
             )
-            inserted += conn.execute("SELECT changes()").fetchone()[0]
         except Exception:
             pass
     conn.commit()
@@ -96,7 +84,6 @@ def log_signals_raw(signals, source='?'):
 
 # ── Update results ────────────────────────────────────────────────────────────
 def _get_price_after(conn, symbol, from_date, trading_days):
-    """Get closing price N trading days after from_date."""
     rows = conn.execute(
         "SELECT date, close FROM stock_prices WHERE symbol=? AND date>? ORDER BY date ASC",
         (symbol, from_date)
@@ -111,6 +98,14 @@ def _get_latest_price(conn, symbol):
         (symbol,)
     ).fetchone()
     return r[0] if r else None
+
+def _get_backtest_score(conn, symbol, signal):
+    """Get historical backtest win rate and avg return for this symbol+signal."""
+    r = conn.execute(
+        "SELECT win_rate, avg_return, expectancy, total FROM backtest_scores WHERE symbol=? AND signal=?",
+        (symbol, signal)
+    ).fetchone()
+    return r if r else None
 
 def update_results():
     conn = get_conn()
@@ -155,31 +150,20 @@ def update_results():
     conn.close()
     print(f"[signal_tracker] Updated {updated} entries.")
 
-# ── Streak & reappearance logic ───────────────────────────────────────────────
+# ── Streak logic ──────────────────────────────────────────────────────────────
 def _calc_streak(conn, symbol, signal, today_str):
-    """
-    Returns:
-      consec_streak  - consecutive days picked up to today
-      total_14d      - total times picked in last 14 days
-      last_gap       - days since last appearance before today (None if first time)
-      reappeared     - True if gap was 2-7 days (re-entry signal)
-    """
-    today = datetime.strptime(today_str, '%Y-%m-%d')
-    cutoff = (today - timedelta(days=20)).strftime('%Y-%m-%d')
-
-    rows = conn.execute(
+    today   = datetime.strptime(today_str, '%Y-%m-%d')
+    cutoff  = (today - timedelta(days=20)).strftime('%Y-%m-%d')
+    rows    = conn.execute(
         "SELECT DISTINCT date FROM signal_log WHERE symbol=? AND signal=? AND date>=? ORDER BY date DESC",
         (symbol, signal, cutoff)
     ).fetchall()
-
     dates = [datetime.strptime(r[0], '%Y-%m-%d') for r in rows]
-
     if not dates:
         return 1, 1, None, False
 
-    # Count consecutive streak from most recent
     consec = 0
-    prev = today
+    prev   = today
     for d in sorted(dates, reverse=True):
         gap = (prev - d).days
         if gap <= 1:
@@ -188,63 +172,47 @@ def _calc_streak(conn, symbol, signal, today_str):
         else:
             break
 
-    # Total in last 14 days
-    cutoff14 = today - timedelta(days=14)
+    cutoff14  = today - timedelta(days=14)
     total_14d = sum(1 for d in dates if d >= cutoff14)
 
-    # Last gap before today
     prev_dates = [d for d in dates if d < today]
-    last_gap = None
+    last_gap   = None
     reappeared = False
     if prev_dates:
         most_recent_prev = max(prev_dates)
-        last_gap = (today - most_recent_prev).days
+        last_gap   = (today - most_recent_prev).days
         reappeared = 2 <= last_gap <= 7
 
     return consec, total_14d, last_gap, reappeared
 
 # ── Entry status ──────────────────────────────────────────────────────────────
 def _entry_status(signal, move_pct, consec, reappeared):
-    cfg = SIGNAL_CONFIG.get(signal, DEFAULT_CONFIG)
+    cfg    = SIGNAL_CONFIG.get(signal, DEFAULT_CONFIG)
     target = cfg['target']
 
-    # Already hit target — too late
     if move_pct >= target:
         return 'HIT TARGET'
-
-    # More than 60% of target already moved
     if move_pct >= target * 0.6:
         return 'LATE'
-
-    # More than 30% of target moved
     if move_pct >= target * 0.3:
         return 'CAUTION'
-
-    # Slight pullback — actually good re-entry
     if -5.0 <= move_pct < -0.5:
         if reappeared or consec >= 2:
             return 'PULLBACK-BUY'
         return 'PULLBACK'
-
-    # Big drop — something wrong
     if move_pct < -5.0:
         return 'AVOID'
-
-    # Re-entry after gap — strong signal
     if reappeared:
         return 'RE-ENTRY'
-
-    # Multi-day streak
     if consec >= 3:
         return 'STRONG'
-
     return 'OK'
 
 # ── Format helpers ────────────────────────────────────────────────────────────
 def _fmt_result(val, target):
     if val is None:
         return '  --  '
-    sign = '+' if val >= 0 else ''
+    sign   = '+' if val >= 0 else ''
     marker = ' W' if val >= target else (' L' if val < 0 else '  ')
     return f"{sign}{val:.1f}%{marker}"
 
@@ -254,35 +222,54 @@ def _fmt_move(pct):
     sign = '+' if pct >= 0 else ''
     return f"{sign}{pct:.1f}%"
 
+def _fmt_hist(score):
+    """Format historical backtest score."""
+    if score is None:
+        return '  --  '
+    win_rate, avg_ret, exp, total = score
+    grade = 'A' if exp > 3 else 'B' if exp > 1 else 'C' if exp > 0 else 'D'
+    return f"{win_rate:.0f}%/{avg_ret:+.1f}%[{grade}]"
+
 def _pad(s, n):
     s = str(s)
     return s[:n].ljust(n)
 
 # ── Main report ───────────────────────────────────────────────────────────────
 def show_report():
-    conn = get_conn()
-
+    conn  = get_conn()
     total = conn.execute("SELECT COUNT(*) FROM signal_log").fetchone()[0]
 
+    # Check if backtest scores exist
+    has_backtest = False
+    try:
+        c = conn.execute("SELECT COUNT(*) FROM backtest_scores").fetchone()[0]
+        has_backtest = c > 0
+    except Exception:
+        pass
+
     print()
-    print("=" * 65)
-    print("       SIGNAL PERFORMANCE TRACKER  v2")
-    print("=" * 65)
+    print("=" * 70)
+    print("       SIGNAL PERFORMANCE TRACKER  v3")
+    print("=" * 70)
     print(f"  Total signals logged: {total}")
+    if has_backtest:
+        print(f"  Historical scores: available (from backtest)")
+    else:
+        print(f"  Historical scores: not yet (run: python save_backtest.py)")
     print()
 
     # ── Section 1: Accuracy by signal type ───────────────────────────────────
     print(f"  {'Signal Type':<20} {'Target':>7} {'Hold':>6}   {'3d Acc':>8} {'7d Acc':>8} {'14d Acc':>8} {'30d Acc':>8}")
-    print("  " + "-" * 63)
+    print("  " + "-" * 68)
 
     signal_types = conn.execute(
         "SELECT DISTINCT signal FROM signal_log ORDER BY signal"
     ).fetchall()
 
     for (sig,) in signal_types:
-        cfg = SIGNAL_CONFIG.get(sig, DEFAULT_CONFIG)
-        target = cfg['target']
-        hold   = cfg['hold']
+        cfg     = SIGNAL_CONFIG.get(sig, DEFAULT_CONFIG)
+        target  = cfg['target']
+        hold    = cfg['hold']
         periods = cfg['periods']
 
         def acc(col, period):
@@ -297,23 +284,18 @@ def show_report():
             wins = sum(1 for r in rows if r[0] >= target)
             return f"{wins}/{len(rows)} ({int(wins/len(rows)*100)}%)"
 
-        a3  = acc('result_3d',  3)
-        a7  = acc('result_7d',  7)
-        a14 = acc('result_14d', 14)
-        a30 = acc('result_30d', 30)
-
-        print(f"  {_pad(sig,20)} {target:>6.0f}%  {hold:>3}d   {a3:>8} {a7:>8} {a14:>8} {a30:>8}")
+        print(f"  {_pad(sig,20)} {target:>6.0f}%  {hold:>3}d   {acc('result_3d',3):>8} {acc('result_7d',7):>8} {acc('result_14d',14):>8} {acc('result_30d',30):>8}")
 
     print()
 
-    # ── Section 2: Active signals — streak & entry status ────────────────────
-    print(f"  ACTIVE SIGNALS — Streak & Entry Status")
-    print(f"  {'Symbol':<10} {'Signal':<18} {'Streak':>6} {'x14d':>5} {'Entry':>7} {'Now':>7} {'Move%':>7} {'Status':<14} {'Src'}")
-    print("  " + "-" * 85)
-
+    # ── Section 2: Active signals ─────────────────────────────────────────────
     today_str = datetime.now().strftime('%Y-%m-%d')
 
-    # Get most recent entry per symbol+signal
+    has_hist_col = '  Hist(win%/ret)[grade]' if has_backtest else ''
+    print(f"  ACTIVE SIGNALS — Streak & Entry Status")
+    print(f"  {'Symbol':<10} {'Signal':<18} {'Str':>4} {'x14':>4} {'Entry':>7} {'Now':>7} {'Move%':>7} {'Status':<14} {'Src':<5}{has_hist_col}")
+    print("  " + "-" * (90 if has_backtest else 70))
+
     active = conn.execute("""
         SELECT symbol, signal, source, entry_price,
                MIN(date) as first_date, MAX(date) as last_date
@@ -326,34 +308,71 @@ def show_report():
         if not entry_price or entry_price <= 0:
             continue
 
-        # Current price
         now_price = _get_latest_price(conn, symbol)
         if now_price:
             move_pct = (now_price - entry_price) / entry_price * 100
         else:
             now_price = entry_price
-            move_pct = 0.0
+            move_pct  = 0.0
 
-        # Streak info
         consec, total_14d, last_gap, reappeared = _calc_streak(conn, symbol, signal, today_str)
-
-        # Status
         status = _entry_status(signal, move_pct, consec, reappeared)
 
-        # Streak display
         streak_str = f"{consec}d"
         if reappeared and last_gap:
-            streak_str = f"{consec}d(gap:{last_gap}d)"
+            streak_str = f"{consec}d+{last_gap}g"
+
+        hist_str = ''
+        if has_backtest:
+            score    = _get_backtest_score(conn, symbol, signal)
+            hist_str = f"  {_fmt_hist(score)}"
 
         print(
-            f"  {_pad(symbol,10)} {_pad(signal,18)} {streak_str:>6} "
-            f"{total_14d:>5} {entry_price:>7.0f} {now_price:>7.0f} "
-            f"{_fmt_move(move_pct):>7} {_pad(status,14)} {source}"
+            f"  {_pad(symbol,10)} {_pad(signal,18)} {streak_str:>4} "
+            f"{total_14d:>4} {entry_price:>7.0f} {now_price:>7.0f} "
+            f"{_fmt_move(move_pct):>7} {_pad(status,14)} {str(source):<5}{hist_str}"
         )
 
     print()
 
-    # ── Section 3: Historical results (resolved signals) ─────────────────────
+    # ── Section 3: Top historical picks active right now ──────────────────────
+    if has_backtest:
+        print(f"  TOP HISTORICAL PICKS (currently active, grade A or B):")
+        print(f"  {'Symbol':<10} {'Signal':<18} {'Hist Win%':>10} {'Hist Ret':>9} {'Grade':>6} {'Status':<14}")
+        print("  " + "-" * 70)
+
+        top_active = []
+        for symbol, signal, source, entry_price, first_date, last_date in active:
+            if not entry_price or entry_price <= 0:
+                continue
+            score = _get_backtest_score(conn, symbol, signal)
+            if not score:
+                continue
+            win_rate, avg_ret, exp, total_bt = score
+            if total_bt < 3:
+                continue
+            grade = 'A' if exp > 3 else 'B' if exp > 1 else None
+            if not grade:
+                continue
+
+            now_price = _get_latest_price(conn, symbol) or entry_price
+            move_pct  = (now_price - entry_price) / entry_price * 100
+            consec, total_14d, last_gap, reappeared = _calc_streak(conn, symbol, signal, today_str)
+            status = _entry_status(signal, move_pct, consec, reappeared)
+
+            if status not in ('LATE', 'HIT TARGET', 'AVOID'):
+                top_active.append((symbol, signal, win_rate, avg_ret, exp, grade, status))
+
+        top_active.sort(key=lambda x: -x[4])  # sort by expectancy
+        for row in top_active[:15]:
+            sym, sig, wr, ar, exp, grade, status = row
+            print(f"  {_pad(sym,10)} {_pad(sig,18)} {wr:>9.1f}% {ar:>+8.2f}% {grade:>6}  {status}")
+
+        if not top_active:
+            print(f"  None currently active with grade A or B")
+        print()
+
+    # ── Section 4: Resolved signals ───────────────────────────────────────────
     resolved = conn.execute("""
         SELECT date, symbol, signal, source, entry_price,
                result_3d, result_7d, result_14d, result_30d
@@ -367,7 +386,7 @@ def show_report():
     if resolved:
         print(f"  RESOLVED SIGNALS (last 30):")
         print(f"  {'Date':<12} {'Symbol':<10} {'Signal':<18} {'Entry':>7}  {'3d':>8} {'7d':>8} {'14d':>8} {'30d':>8}  Src")
-        print("  " + "-" * 85)
+        print("  " + "-" * 80)
         for row in resolved:
             date, sym, sig, src, entry, r3, r7, r14, r30 = row
             cfg = SIGNAL_CONFIG.get(sig, DEFAULT_CONFIG)
@@ -379,10 +398,11 @@ def show_report():
             )
         print()
 
-    print("  " + "-" * 65)
+    print("  " + "-" * 70)
     print("  Targets: QP +7% | SP +10% | MH +12% | DEPLOY_HOT +15% | DEPLOY_READY +20%")
-    print("  Streak: consecutive days picked | x14d: times in last 14 days")
-    print("  Status: STRONG=3d+streak | RE-ENTRY=gap 2-7d reappear | PULLBACK-BUY=dip+confirmed")
+    print("  Streak: Xd=consecutive days | +Xg=gap days before reappear | x14=times in 14d")
+    print("  Status: STRONG=3d+ | RE-ENTRY=gap reappear | PULLBACK-BUY=dip+confirmed")
+    print("  Hist: backtest win%/avg_return[grade] A=exp>3% B=exp>1% C=exp>0% D=poor")
     print("  W=Win L=Loss in result columns")
     print()
 

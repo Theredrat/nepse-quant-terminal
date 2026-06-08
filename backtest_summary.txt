@@ -1,0 +1,68 @@
+============================================================
+  NEPSE BACKTEST SUMMARY
+  Generated from 5 years of data (2021-2026)
+============================================================
+
+  SIGNAL RANKING (by avg return):
+  Signal                Signals   Win%   AvgRet    Grade
+  ----------------------------------------------------
+  DEPLOY_READY             3588  61.2%   +6.39%        A
+  MOMENTUM_HUNTER          4331  47.9%   +2.54%        B
+  SMART_PICK               3049  46.6%   +1.37%        C
+  QUICK_PICK              14099  47.1%   +0.42%        C
+
+  KEY FINDINGS:
+  1. DEPLOY_READY is the best signal (+6.39% avg, beats NEPSE by +2.80%)
+  2. MOMENTUM_HUNTER is the only other profitable signal
+  3. QUICK_PICK and SMART_PICK only work well in BULL market (2024)
+  4. Current market is SIDEWAYS - use only DEPLOY_READY + MOMENTUM_HUNTER
+
+  BEST SECTORS BY SIGNAL:
+  DEPLOY_READY   -> Life Insurance, Investment, Hydro Power
+  MOMENTUM_HUNTER-> Investment, Others, Hotels, Manufacturing
+  SMART_PICK     -> Investment, Hotels, Finance (BULL only)
+  QUICK_PICK     -> Tradings, Investment, Hydro (BULL only)
+
+  AVOID:
+  - Hotels And Tourism for DEPLOY_READY (-3.96% avg)
+  - Life Insurance for QUICK_PICK (-0.33% avg)
+  - QUICK_PICK/SMART_PICK in SIDEWAYS market
+
+  TOP STOCKS (historical win rate >= 70%, min 5 signals):
+  DEPLOY_READY:
+    BHDC       100% win  +18.9% avg  (8 signals)
+    FMDBL      100% win  +16.0% avg  (6 signals)
+    KEF        100% win  +12.6% avg  (10 signals)
+    KSY        100% win  +6.7% avg  (5 signals)
+    LBBL       100% win  +6.5% avg  (9 signals)
+    MEN        100% win  +19.0% avg  (10 signals)
+    MKCL       100% win  +2.6% avg  (6 signals)
+    MNBBL      100% win  +7.9% avg  (19 signals)
+  MOMENTUM_HUNTER:
+    RMF1       100% win  +6.2% avg  (5 signals)
+    UHEWA      87% win  +14.6% avg  (15 signals)
+    VLBS       83% win  +9.5% avg  (6 signals)
+    HEI        80% win  +7.3% avg  (15 signals)
+    SMH        80% win  +6.0% avg  (5 signals)
+    SPL        80% win  +7.3% avg  (5 signals)
+    API        78% win  +12.3% avg  (27 signals)
+    HATHY      78% win  +37.3% avg  (9 signals)
+  SMART_PICK:
+    AKJCL      91% win  +24.6% avg  (11 signals)
+    RHPL       89% win  +8.7% avg  (9 signals)
+    TRH        89% win  +8.0% avg  (18 signals)
+    PHCL       88% win  +20.3% avg  (8 signals)
+    HIDCL      86% win  +22.2% avg  (7 signals)
+    HLBSL      86% win  +26.3% avg  (7 signals)
+    UMRH       86% win  +6.0% avg  (7 signals)
+    BEDC       83% win  +5.2% avg  (12 signals)
+  QUICK_PICK:
+    SMHL       85% win  +7.2% avg  (27 signals)
+
+  STOP LOSS RECOMMENDATIONS (based on backtest):
+  QUICK_PICK      current -4%  -> widen to -6% (too many stopped out)
+  SMART_PICK      current -5%  -> widen to -8% (40% stop rate is too high)
+  MOMENTUM_HUNTER current -6%  -> keep as is
+  DEPLOY_READY    current -8%  -> keep as is
+
+============================================================
