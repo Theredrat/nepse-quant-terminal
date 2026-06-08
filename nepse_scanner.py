@@ -6691,11 +6691,10 @@ def analyze_sector_seasonality(db_path='nepse_market_data.db'):
         )
 
     def _print_completed_actual(sect, period_type, year, label, raw_label):
-        """Print 2026 actual row under a completed historical period row."""
+        """Print 2026 actual + hist avg rows under a completed period row."""
         pa = _get_period_actual(sect, period_type, year, label)
         if not pa: return
         col = 'green' if pa['ret'] >= 0 else 'red'
-        sig_col = 'green' if pa['ret'] >= 0 else 'red'
         console.print(
             f'   [dim]  └─ {year} actual ({pa["n"]}d):  '
             f'Ret:[{col}]{pa["ret"]:+.1f}%[/{col}]  '
@@ -6704,6 +6703,22 @@ def analyze_sector_seasonality(db_path='nepse_market_data.db'):
             f'Dn:[red]-{pa["dn"]:.1f}%[/red][/dim]',
             highlight=False
         )
+        if period_type == 'gm':       hist = gm_stats.get(sect, {}).get(label)
+        elif period_type == 'gq':     hist = gq_stats.get(sect, {}).get(label)
+        elif period_type == 'bsm':    hist = bsm_stats.get(sect, {}).get(label)
+        elif period_type == 'fyq':    hist = fyq_stats.get(sect, {}).get(label)
+        else:                         hist = None
+        if hist:
+            avg,wins,total,best,worst,avg_up,avg_dn,avg_sw,_,_,_ = hist
+            hcol = 'green' if avg >= 0 else 'red'
+            console.print(
+                f'      [dim]Hist avg ({total}yr):      '
+                f'Ret:[{hcol}]{avg:+.1f}%[/{hcol}]  '
+                f'Swing:{avg_sw:.0f}%  '
+                f'Up:[green]+{avg_up:.1f}%[/green]  '
+                f'Dn:[red]-{avg_dn:.1f}%[/red][/dim]',
+                highlight=False
+            )
 
     def _is_completed_2026(key, period_type):
         """Check if a period key represents a completed 2026 period."""
