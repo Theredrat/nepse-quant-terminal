@@ -1952,7 +1952,7 @@ def analyze_quick_pick(live_df, top_n=10, db_path="nepse_market_data.db", offlin
     console.print(t)
     return scores[:top_n]
 
-def analyze_smart_pick(live_df, full_df, top_n=10):
+def analyze_smart_pick(live_df, full_df, top_n=10, offline=False):
     console.print()
     console.print(Rule("[bold cyan]Smart Stock Pick[/bold cyan]", style="cyan"))
     console.print("[dim]Best stocks for 10%+ gain — signals + broker activity + whale confirmation[/dim]\n")
@@ -1963,7 +1963,7 @@ def analyze_smart_pick(live_df, full_df, top_n=10):
         console.print("[yellow]⚠ Offline mode — using DB data for Smart Pick[/yellow]")
 
     # Start with quick pick scores as base
-    quick_scores = analyze_quick_pick(_live, top_n=50)
+    quick_scores = analyze_quick_pick(_live, top_n=50, offline=offline)
     if not quick_scores:
         return
 
@@ -7795,7 +7795,7 @@ def main():
         console.print()
 
     if args.smartpick:
-        _sp = analyze_smart_pick(live_df, full_fs)
+        _sp = analyze_smart_pick(live_df, full_fs, offline=getattr(args, 'offline', False))
         try:
             from signal_tracker import log_signals_raw
             log_signals_raw([{"symbol": r["symbol"], "signal": "SMART_PICK", "ltp": r.get("ltp",0), "score": r.get("score",0), "reason": r.get("reasons","")} for r in (_sp or [])], source="5")
