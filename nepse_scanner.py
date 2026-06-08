@@ -6594,22 +6594,152 @@ def analyze_sector_seasonality(db_path='nepse_market_data.db'):
         except:
             return None
 
+    def _get_period_actual(sect, period_type, year, label):
+        """Get actual ohlc stats for a specific completed period (any year)."""
+        try:
+            if period_type == 'gm':
+                # label is month number 1-12
+                m = int(label)
+                date_from = f'{year}-{m:02d}-01'
+                if m == 12:
+                    date_to = f'{year}-12-31'
+                else:
+                    date_to = f'{year}-{m+1:02d}-01'
+                rows = [(dt, ohlc) for dt, ohlc in sect_index.get(sect, {}).items()
+                        if date_from <= dt < date_to]
+            elif period_type == 'gq':
+                qstart = {'Q1':1,'Q2':4,'Q3':7,'Q4':10}.get(str(label), 1)
+                qend   = {'Q1':4,'Q2':7,'Q3':10,'Q4':13}.get(str(label), 4)
+                date_from = f'{year}-{qstart:02d}-01'
+                if qend > 12:
+                    date_to = f'{year+1}-01-01'
+                else:
+                    date_to = f'{year}-{qend:02d}-01'
+                rows = [(dt, ohlc) for dt, ohlc in sect_index.get(sect, {}).items()
+                        if date_from <= dt < date_to]
+            elif period_type == 'bsm':
+                # label is BS month number 1-12, year is BS year
+                m = int(label)
+                # find greg dates for this BS month/year
+                rows = []
+                for dt_str, ohlc in sect_index.get(sect, {}).items():
+                    d = datetime.date.fromisoformat(dt_str)
+                    bsy2, bsm2 = _to_bs(d)
+                    if bsy2 == year and bsm2 == m:
+                        rows.append((dt_str, ohlc))
+            elif period_type == 'fyq':
+                # label is FYQ string, year is FY year
+                rows = []
+                fyq_bsm = {'FYQ1':[4,5,6],'FYQ2':[7,8,9],'FYQ3':[10,11,12],'FYQ4':[1,2,3]}
+                target_months = fyq_bsm.get(str(label), [])
+                for dt_str, ohlc in sect_index.get(sect, {}).items():
+                    d = datetime.date.fromisoformat(dt_str)
+                    bsy2, bsm2 = _to_bs(d)
+                    if not bsy2: continue
+                    fy2 = bsy2 if bsm2 >= 4 else bsy2 - 1
+                    if fy2 == year and bsm2 in target_months:
+                        rows.append((dt_str, ohlc))
+            else:
+                return None
+
+            rows = sorted(rows, key=lambda x: x[0])
+            if len(rows) < 3:
+                return None
+
+            open_p  = rows[0][1][0]
+            close_p = rows[-1][1][3]
+            high_p  = max(o[1] for _, o in rows)
+            low_p   = min(o[2] for _, o in rows if o[2] > 0)
+            if open_p <= 0 or low_p <= 0:
+                return None
+
+            act_ret = (close_p - open_p) / open_p * 100
+            act_up  = (high_p  - open_p) / open_p * 100
+            act_dn  = (open_p  - low_p)  / open_p * 100
+            act_sw  = (high_p  - low_p)  / low_p  * 100
+            n_days  = len(rows)
+            sig, _  = _sig(act_ret)
+            return {'ret': act_ret, 'up': act_up, 'dn': act_dn, 'sw': act_sw,
+                    'n': n_days, 'sig': sig}
+        except:
+            return None
+
     def _print_actual(sect, curr_lbl, stats_map, period_type):
-        """Print actual vs expected line under the table."""
+        """Print actual vs expected two-line comparison under the table."""
         av = _actual_vs_expected(sect, curr_lbl, stats_map, period_type)
         if not av: return
         col    = av['col']
         st_col = av['st_col']
+        yr = str(today.year)
         console.print(
-            f'   [bold]2026 actual[/bold] ({av["n_days"]}d):  '
-            f'[{col}]{av["act_ret"]:+.1f}%[/{col}]  '
-            f'Swing:{av["act_sw"]:.0f}%  '
+            f'   [bold]{yr} actual[/bold]  ({av["n_days"]}d):  '
+            f'Ret:[{col}]{av["act_ret"]:+.1f}%[/{col}]  '
+            f'Swing:[yellow]{av["act_sw"]:.0f}%[/yellow]  '
             f'Up:[green]+{av["act_up"]:.1f}%[/green]  '
             f'Dn:[red]-{av["act_dn"]:.1f}%[/red]  '
-            f'vs Expected:[dim]{av["exp_avg"]:+.1f}% ({av["exp_wins"]}/{av["exp_total"]} up)[/dim]  '
             f'[{st_col}]{av["status"]}[/{st_col}]',
             highlight=False
         )
+        console.print(
+            f'   [dim]Expected (avg):        '
+            f'Ret:{av["exp_avg"]:+.1f}%  '
+            f'Swing:{av["exp_sw"]:.0f}%  '
+            f'Up:+{av["exp_up"]:.1f}%  '
+            f'Dn:-{av["exp_dn"]:.1f}%  '
+            f'({av["exp_wins"]}/{av["exp_total"]} up)[/dim]',
+            highlight=False
+        )
+
+    def _print_completed_actual(sect, period_type, year, label, raw_label):
+        """Print 2026 actual row under a completed historical period row."""
+        pa = _get_period_actual(sect, period_type, year, label)
+        if not pa: return
+        col = 'green' if pa['ret'] >= 0 else 'red'
+        sig_col = 'green' if pa['ret'] >= 0 else 'red'
+        console.print(
+            f'   [dim]  └─ {year} actual ({pa["n"]}d):  '
+            f'Ret:[{col}]{pa["ret"]:+.1f}%[/{col}]  '
+            f'Swing:{pa["sw"]:.0f}%  '
+            f'Up:[green]+{pa["up"]:.1f}%[/green]  '
+            f'Dn:[red]-{pa["dn"]:.1f}%[/red][/dim]',
+            highlight=False
+        )
+
+    def _is_completed_2026(key, period_type):
+        """Check if a period key represents a completed 2026 period."""
+        try:
+            if period_type == 'gm':
+                # key is month int 1-12, completed if year 2026 and month < today.month
+                return key < today.month
+            elif period_type == 'gq':
+                # key is 'Q1'..'Q4', completed if the quarter end is before today
+                qend_month = {'Q1':3,'Q2':6,'Q3':9,'Q4':12}
+                end_m = qend_month.get(str(key), 0)
+                return today.year == 2026 and today.month > end_m
+            elif period_type == 'bsm':
+                # key is BS month int, completed if < curr_bsm in same BS year
+                return key < curr_bsm
+            elif period_type == 'fyq':
+                # key is FYQ string, completed if before curr_fyq in same FY
+                fyq_order = {'FYQ1':1,'FYQ2':2,'FYQ3':3,'FYQ4':4}
+                return fyq_order.get(str(key),0) < fyq_order.get(curr_fyq,0)
+            return False
+        except:
+            return False
+
+    def _get_2026_key(key, period_type):
+        """Get the year/label pair for _get_period_actual for a completed 2026 period."""
+        if period_type == 'gm':
+            return 2026, key
+        elif period_type == 'gq':
+            return 2026, key
+        elif period_type == 'bsm':
+            return bs_yr, key
+        elif period_type == 'fyq':
+            # FY year: current FY is bs_yr if curr_bsm>=4 else bs_yr-1
+            fy = bs_yr if curr_bsm >= 4 else bs_yr - 1
+            return fy, key
+        return None, None
 
     def _print_section(title, all_sectors, stats_map, order, label_fn, curr_lbl, next_lbl, period_type='gm'):
         console.rule(f'[bold cyan]{title}[/bold cyan]', style='cyan')
@@ -6633,6 +6763,10 @@ def analyze_sector_seasonality(db_path='nepse_market_data.db'):
                 console.print(_hist(stats[key], f'{lbl}{marker}'))
                 if key == curr_lbl:
                     _print_actual(sect, curr_lbl, stats_map, period_type)
+                elif _is_completed_2026(key, period_type):
+                    yr2026, lbl2026 = _get_2026_key(key, period_type)
+                    if yr2026:
+                        _print_completed_actual(sect, period_type, yr2026, lbl2026, lbl)
             console.print()
 
     all_sectors = sorted(sect_index.keys())
