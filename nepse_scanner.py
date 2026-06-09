@@ -2333,6 +2333,126 @@ def analyze_smart_pick(live_df, full_df, top_n=10, offline=False):
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 
+def print_premarket_brief():
+    import sqlite3 as _sq, os as _os
+    from datetime import datetime as _dt, date as _date
+    _db = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "nepse_market_data.db")
+    _c = _sq.connect(_db)
+
+    console.print()
+    console.rule("[bold cyan]  Pre-Market Brief  [/bold cyan]", style="cyan")
+
+    _price_date  = _c.execute("SELECT MAX(date) FROM stock_prices").fetchone()[0]
+    _broker_date = _c.execute("SELECT MAX(date) FROM broker_activity").fetchone()[0]
+    _sig_date    = _c.execute("SELECT MAX(date) FROM signal_log").fetchone()[0]
+    _price_count = _c.execute("SELECT COUNT(*) FROM stock_prices WHERE date=?", (_price_date,)).fetchone()[0]
+    _today = str(_date.today())
+
+    console.print()
+    console.print(Panel(
+        f"[bold white]Data as of:[/bold white] {_price_date}  "
+        f"[bold white]Symbols:[/bold white] {_price_count}  "
+        f"[bold white]Broker:[/bold white] {_broker_date}  "
+        f"[bold white]Signals:[/bold white] {_sig_date}  " +
+        ("[green]ALL CURRENT[/green]" if _price_date == _today else "[yellow]YESTERDAY DATA[/yellow]"),
+        border_style="cyan", padding=(0,1)
+    ))
+    console.print()
+
+    try:
+        _reg = _c.execute("SELECT regime, note FROM market_regime ORDER BY date DESC LIMIT 1").fetchone()
+        if _reg:
+            _col = "green" if "UP" in _reg[0].upper() else "red" if "DOWN" in _reg[0].upper() else "yellow"
+            console.print(f"[bold white]Market Regime:[/bold white] [bold {_col}]{_reg[0]}[/bold {_col}]  [dim]{_reg[1] or ''}[/dim]")
+        else:
+            console.print("[bold white]Market Regime:[/bold white] [dim]Run option 43 to update[/dim]")
+    except Exception:
+        console.print("[bold white]Market Regime:[/bold white] [dim]Run option 43 to update[/dim]")
+    console.print()
+
+    _sp  = set(r[0] for r in _c.execute("SELECT symbol FROM signal_log WHERE signal='SMART_PICK_BUY' AND date=?", (_sig_date,)).fetchall())
+    _br  = set(r[0] for r in _c.execute("SELECT symbol FROM signal_log WHERE signal='BROKER_RS_CONFIRMED' AND date=?", (_sig_date,)).fetchall())
+    _qp  = set(r[0] for r in _c.execute("SELECT symbol FROM signal_log WHERE signal='QUICK_PICK' AND date=?", (_sig_date,)).fetchall())
+    _triple = sorted(_sp & _br & _qp)
+    _double = sorted((_sp & _br) - set(_triple))
+
+    if _triple:
+        console.print(Panel(
+            "[bold white]TRIPLE CONFIRMATION[/bold white] -- Option 5 + 7b + 4  (highest conviction)\n\n" +
+            "  " + "  ".join(f"[bold green]{s}[/bold green]" for s in _triple),
+            border_style="green", padding=(0,1)
+        ))
+    else:
+        console.print("[dim]No triple confirmation stocks today.[/dim]")
+    console.print()
+
+    if _double:
+        console.print(f"[bold yellow]Double Confirmation[/bold yellow] (5 + 7b): " + "  ".join(f"[cyan]{s}[/cyan]" for s in _double))
+        console.print()
+
+    _7b = _c.execute("""
+        SELECT s.symbol, s.score, s.reason
+        FROM signal_log s
+        WHERE s.signal='BROKER_RS_CONFIRMED' AND s.date=?
+        ORDER BY s.score DESC LIMIT 10
+    """, (_sig_date,)).fetchall()
+
+    if _7b:
+        console.print("[bold yellow]7b Confirmed -- Broker + RS Accumulation[/bold yellow]")
+        t7 = Table(box=box.SIMPLE, show_header=True, header_style="bold cyan", padding=(0,1))
+        t7.add_column("Symbol",  width=10, style="bold white")
+        t7.add_column("Score",   width=7,  justify="right", style="magenta")
+        t7.add_column("Why",     min_width=45, style="dim")
+        for sym, sc, reason in _7b:
+            t7.add_row(sym, f"{int(sc or 0)}", (reason or "")[:55])
+        console.print(t7)
+        console.print()
+
+    _sp5 = _c.execute("""
+        SELECT symbol, score, reason FROM signal_log
+        WHERE signal='SMART_PICK_BUY' AND date=?
+        ORDER BY score DESC LIMIT 5
+    """, (_sig_date,)).fetchall()
+
+    if _sp5:
+        console.print("[bold yellow]Smart Pick Top 5 -- RS + Volume + Broker[/bold yellow]")
+        ts = Table(box=box.SIMPLE, show_header=True, header_style="bold cyan", padding=(0,1))
+        ts.add_column("Symbol", width=10, style="bold white")
+        ts.add_column("Score",  width=7,  justify="right", style="magenta")
+        ts.add_column("Why",    min_width=45, style="dim")
+        for sym, sc, reason in _sp5:
+            ts.add_row(sym, f"{int(sc or 0)}", (reason or "")[:55])
+        console.print(ts)
+        console.print()
+
+    _mh = _c.execute("""
+        SELECT symbol, score, reason FROM signal_log
+        WHERE signal='MOMENTUM_HUNTER' AND date=?
+        ORDER BY score DESC LIMIT 8
+    """, (_sig_date,)).fetchall()
+
+    if _mh:
+        console.print("[bold yellow]17f Early Warnings -- Watch These Next 3-5 Days[/bold yellow]")
+        tm = Table(box=box.SIMPLE, show_header=True, header_style="bold cyan", padding=(0,1))
+        tm.add_column("Symbol", width=10, style="bold white")
+        tm.add_column("Score",  width=7,  justify="right", style="magenta")
+        tm.add_column("Why",    min_width=45, style="dim")
+        for sym, sc, reason in _mh:
+            tm.add_row(sym, f"{int(sc or 0)}", (reason or "")[:55])
+        console.print(tm)
+        console.print()
+
+    _total = _c.execute("SELECT signal, COUNT(*) FROM signal_log WHERE date=? GROUP BY signal ORDER BY COUNT(*) DESC", (_sig_date,)).fetchall()
+    if _total:
+        console.print("[bold white]Signal Summary -- " + _sig_date + "[/bold white]")
+        parts = [f"[cyan]{sig}[/cyan]: {cnt}" for sig, cnt in _total]
+        console.print("  " + "   ".join(parts))
+        console.print()
+
+    console.print("[dim]Run option 43 for full regime detail. Option 36 for entry/stop on any stock above.[/dim]")
+    console.print()
+    _c.close()
+
 def parse_args():
     p = argparse.ArgumentParser(description="NEPSE Scanner — Full Edition")
     p.add_argument('--signals',     nargs='+', choices=list(SIGNALS.keys()), default=list(SIGNALS.keys()))
@@ -2359,6 +2479,7 @@ def parse_args():
     p.add_argument('--deployment-planner',  action='store_true', dest='deployment_planner', help='July deployment planner')
     p.add_argument('--sector-season', action='store_true', dest='sector_season', help='Sector seasonality')
     p.add_argument('--market-regime',  action='store_true', dest='market_regime',  help='Market regime analyzer')
+    p.add_argument('--premarket-brief', action='store_true', dest='premarket_brief', help='Pre-market brief summary')
     p.add_argument('--market-phase',   action='store_true', dest='market_phase', help='Market phase detector')
     p.add_argument('--seasonality',    action='store_true', dest='seasonality', help='Seasonality analysis')
     p.add_argument('--nepali-season', action='store_true', dest='nepali_season', help='Nepali calendar seasonality')
@@ -7822,6 +7943,9 @@ def main():
     elif getattr(args, 'market_regime', False):
         import sqlite3
         analyze_market_regime(sqlite3.connect('nepse_market_data.db'), console)
+        return
+    elif getattr(args, 'premarket_brief', False):
+        print_premarket_brief()
         return
     elif getattr(args, 'sector_season', False):
         analyze_sector_seasonality()

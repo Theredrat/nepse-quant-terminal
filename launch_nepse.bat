@@ -104,6 +104,7 @@ echo   --- FULL ANALYSIS ---
 
   echo   43. Market Regime Analyzer (regimes, leaders, pre-move detector)
   echo   44. Data Health Check  (what data do I have?)
+  echo   45. Pre-Market Brief  (top picks + signals summary)
   echo.
   echo   --- HELP ---
 echo   21. Signal Legend / Help
@@ -152,6 +153,7 @@ if "%choice%"=="41" goto DEPLOYMENT_PLANNER
 
 if "%choice%"=="43" goto MARKET_REGIME
 if "%choice%"=="44" goto DATA_HEALTH
+if "%choice%"=="45" goto PREMARKET_BRIEF
 if "%choice%"=="22" start python nepse_alerts.py & goto AGAIN
 if "%choice%"=="23" python nepse_scanner.py --corr & goto AGAIN
 if "%choice%"=="24" python nepse_scanner.py --portfolio & goto AGAIN
@@ -340,6 +342,11 @@ goto AGAIN
 
 :DATA_HEALTH
 python data_check.py
+pause
+goto MENU
+
+:PREMARKET_BRIEF
+python nepse_scanner.py --premarket-brief
 pause
 goto MENU
 
