@@ -8350,6 +8350,35 @@ def analyze_broker_rs():
             )
     console.print()
 
+    # ── Log 7b confirmed stocks to signal tracker ─────────────────────────────
+    if not confirmed.empty:
+        try:
+            import sys as _sys
+            _base = BASE_DIR if "BASE_DIR" in dir() else os.path.dirname(os.path.abspath(__file__))
+            if _base not in _sys.path: _sys.path.insert(0, _base)
+            from signal_tracker import log_signals_raw as _log_sig
+            _db4 = DB_PATH if "DB_PATH" in dir() else os.path.join(os.path.dirname(os.path.abspath(__file__)), "nepse_market_data.db")
+            import sqlite3 as _sq4
+            _pc = _sq4.connect(_db4)
+            _latest_date = _pc.execute("SELECT MAX(date) FROM stock_prices").fetchone()[0]
+            _price_map = {r[0]: r[1] for r in _pc.execute("SELECT symbol, close FROM stock_prices WHERE date=?", (_latest_date,)).fetchall()}
+            _pc.close()
+            _sigs = []
+            for _, _sr in confirmed.iterrows():
+                _d_on, _d_tot = _consistency.get(_sr["symbol"], (0, 0))
+                _consist = f"{_d_on}/{_d_tot}d consistent" if _d_tot > 0 else ""
+                _sigs.append({
+                    "symbol": _sr["symbol"],
+                    "signal": "BROKER_RS_CONFIRMED",
+                    "ltp": _price_map.get(_sr["symbol"], 0),
+                    "score": round(_sr["rs5"], 1),
+                    "reason": f"RS+{_sr['rs5']:.1f}% · {int(_sr['broker_count'])} brokers · {_consist}"
+                })
+            if _sigs:
+                _log_sig(_sigs, source="7b")
+        except Exception as _le:
+            pass
+
     # ── Update watchlist with 7b confirmed stocks getting bonus score ────────
     if not confirmed.empty:
         _confirmed_syms = set(confirmed["symbol"].tolist())
