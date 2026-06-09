@@ -116,6 +116,9 @@ def main():
     run("DB Sync (data -> root)", [DBSYNC])
 
 
+    # Step 1c: Market Regime (option 43) - saves regime to DB for Option 45
+    run("Market Regime", [SCANNER, '--market-regime'], timeout=120)
+
     # Step 2: Quick Pick (option 4)
     run("Quick Pick (option 4)", [SCANNER, '--quickpick', '--offline'])
 

@@ -7864,6 +7864,13 @@ def analyze_market_regime(conn, console):
         bc = 'green' if cc['breadth'] > 55 else ('red' if cc['breadth'] < 40 else 'yellow')
         pc = 'green' if cc['price_chg_3m'] > 0 else 'red'
         console.print(f'  Regime:       [red]WEAK/DISTRIBUTION[/red] (21 months — longest in dataset)')
+        try:
+            conn.execute("CREATE TABLE IF NOT EXISTS market_regime (date TEXT PRIMARY KEY, regime TEXT, note TEXT)")
+            _note = f"Vol ratio: {cc['vol_ratio_3m']:.2f}x | Breadth: {cc['breadth']:.0f}%"
+            import datetime as _datetime
+            conn.execute("INSERT OR REPLACE INTO market_regime VALUES (?,?,?)", (_datetime.date.today().isoformat(), 'WEAK/DISTRIBUTION', _note))
+            conn.commit()
+        except Exception: pass
         console.print(f'  Volume:       [{vc}]{cc["vol_now"]/1e6:.2f}M[/{vc}] now  vs  {cc["vol_3m"]/1e6:.2f}M 3m avg  =  [{vc}]{cc["vol_ratio_3m"]:.2f}x[/{vc}]')
         console.print(f'  Breadth:      [{bc}]{cc["breadth"]:.0f}%[/{bc}] stocks above 20d avg')
         console.print(f'  Price 3m:     [{pc}]{cc["price_chg_3m"]:+.1f}%[/{pc}]')
