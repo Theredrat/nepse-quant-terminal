@@ -125,6 +125,9 @@ def main():
     # Step 4: Momentum Hunter (option 17f)
     run("Momentum Hunter (option 17f)", [SCANNER, '--momentum-hunter'])
 
+    # Step 4b: Broker RS (option 7b) — updates watchlist with confirmed setups
+    run("Broker RS (option 7b)", [SCANNER, "--broker-rs"])
+
     # Step 5: Deployment Planner (option 41) — Sundays only
     if is_sunday:
         run("Deployment Planner (option 41) [Sunday]", [SCANNER, '--deployment-planner', '--offline'])
