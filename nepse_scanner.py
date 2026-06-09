@@ -243,9 +243,45 @@ def _normalize_fs(data):
     return df
 
 def get_full_floorsheet(n):
+    import sqlite3 as _fsq, os as _fos, pandas as _fpd
     console.print("  [yellow]Fetching full floorsheet — 30-60 seconds...[/yellow]")
     data = fetch_with_retry(lambda: n.getFloorSheet(show_progress=False), "floorsheet", retries=2, delay=3)
-    return _normalize_fs(data)
+    df = _normalize_fs(data)
+    # Check if broker IDs are populated
+    broker_col = None
+    if df is not None and not df.empty:
+        if "buyer_broker" in df.columns: broker_col = "buyer_broker"
+        elif "buyerMemberId" in df.columns: broker_col = "buyerMemberId"
+    if broker_col and df[broker_col].notna().sum() > 100:
+        return df  # Live data has broker IDs — use it
+    # Fallback: load yesterday broker_activity from DB
+    try:
+        _db = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nepse_market_data.db")
+        _conn = _fsq.connect(_db)
+        _date = _conn.execute("SELECT date FROM broker_activity ORDER BY date DESC LIMIT 1").fetchone()
+        if _date:
+            _date = _date[0]
+            _ba = _conn.execute("SELECT symbol, broker_id, buy_qty, sell_qty, buy_val FROM broker_activity WHERE date=?", (_date,)).fetchall()
+            _conn.close()
+            if _ba:
+                _records = []
+                for sym, bid, qb, qs, amt in _ba:
+                    if qb and float(qb) > 0:
+                        _records.append({"symbol": sym, "buyerMemberId": str(bid), "sellerMemberId": None, "contractQuantity": float(qb), "contractAmount": float(amt or 0), "contractRate": 0, "buyer_broker": str(bid), "seller_broker": None, "quantity": float(qb), "amount": float(amt or 0)})
+                    if qs and float(qs) > 0:
+                        _records.append({"symbol": sym, "buyerMemberId": None, "sellerMemberId": str(bid), "contractQuantity": float(qs), "contractAmount": 0, "contractRate": 0, "buyer_broker": None, "seller_broker": str(bid), "quantity": float(qs), "amount": 0})
+                if _records:
+                    console.print(f"  [dim]Broker IDs unavailable in live feed — using DB ({_date})[/dim]")
+                    _fdf = _fpd.DataFrame(_records)
+                    # Also attach net_qty per symbol for pressure calc
+                    _net = {}
+                    for sym, bid, qb, qs, amt in _ba:
+                        _net[sym] = _net.get(sym, 0) + float(qb or 0) - float(qs or 0)
+                    _fdf["_net_qty"] = _fdf["symbol"].map(_net).fillna(0)
+                    return _fdf
+    except Exception as _fe:
+        pass
+    return df
 
 def get_floorsheet_of_symbol(full_df, symbol):
     if full_df is None or full_df.empty or 'symbol' not in full_df.columns:
@@ -1965,148 +2001,228 @@ def analyze_smart_pick(live_df, full_df, top_n=10, offline=False):
     if _live is None:
         console.print("[yellow]⚠ Offline mode — using DB data for Smart Pick[/yellow]")
 
-    # Start with quick pick scores as base
-    quick_scores = analyze_quick_pick(_live, top_n=50, offline=offline)
-    if not quick_scores:
-        return
+    # ── Rebuilt Smart Pick: RS + Volume + Broker ────────────────────────────
+    import sqlite3 as _spq, os as _spos
+    _spdb = _spos.path.join(_spos.path.dirname(_spos.path.abspath(__file__)), "nepse_market_data.db")
+    _spc = _spq.connect(_spdb)
 
-    score_map = {r['symbol']: r for r in quick_scores}
+    # Step 1: RS data
+    rs_data = _calc_relative_strength(_spdb)
+    rs_map = {r["symbol"]: r for r in (rs_data or [])}
 
-    if full_df is None or full_df.empty:
-        console.print("[yellow]No floorsheet — showing quick pick scores only.[/yellow]")
-        return
+    # Step 2: Volume data — use latest COMPLETE date (>=300 symbols)
+    _all_dates = [r[0] for r in _spc.execute("SELECT DISTINCT date FROM stock_prices ORDER BY date DESC LIMIT 5").fetchall()]
+    _latest_price = _all_dates[0]
+    for _d in _all_dates:
+        _cnt = _spc.execute("SELECT COUNT(*) FROM stock_prices WHERE date=?", (_d,)).fetchone()[0]
+        if _cnt >= 300:
+            _latest_price = _d
+            break
+    _vol_rows = _spc.execute(
+        "SELECT symbol, volume, close FROM stock_prices WHERE date=?", (_latest_price,)
+    ).fetchall()
+    _avg_vol = {r[0]: r[1] for r in _spc.execute(
+        "SELECT symbol, AVG(volume) FROM stock_prices WHERE date >= date(?,'-20 days') GROUP BY symbol",
+        (_latest_price,)
+    ).fetchall()}
+    _price_map = {r[0]: r[2] for r in _vol_rows}
+    _vol_map   = {r[0]: r[1] for r in _vol_rows}
 
-    # Broker activity boost
-    # 1. Is a top broker (58, 44, 42) buying this stock?
-    top_brokers = ['58', '44', '42', '49', '25']
+    # Step 3: 52W high for upside calc
+    _hi52 = {r[0]: r[1] for r in _spc.execute(
+        "SELECT symbol, MAX(close) FROM stock_prices WHERE date >= date(?,'-252 days') GROUP BY symbol",
+        (_latest_price,)
+    ).fetchall()}
 
-    broker_buying = set()
-    broker_selling = set()
-    for tb in top_brokers:
-        tb_buys  = full_df[full_df['buyer_broker'].astype(str) == tb]
-        tb_sells = full_df[full_df['seller_broker'].astype(str) == tb]
-        buy_syms  = tb_buys.groupby('symbol')['quantity'].sum()
-        sell_syms = tb_sells.groupby('symbol')['quantity'].sum()
-        for sym in buy_syms.index:
-            net = buy_syms.get(sym,0) - sell_syms.get(sym,0)
-            if net > 0:
-                broker_buying.add(sym)
-            elif net < 0:
-                broker_selling.add(sym)
+    # Step 4: Broker data (latest date)
+    _latest_ba = _spc.execute("SELECT MAX(date) FROM broker_activity").fetchone()[0]
+    _broker_net  = {}   # sym -> net_qty total
+    _broker_count = {}  # sym -> count of net buyers
+    _broker_dom  = {}   # sym -> (broker_id, dominance%)
+    _broker_sell_dom = {}  # sym -> dominant seller dominance%
+    if _latest_ba:
+        _ba_rows = _spc.execute(
+            "SELECT symbol, broker_id, buy_qty, sell_qty, net_qty FROM broker_activity WHERE date=?",
+            (_latest_ba,)
+        ).fetchall()
+        _sym_buy_total = {}
+        _sym_sell_total = {}
+        for sym, bid, bq, sq, nq in _ba_rows:
+            _broker_net[sym] = _broker_net.get(sym, 0) + float(nq or 0)
+            if float(nq or 0) > 0:
+                _broker_count[sym] = _broker_count.get(sym, 0) + 1
+            _sym_buy_total[sym]  = _sym_buy_total.get(sym, 0) + float(bq or 0)
+            _sym_sell_total[sym] = _sym_sell_total.get(sym, 0) + float(sq or 0)
+        # Dominant buyer per stock
+        _top_buyers = {}
+        for sym, bid, bq, sq, nq in _ba_rows:
+            if float(bq or 0) > _top_buyers.get(sym, (None, 0))[1]:
+                _top_buyers[sym] = (str(bid), float(bq or 0))
+        for sym, (bid, bq) in _top_buyers.items():
+            total = max(_sym_buy_total.get(sym, 1), 1)
+            _broker_dom[sym] = (bid, bq / total * 100)
+        # Dominant seller per stock
+        _top_sellers = {}
+        for sym, bid, bq, sq, nq in _ba_rows:
+            if float(sq or 0) > _top_sellers.get(sym, (None, 0))[1]:
+                _top_sellers[sym] = (str(bid), float(sq or 0))
+        for sym, (bid, sq) in _top_sellers.items():
+            total = max(_sym_sell_total.get(sym, 1), 1)
+            _broker_sell_dom[sym] = sq / total * 100
 
-    # 2. Net buying pressure per stock from floorsheet
-    stock_pressure = {}
-    for sym, grp in full_df.groupby('symbol'):
-        buy_qty  = grp.groupby('buyer_broker')['quantity'].sum()
-        sell_qty = grp.groupby('seller_broker')['quantity'].sum()
-        all_b    = set(buy_qty.index) | set(sell_qty.index)
-        net_qty  = sum(buy_qty.get(b,0) - sell_qty.get(b,0) for b in all_b)
-        total_qty = grp['quantity'].sum()
-        stock_pressure[sym] = net_qty / max(total_qty, 1) * 100
+    # Step 5: 3-day broker consistency
+    _consist = {}
+    _dates3 = [r[0] for r in _spc.execute(
+        "SELECT DISTINCT date FROM broker_activity ORDER BY date DESC LIMIT 3"
+    ).fetchall()]
+    for sym in list(_broker_net.keys()):
+        days = 0
+        for d in _dates3:
+            r = _spc.execute(
+                "SELECT SUM(net_qty) FROM broker_activity WHERE symbol=? AND date=? AND net_qty>0",
+                (sym, d)
+            ).fetchone()
+            if r and r[0] and float(r[0]) > 0:
+                days += 1
+        _consist[sym] = days
+    _spc.close()
 
-    # 3. Whale buying
-    whale_buying = set()
-    for sym, grp in full_df.groupby('symbol'):
-        total_qty = grp['quantity'].sum()
-        if total_qty < 500:
-            continue
-        buy_by = grp.groupby('buyer_broker')['quantity'].sum()
-        if not buy_by.empty:
-            top_share = buy_by.max() / total_qty * 100
-            if top_share >= 40:
-                whale_buying.add(sym)
+    # Step 6: Score every stock
+    candidates = []
+    for sym, vol in _vol_map.items():
+        avg = _avg_vol.get(sym, 0)
+        if avg < 2000:
+            continue  # illiquid
+        if sym == "NEPSE":
+            continue  # index
 
-    # Boost scores
-    final_scores = []
-    for r in quick_scores:
-        sym   = r['symbol']
-        score = r['score']
-        boost_reasons = []
+        score = 0
+        reasons = []
 
-        # Top broker buying = +20 pts
-        if sym in broker_buying:
-            score += 20
-            boost_reasons.append("Top broker buying")
+        # RS signal (max 30)
+        rs = rs_map.get(sym, {})
+        rs5 = rs.get("rs5", 0) or 0
+        if rs5 > 5:
+            score += 30; reasons.append(f"RS +{rs5:.1f}%")
+        elif rs5 > 2:
+            score += 20; reasons.append(f"RS +{rs5:.1f}%")
+        elif rs5 > 0:
+            score += 10; reasons.append(f"RS +{rs5:.1f}%")
+        elif rs5 < -3:
+            score -= 15  # sector laggard penalty
 
-        # Top broker selling = -15 pts
-        if sym in broker_selling:
-            score -= 15
-            boost_reasons.append("Top broker selling")
+        # Volume signal (max 20)
+        vol_ratio = vol / max(avg, 1)
+        if vol_ratio >= 5:
+            score += 20; reasons.append(f"Vol {vol_ratio:.1f}x surge")
+        elif vol_ratio >= 3:
+            score += 15; reasons.append(f"Vol {vol_ratio:.1f}x high")
+        elif vol_ratio >= 1.5:
+            score += 8;  reasons.append(f"Vol {vol_ratio:.1f}x above avg")
+        else:
+            continue  # no volume activity, skip
 
-        # Net buying pressure > 20% = +10 pts
-        pressure = stock_pressure.get(sym, 0)
-        if pressure > 20:
-            score += 10
-            boost_reasons.append(f"Net buy pressure {pressure:.0f}%")
-        elif pressure < -20:
-            score -= 10
+        # Broker signal (max 30)
+        net = _broker_net.get(sym, 0)
+        cnt = _broker_count.get(sym, 0)
+        dom_pct = _broker_dom.get(sym, (None, 0))[1]
+        sell_dom = _broker_sell_dom.get(sym, 0)
 
-        # Whale accumulating = +10 pts
-        if sym in whale_buying:
-            score += 10
-            boost_reasons.append("Whale accumulating")
+        if sell_dom >= 40:
+            score -= 20; reasons.append("Institution selling")
+        elif cnt >= 20:
+            score += 30; reasons.append(f"{cnt} brokers buying")
+        elif cnt >= 10:
+            score += 20; reasons.append(f"{cnt} brokers buying")
+        elif dom_pct >= 20:
+            score += 25; reasons.append(f"Broker {_broker_dom[sym][0]} dom {dom_pct:.0f}%")
+        elif net > 0:
+            score += 10; reasons.append("Net broker buying")
 
-        all_reasons = r['reasons']
-        if boost_reasons:
-            all_reasons = ' | '.join(boost_reasons) + ' | ' + r['reasons']
+        # Consistency bonus (max 15)
+        days = _consist.get(sym, 0)
+        if days >= 3:
+            score += 15; reasons.append(f"Consistent {days}/3d")
+        elif days >= 2:
+            score += 8;  reasons.append(f"Consistent {days}/3d")
 
-        final_scores.append({
-            'symbol':  sym,
-            'score':   min(score, 100),
-            'ltp':     r['ltp'],
-            'change':  r['change'],
-            'upside':  r['upside'],
-            'reasons': all_reasons,
-        })
+        # Price structure (max 10)
+        close = _price_map.get(sym, 0)
+        hi52  = _hi52.get(sym, 0)
+        if close and hi52 and hi52 > 0:
+            upside = (hi52 - close) / hi52 * 100
+            pct_of_hi = close / hi52 * 100
+            if pct_of_hi >= 95:
+                score += 10; reasons.append("Near 52W high")
+            elif pct_of_hi >= 80:
+                score += 5
+        else:
+            upside = 0
 
-    final_scores = sorted(final_scores, key=lambda x: x['score'], reverse=True)
-    # Filter only high probability — score >= 50 and upside >= 10%
-    final_scores = [r for r in final_scores if r['score'] >= 50 and r['upside'] >= 10]
+        if score >= 50 and reasons:
+            candidates.append({
+                "symbol": sym,
+                "score":  min(score, 100),
+                "ltp":    close,
+                "change": 0,
+                "upside": upside,
+                "reasons": " | ".join(reasons),
+            })
+
+    candidates = sorted(candidates, key=lambda x: x["score"], reverse=True)
+
+    # Log to signal tracker
+    try:
+        from signal_tracker import log_signals_raw as _sp_log
+        def _sp_signal(r):
+            reason = r.get("reasons", "")
+            cnt_val = _broker_count.get(r["symbol"], 0)
+            dom_val = _broker_dom.get(r["symbol"], (None, 0))[1]
+            sell_val = _broker_sell_dom.get(r["symbol"], 0)
+            if sell_val >= 40:
+                sig = "SMART_PICK_SELL"
+            elif cnt_val >= 10 or dom_val >= 20:
+                sig = "SMART_PICK_BUY"
+            else:
+                sig = "SMART_PICK"
+            return {"symbol": r["symbol"], "signal": sig, "ltp": r.get("ltp",0), "score": r.get("score",0), "reason": reason}
+        _filtered = [_sp_signal(r) for r in candidates if _sp_signal(r)["signal"] == "SMART_PICK_BUY"]
+        if _filtered:
+            log_signals_raw(_filtered, source="5")
+    except Exception:
+        pass
+
+    final_scores = candidates
 
     if not final_scores:
         console.print("[yellow]No high-probability picks today. Market may be extended.[/yellow]")
         return
 
-    t = Table(title="Smart Pick — High Probability 10%+ Gain",
+    t = Table(title="Smart Pick — High Probability Setup",
               box=box.ROUNDED, border_style="cyan", header_style="bold cyan")
     t.add_column("#",          width=3,  justify="right", style="dim")
     t.add_column("Symbol",     width=10, style="bold white")
     t.add_column("LTP",        width=13, justify="right", no_wrap=True)
-    t.add_column("Today",      width=10, justify="right", no_wrap=True)
     t.add_column("Upside",     width=10, justify="right", style="cyan")
     t.add_column("Score",      width=8,  justify="right", style="magenta")
     t.add_column("Confidence", width=14)
-    t.add_column("Why",        min_width=35, style="dim white")
+    t.add_column("Why",        min_width=40, style="dim white")
 
     for i, r in enumerate(final_scores[:top_n], 1):
-        sc = r['score']
-        if sc >= 80:
-            conf = "[green]HIGH[/green]"
-        elif sc >= 65:
-            conf = "[yellow]MODERATE[/yellow]"
-        else:
-            conf = "[dim]SPECULATIVE[/dim]"
-
-        upside_s = f"[green]+{r['upside']:.1f}%[/green]"
-
-        t.add_row(
-            str(i),
-            r['symbol'],
-            f"Rs {r['ltp']:,.2f}",
-            color_change(r['change']),
-            upside_s,
-            f"{sc}/100",
-            conf,
-            r['reasons'][:60],
-        )
+        sc = r["score"]
+        if sc >= 80:   conf = "[green]HIGH[/green]"
+        elif sc >= 65: conf = "[yellow]MODERATE[/yellow]"
+        else:          conf = "[dim]SPECULATIVE[/dim]"
+        hi = _hi52.get(r["symbol"], 0)
+        upside_s = f"[green]+{r['upside']:.1f}%[/green]" if r["upside"] > 0 else f"[cyan]At 52W high[/cyan]"
+        t.add_row(str(i), r["symbol"], f"Rs {r['ltp']:,.2f}", upside_s, f"{sc}/100", conf, r["reasons"][:55])
 
     console.print(t)
     console.print(Panel(
         f"[bold]Found {len(final_scores)} high-probability candidates[/bold]\n"
-        "[dim]Score 80+  = HIGH confidence — multiple signals + broker confirmation\n"
-        "Score 65-79 = MODERATE — good signals, some broker activity\n"
-        "Score 50-64 = SPECULATIVE — signals present but less confirmation\n"
-        "Upside = distance to 52W high (realistic target in 1 month)[/dim]",
+        "[dim]Score 80+  = HIGH — RS + Volume + Broker all confirmed\n"
+        "Score 65-79 = MODERATE — 2 of 3 signals confirmed\n"
+        "Score 50-64 = SPECULATIVE — 1 strong signal present[/dim]",
         border_style="cyan"
     ))
     return final_scores
