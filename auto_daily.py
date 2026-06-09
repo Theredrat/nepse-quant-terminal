@@ -116,8 +116,9 @@ def main():
     run("DB Sync (data -> root)", [DBSYNC])
 
 
-    # Step 1c: Market Regime (option 43) - saves regime to DB for Option 45
-    run("Market Regime", [SCANNER, '--market-regime'], timeout=120)
+    # Step 1c: Market Regime (option 43f) - saves regime + early leaders to DB for Option 45
+    import subprocess as _sp, sys as _sys
+    _sp.run([_sys.executable, SCANNER, '--market-regime'], input=b'f', timeout=120, capture_output=True)
 
     # Step 2: Quick Pick (option 4)
     run("Quick Pick (option 4)", [SCANNER, '--quickpick', '--offline'])
