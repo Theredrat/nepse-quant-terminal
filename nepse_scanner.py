@@ -2174,21 +2174,22 @@ def analyze_smart_pick(live_df, full_df, top_n=10, offline=False):
     # Log to signal tracker
     try:
         from signal_tracker import log_signals_raw as _sp_log
-        def _sp_signal(r):
-            reason = r.get("reasons", "")
-            cnt_val = _broker_count.get(r["symbol"], 0)
-            dom_val = _broker_dom.get(r["symbol"], (None, 0))[1]
-            sell_val = _broker_sell_dom.get(r["symbol"], 0)
+        _sp_sigs = []
+        for r in candidates:
+            sym = r["symbol"]
+            cnt_val = _broker_count.get(sym, 0)
+            dom_val = _broker_dom.get(sym, (None, 0))[1]
+            sell_val = _broker_sell_dom.get(sym, 0)
             if sell_val >= 40:
                 sig = "SMART_PICK_SELL"
             elif cnt_val >= 10 or dom_val >= 20:
                 sig = "SMART_PICK_BUY"
             else:
                 sig = "SMART_PICK"
-            return {"symbol": r["symbol"], "signal": sig, "ltp": r.get("ltp",0), "score": r.get("score",0), "reason": reason}
-        _filtered = [_sp_signal(r) for r in candidates if _sp_signal(r)["signal"] == "SMART_PICK_BUY"]
-        if _filtered:
-            log_signals_raw(_filtered, source="5")
+            if sig == "SMART_PICK_BUY" and r.get("score", 0) >= 70:
+                _sp_sigs.append({"symbol": sym, "signal": sig, "ltp": r.get("ltp",0), "score": r.get("score",0), "reason": r.get("reasons","")})
+        if _sp_sigs:
+            _sp_log(_sp_sigs, source="5")
     except Exception:
         pass
 
@@ -7928,7 +7929,6 @@ def main():
                 else:
                     sig = "SMART_PICK"
                 return {"symbol": r["symbol"], "signal": sig, "ltp": r.get("ltp",0), "score": r.get("score",0), "reason": reason}
-            log_signals_raw([_sp_signal(r) for r in (_sp or [])], source="5")
         except Exception:
             pass
         console.print()
