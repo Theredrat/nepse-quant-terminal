@@ -50,7 +50,7 @@ def run(label, args, timeout=120):
             errors='replace'
         )
         # Log last 3 lines of output as summary
-        out_lines = [l for l in (r.stdout + r.stderr).splitlines() if l.strip()]
+        out_lines = [l for l in (r.stdout + r.stderr).encode('ascii', errors='replace').decode('ascii').splitlines() if l.strip()]
         summary = ' | '.join(out_lines[-3:]) if out_lines else '(no output)'
         if r.returncode == 0:
             log(f"OK     {label} — {summary}")
@@ -87,7 +87,18 @@ def main():
         log("WARNING: Sync failed — continuing with existing data")
 
     # Step 1a: Fetch fresh prices from Merolagani into data DB
-    run("Price ingestion", [PYTHON, "-m", "scripts.ingestion.deterministic_daily_ingestion", "--source", "both", "--backfill-days", "7", "--max-staleness-days", "3"], timeout=600)
+    import subprocess as _sp, os as _os
+    _ing_env = _os.environ.copy()
+    _ing_env["PYTHONPATH"] = BASE_DIR
+    _ing = _sp.run(
+        [PYTHON, _os.path.join(BASE_DIR, "scripts", "ingestion", "deterministic_daily_ingestion.py"),
+         "--source", "db", "--backfill-days", "7", "--max-staleness-days", "3"],
+        capture_output=True, text=True, timeout=1800,
+        cwd=BASE_DIR, env=_ing_env, encoding="utf-8", errors="replace"
+    )
+    log("Price ingestion: " + ("OK" if _ing.returncode == 0 else "FAIL") + " rc=" + str(_ing.returncode))
+    if _ing.stdout: log(_ing.stdout.strip()[-300:])
+    if _ing.stderr and _ing.returncode != 0: log(_ing.stderr.strip()[-300:])
 
     # Step 1b: Sync data DB to root DB
     DBSYNC = os.path.join(BASE_DIR, "db_sync.py")
