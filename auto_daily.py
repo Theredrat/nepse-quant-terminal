@@ -86,6 +86,17 @@ def main():
     if not ok:
         log("WARNING: Sync failed — continuing with existing data")
 
+    # Step 0: Backup DB to OneDrive
+    import shutil as _sh, datetime as _dt
+    _bk_dir = os.path.join(r"C:\Users\HP User\OneDrive", "NEPSE_Backup")
+    os.makedirs(_bk_dir, exist_ok=True)
+    _bk_file = os.path.join(_bk_dir, "nepse_market_data_" + _dt.date.today().isoformat() + ".db")
+    try:
+        _sh.copy2(os.path.join(BASE_DIR, "nepse_market_data.db"), _bk_file)
+        log("Backup OK -> " + _bk_file)
+    except Exception as _e:
+        log("Backup WARN: " + str(_e))
+
     # Step 1a: Fetch fresh prices from Merolagani into data DB
     import subprocess as _sp, os as _os
     _ing_env = _os.environ.copy()
