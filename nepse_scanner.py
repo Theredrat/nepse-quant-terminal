@@ -73,19 +73,20 @@ SECTOR_MAP = {
         "MPFL", "NFS", "PFL", "PROFL", "RLFL", "SFCL", "SIFC",
     ],
     "Hydropower": [
-        "AHL", "AHPC", "AKJCL", "AKPL", "API", "BARUN", "BEDC", "BGWT",
-        "BHCL", "BHDC", "BHL", "BHPL", "BJHL", "BNHC", "BPCL", "BUNGAL",
-        "CHCL", "CHL", "CKHL", "DHEL", "DHPL", "DOLTI", "DORDI", "EHPL",
-        "GHL", "GLH", "GVL", "HDHPC", "HHL", "HIMSTAR", "HPPL", "HURJA",
-        "IHL", "JOSHI", "KBSH", "KHPL", "KKHC", "KPCL", "LEC", "MABEL",
-        "MAKAR", "MANDU", "MBJC", "MCHL", "MEHL", "MEL", "MEN", "MHCL",
-        "MHL", "MHNL", "MKHC", "MKHL", "MKJC", "MMKJL", "MSHL", "NGPL",
-        "NHDL", "NHPC", "NYADI", "PHCL", "PMHPL", "PPCL", "PPL", "RADHI",
-        "RAWA", "RFPL", "RHGCL", "RHPL", "RIDI", "RLEL", "RURU", "SAHAS",
-        "SANVI", "SGHC", "SHEL", "SHPC", "SIKLES", "SIPD", "SJCL", "SKHEL",
-        "SKHL", "SMH", "SMHL", "SMJC", "SOHL", "SPC", "SPDL", "SPHL",
-        "SPL", "SSHL", "TAMOR", "TPC", "TSHL", "TVCL", "UHEWA", "ULHC",
-        "UMHL", "UMRH", "UNHPL", "UPCL", "UPPER", "USHEC", "USHL", "VLUCL",
+        "AHL", "AHPC", "AKJCL", "AKPL", "APHL", "API", "BARUN", "BEDC",
+        "BGWT", "BHCL", "BHDC", "BHL", "BHPL", "BJHL", "BNHC", "BPCL",
+        "BUNGAL", "CHCL", "CHL", "CKHL", "DHEL", "DHPL", "DOLTI", "DORDI",
+        "EHPL", "GHL", "GLH", "GVL", "HDHPC", "HHL", "HIMSTAR", "HPPL",
+        "HURJA", "IHL", "JOSHI", "KBSH", "KHPL", "KKHC", "KPCL", "LEC",
+        "MABEL", "MAKAR", "MANDU", "MBJC", "MCHL", "MEHL", "MEL", "MEN",
+        "MHCL", "MHL", "MHNL", "MKHC", "MKHL", "MKJC", "MMKJL", "MSHL",
+        "NGPL", "NHDL", "NHPC", "NYADI", "PHCL", "PMHPL", "PPCL", "PPL",
+        "RADHI", "RAWA", "RFPL", "RHGCL", "RHPL", "RIDI", "RLEL", "RURU",
+        "SAHAS", "SANVI", "SGHC", "SHEL", "SHPC", "SIKLES", "SIPD", "SJCL",
+        "SKHEL", "SKHL", "SMH", "SMHL", "SMJC", "SOHL", "SPC", "SPDL",
+        "SPHL", "SPL", "SSHL", "TAMOR", "TPC", "TSHL", "TVCL", "UHEWA",
+        "ULHC", "UMHL", "UMRH", "UNHPL", "UPCL", "UPPER", "USHEC", "USHL",
+        "VLUCL",
     ],
     "Life Insurance": [
         "ALICL", "CLI", "CREST", "GMLI", "HLI", "ILI", "LICN", "NLIC",
@@ -106,7 +107,7 @@ SECTOR_MAP = {
     ],
     "Manufacturing": [
         "BNL", "BNT", "GCIL", "HDL", "NLO", "OMPL", "PCIL", "RSML",
-        "SAGAR", "SAIL", "SARBTM", "SHIVM", "SONA", "SYPNL", "UNL",
+        "SAGAR", "SAIL", "SARBTM", "SHIVM", "SONA", "SOPL", "SYPNL", "UNL",
     ],
     "Hotels": [
         "BANDIPUR", "CGH", "CITY", "HFIN", "KDL", "OHL", "SHL", "TRH",
@@ -128,11 +129,11 @@ SECTOR_LISTED = {
     "Commercial Banks": 19,
     "Development Banks": 16,
     "Finance": 15,
-    "Hydropower": 104,
+    "Hydropower": 105,
     "Life Insurance": 14,
     "Non-Life Insurance": 13,
     "Microfinance": 50,
-    "Manufacturing": 15,
+    "Manufacturing": 16,
     "Hotels": 8,
     "Investment": 7,
     "Trading": 2,
@@ -159,20 +160,14 @@ NON_EQUITY_SYMBOLS = {
 
 def get_sector(symbol):
     """Return sector for a symbol, or None if non-equity."""
-    import re as _re
     sym = symbol.upper()
     if sym in NON_EQUITY_SYMBOLS:
-        return None
-    # Debenture/bond pattern: ends in 2-digit year (e.g. LBLD88, SBD87, NCCD86)
-    if _re.search(r'(LD|BD|CD|BLD|CBD|NBD|NILD|BILD)\d{2}$', sym):
-        return None
-    # Mutual fund pattern
-    if _re.search(r'(MF|SF|GF)\d+$', sym):
         return None
     for sector, symbols in SECTOR_MAP.items():
         if sym in symbols:
             return sector
     return "Others"
+
 
 
 
@@ -490,6 +485,14 @@ def auto_update_watchlist(rs_data, full_fs, db_path, top_n=15, silent=False):
             elif eg > 10: sc += 7
             elif eg > 0:  sc += 3
 
+        # 7b boost: stocks confirmed by RS + broker + consistency
+        try:
+            import sqlite3 as _bsq
+            _bc = _bsq.connect(db_path)
+            _br = _bc.execute("SELECT boost_score FROM watchlist_boost WHERE symbol=? AND updated_date=date('now')", (sym,)).fetchone()
+            _bc.close()
+            if _br: sc += _br[0]
+        except: pass
         if sc > 0:
             scores[sym] = sc
 
@@ -8346,6 +8349,27 @@ def analyze_broker_rs():
                 f"{consist_str}"
             )
     console.print()
+
+    # ── Update watchlist with 7b confirmed stocks getting bonus score ────────
+    if not confirmed.empty:
+        _confirmed_syms = set(confirmed["symbol"].tolist())
+        _consistent_syms = {s for s, (d_on, d_tot) in _consistency.items() if d_tot > 0 and d_on/d_tot >= 0.8}
+        _bonus_syms = _confirmed_syms & _consistent_syms
+        _db3 = DB_PATH if "DB_PATH" in dir() else os.path.join(os.path.dirname(os.path.abspath(__file__)), "nepse_market_data.db")
+        try:
+            import sqlite3 as _sq3
+            _wconn = _sq3.connect(_db3)
+            _wconn.execute("CREATE TABLE IF NOT EXISTS watchlist_boost (symbol TEXT PRIMARY KEY, boost_score INTEGER, updated_date TEXT)")
+            import datetime as _dtt
+            _today = _dtt.date.today().isoformat()
+            for _s in _bonus_syms:
+                _wconn.execute("INSERT OR REPLACE INTO watchlist_boost VALUES (?,?,?)", (_s, 25, _today))
+            _wconn.commit()
+            _wconn.close()
+        except Exception as _we:
+            pass
+        auto_update_watchlist(rs_data=list(rs_data) if rs_data else None, full_fs=None, db_path=_db3, top_n=15)
+        console.print(f"  [dim]Watchlist updated — {len(_bonus_syms)} stocks boosted (7b confirmed + consistent)[/]")
 
 
 
