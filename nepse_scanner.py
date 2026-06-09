@@ -7801,7 +7801,18 @@ def main():
         _sp = analyze_smart_pick(live_df, full_fs, offline=getattr(args, 'offline', False))
         try:
             from signal_tracker import log_signals_raw
-            log_signals_raw([{"symbol": r["symbol"], "signal": "SMART_PICK", "ltp": r.get("ltp",0), "score": r.get("score",0), "reason": r.get("reasons","")} for r in (_sp or [])], source="5")
+            def _sp_signal(r):
+                reason = r.get("reasons", "")
+                if "Top broker selling" in reason and "Top broker buying" not in reason:
+                    sig = "SMART_PICK_SELL"
+                elif "Top broker buying" in reason and "Top broker selling" not in reason:
+                    sig = "SMART_PICK_BUY"
+                elif "Top broker buying" in reason and "Top broker selling" in reason:
+                    sig = "SMART_PICK_MIXED"
+                else:
+                    sig = "SMART_PICK"
+                return {"symbol": r["symbol"], "signal": sig, "ltp": r.get("ltp",0), "score": r.get("score",0), "reason": reason}
+            log_signals_raw([_sp_signal(r) for r in (_sp or [])], source="5")
         except Exception:
             pass
         console.print()
