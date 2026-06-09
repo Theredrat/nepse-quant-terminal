@@ -1535,46 +1535,149 @@ def print_legend():
 
 def print_buy_sell_guide():
     console.print()
-    console.rule("[bold cyan]Buy / Sell Decision Guide[/bold cyan]", style="cyan")
+    console.rule("[bold cyan]  NEPSE Quant Terminal - System Guide & Buy/Sell Playbook  [/bold cyan]", style="cyan")
     console.print()
-    console.print("[bold yellow]HOW TO FIND A BUY:[/bold yellow]")
+    console.print(Panel(
+        "[bold white]What this system does[/bold white]\n\n"
+        "Automatically collects NEPSE price and broker data every day, scans all 350+ stocks\n"
+        "for high-probability setups, tracks which signals actually work over time, and tells\n"
+        "you exactly where institutions are putting their money - before price moves.",
+        border_style="cyan", padding=(0, 2)
+    ))
     console.print()
-    steps = [
-        ("Step 1", "Run option 3 (Watchlist)", "Check your tracked stocks first — known stocks you follow."),
-        ("Step 2", "Run option 4 (Quick Pick)", "Look for score 70+. New candidates from full market."),
-        ("Step 3", "Run option 5 (Smart Pick)", "Confirms signals + broker + whale together. Strongest filter."),
-        ("Step 4", "Run option 17f (Momentum Hunter)", "Stock must have 3+ consecutive buy days and score 80+."),
-        ("Step 5", "Run option 17c -> latest date", "Verdict must say STRONG BUY or HOLD/ACCUMULATE.\n         If CAUTION or CONSIDER SELLING -> skip this stock."),
-        ("Step 6", "Run option 17b -> same stock", "Same brokers buying 3+ days in a row = strong confirmation.\n         New brokers each day = weak signal, skip."),
-        ("Step 7", "Run option 18 -> same stock", "Price near SUPPORT zone = BUY.\n         Price near RESISTANCE zone = wait for pullback.\n         Price in middle = small entry, add on dip."),
+    console.print("[bold yellow]STEP 0 - BEFORE ANYTHING ELSE: CHECK MARKET REGIME[/bold yellow]")
+    console.print()
+    console.print("  Run [cyan]Option 43[/cyan] (Market Regime Analyzer) every morning.")
+    console.print()
+    console.print("  [bold green]UPTREND[/bold green]   - Trust all signals. Be aggressive. Add to winners.")
+    console.print("  [bold yellow]SIDEWAYS[/bold yellow]  - Only take strongest setups (7b + 5 together). Smaller size.")
+    console.print("  [bold red]DOWNTREND[/bold red] - Ignore most buy signals - they will fail. Cash is a position.")
+    console.print("  [bold red]WEAK[/bold red]      - Same as downtrend. Wait for regime to confirm before trading.")
+    console.print()
+    console.print("[bold yellow]YOUR SIGNAL HIERARCHY - RANKED BY RELIABILITY[/bold yellow]")
+    console.print()
+    console.print("  [bold magenta]#1[/bold magenta]  [bold white]Option 7b[/bold white] - [cyan]Broker + RS Accumulation[/cyan]")
+    console.print("       Institutions buying 4-5 days in a row AND stock beating sector.")
+    console.print("       Hardest signal to fake. Your highest conviction trade.")
+    console.print("       Use for main positions held 1-4 weeks.")
+    console.print()
+    console.print("  [bold magenta]#2[/bold magenta]  [bold white]Option 5[/bold white]  - [cyan]Smart Pick[/cyan]")
+    console.print("       RS + Volume + Broker all confirmed on the same day.")
+    console.print("       When a stock appears in BOTH 5 and 7b = maximum conviction.")
+    console.print("       Use as your entry trigger when 7b already confirmed.")
+    console.print()
+    console.print("  [bold magenta]#3[/bold magenta]  [bold white]Option 17f[/bold white] - [cyan]Momentum Hunter[/cyan]")
+    console.print("       Catches accumulation 3-5 days BEFORE 7b confirms it.")
+    console.print("       Better entry price but higher risk. Use as early warning.")
+    console.print("       17f signals -> watch it. 7b confirms -> buy it.")
+    console.print()
+    console.print("  [bold magenta]#4[/bold magenta]  [bold white]Option 41[/bold white] - [cyan]Deployment Planner[/cyan]")
+    console.print("       Run every Sunday. Finds stocks ready for large capital next month.")
+    console.print("       Includes historical win rate e.g. LBBL 100 percent, HLI Grade A.")
+    console.print("       For bigger positions held 2-4 weeks. Do not trade these intraday.")
+    console.print()
+    console.print("  [bold magenta]#5[/bold magenta]  [bold white]Option 43[/bold white] - [cyan]Market Regime Analyzer[/cyan]")
+    console.print("       Tells you what phase NEPSE is in. Changes how aggressive to be.")
+    console.print("       Without this you are trading blind.")
+    console.print()
+    console.print("  [bold magenta]#6[/bold magenta]  [bold white]Option 36[/bold white] - [cyan]Best R/R Scanner[/cyan]")
+    console.print("       Run on your 7b candidates. Gives exact buy price and stop loss.")
+    console.print("       Good R/R turns even a mediocre stock into a good trade.")
+    console.print()
+    console.print("  [bold magenta]#7[/bold magenta]  [bold white]Option 32[/bold white] - [cyan]Signal Performance Tracker[/cyan]")
+    console.print("       Measures every signal win rate at 3d / 7d / 14d automatically.")
+    console.print("       After 6 weeks tells you exactly which signals work on NEPSE.")
+    console.print("       The longer it runs the more valuable it becomes.")
+    console.print()
+    console.print("  [bold magenta]#8[/bold magenta]  [bold white]Option 3[/bold white]  - [cyan]Watchlist[/cyan]")
+    console.print("       Your daily starting point. Shows 7b-confirmed stocks from yesterday.")
+    console.print("       Check before market opens every morning.")
+    console.print()
+    console.print("  [bold magenta]#9[/bold magenta]  [bold white]Option 4[/bold white]  - [cyan]Quick Pick[/cyan]")
+    console.print("       Pure volume + price breakout. Fast but no broker confirmation.")
+    console.print("       Use to spot intraday momentum. Confirm with 7b before sizing up.")
+    console.print()
+    console.print("[bold yellow]YOUR DAILY WORKFLOW[/bold yellow]")
+    console.print()
+    console.print("  [bold cyan]Before market[/bold cyan]")
+    console.print("    > Option 43 - What regime is NEPSE in today?")
+    console.print("    > Option 3  - Which stocks did 7b confirm yesterday?")
+    console.print()
+    console.print("  [bold yellow]During market[/bold yellow]")
+    console.print("    > Option 7r - Which sectors/stocks are moving right now?")
+    console.print("    > Option 4  - Any volume breakouts happening today?")
+    console.print()
+    console.print("  [bold green]After 4 PM - automatic, no action needed[/bold green]")
+    console.print("    > Scheduler runs options 4, 5, 7b, 17f and logs all signals.")
+    console.print("    > Signal tracker updates 3d/7d/14d accuracy automatically.")
+    console.print("    > Tasks run even when laptop is locked.")
+    console.print()
+    console.print("  [bold white]Evening review[/bold white]")
+    console.print("    > Option 32 - Which signals fired? What is their win rate?")
+    console.print("    > Option 36 - For confirmed stocks: exact entry + stop levels.")
+    console.print("    > Option 35 - Deep dive on any stock before committing capital.")
+    console.print()
+    console.print("  [bold cyan]Sunday evening[/bold cyan]")
+    console.print("    > Option 41 - Monthly deployment candidates with win rates.")
+    console.print("    > Option 38 - Seasonality check for next month.")
+    console.print()
+    console.print(Panel(
+        "[bold white]HIGHEST CONVICTION SETUP[/bold white]\n\n"
+        "A stock appearing in [bold cyan]Option 5 + Option 7b + Option 4[/bold cyan] on the same day means:\n"
+        "  > Stock is beating its sector (RS positive)\n"
+        "  > Institutions have been buying 4-5 days (7b confirmed)\n"
+        "  > Volume breakout happening TODAY (4 confirmed)\n\n"
+        "This is your maximum conviction trade. Size up. Use Option 36 for entry and stop.",
+        border_style="green", padding=(0, 2)
+    ))
+    console.print()
+    console.print("[bold yellow]BUY CHECKLIST - RUN IN THIS ORDER[/bold yellow]")
+    console.print()
+    buy_steps = [
+        ("1", "Option 43",  "Regime = UPTREND or SIDEWAYS. If DOWNTREND - stop here."),
+        ("2", "Option 3",   "Stock on watchlist = already 7b confirmed. Priority candidate."),
+        ("3", "Option 7b",  "Broker accumulation 4+ days + RS positive = institutional backing confirmed."),
+        ("4", "Option 5",   "Appears here too = volume also confirming. Best entry day."),
+        ("5", "Option 17f", "Score 80+ and 3+ consecutive buy days = accumulation still building."),
+        ("6", "Option 36",  "R/R ratio 1:3 minimum. Gets your exact entry and stop price."),
+        ("7", "Option 18",  "Price near SUPPORT = buy. Near RESISTANCE = wait for pullback."),
     ]
-    for step, option, desc in steps:
-        console.print(f"  [bold green]{step}[/bold green] — [cyan]{option}[/cyan]")
-        console.print(f"         {desc}")
-        console.print()
-    console.print("[bold yellow]HOW TO DECIDE TO SELL:[/bold yellow]")
+    bt = Table(box=box.SIMPLE, show_header=False, padding=(0, 1))
+    bt.add_column(width=3, style="bold green")
+    bt.add_column(width=13, style="cyan")
+    bt.add_column(width=62)
+    for step, opt, desc in buy_steps:
+        bt.add_row(step, opt, desc)
+    console.print(bt)
+    console.print()
+    console.print("  [bold green]5 of 7 passing = BUY. Steps 3 and 6 are non-negotiable.[/bold green]")
+    console.print()
+    console.print("[bold yellow]SELL CHECKLIST - ANY 2 SIGNALS = EXIT[/bold yellow]")
     console.print()
     sell_steps = [
-        ("Signal 1", "Run 17c", "Known NET SELLERS appear + verdict changes to CAUTION -> sell 50%"),
-        ("Signal 2", "Run 17d", "Trend score dropping 3 days in a row -> sell remaining"),
-        ("Signal 3", "Check chart", "Price hits resistance zone -> take partial profits"),
-        ("Signal 4", "Run 17b", "Top accumulating brokers now net selling -> exit"),
+        ("S1", "Option 17c", "Verdict changes to CAUTION or net sellers appear - sell 50%"),
+        ("S2", "Option 17d", "Broker trend score dropping 3 days in a row - sell remaining"),
+        ("S3", "Option 17b", "Top accumulating brokers now net selling - full exit"),
+        ("S4", "Option 18",  "Price hits resistance zone - take partial profits"),
+        ("S5", "Option 7b",  "Stock drops out of 7b confirmed list - start reducing"),
     ]
-    for sig, option, desc in sell_steps:
-        console.print(f"  [bold red]{sig}[/bold red] — [cyan]{option}[/cyan]")
-        console.print(f"         {desc}")
-        console.print()
-    console.print("[bold yellow]ALL 7 MUST AGREE TO BUY. ANY 2 SELL SIGNALS = EXIT.[/bold yellow]")
+    st = Table(box=box.SIMPLE, show_header=False, padding=(0, 1))
+    st.add_column(width=4, style="bold red")
+    st.add_column(width=13, style="cyan")
+    st.add_column(width=62)
+    for sig, opt, desc in sell_steps:
+        st.add_row(sig, opt, desc)
+    console.print(st)
     console.print()
-    console.print("[bold cyan]EXAMPLE — JHAPA June 5:[/bold cyan]")
-    console.print("  17f score: 98/100                    [green]PASS[/green]")
-    console.print("  17c verdict: STRONG BUY, 6 net buyers [green]PASS[/green]")
-    console.print("  17b: Broker 14, 25, 17 accumulating   [green]PASS[/green]")
-    console.print("  18: Price at Rs 1,335 = support zone  [green]PASS[/green]")
-    console.print("  Previous high Rs 1,860 = 39% upside   [green]PASS[/green]")
-    console.print("  [bold green]Decision: BUY at support, target Rs 1,600+, stop Rs 1,250[/bold green]")
+    console.print("[bold yellow]WHAT MAKES THIS SYSTEM DIFFERENT[/bold yellow]")
     console.print()
-    console.print("  [dim]Research only. Not financial advice. Paper trade first.[/dim]")
+    console.print("  > Most traders look at price and guess. This reads institutional broker flow.")
+    console.print("  > Option 32 measures every signal win rate - you know what works on NEPSE.")
+    console.print("  > Fully automated. Pipeline runs at 4 PM whether laptop is locked or not.")
+    console.print("  > Triple confirmation (5 + 7b + 4) = RS + broker + volume together.")
+    console.print("  > The longer Option 32 runs the more precisely you know where to put capital.")
+    console.print()
+    console.print("  [dim]Research only. Not financial advice. Paper trade new signals first.[/dim]")
     console.print()
 
 def analyze_floorsheet_symbol(df, symbol):
