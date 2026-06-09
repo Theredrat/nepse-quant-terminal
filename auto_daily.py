@@ -86,6 +86,14 @@ def main():
     if not ok:
         log("WARNING: Sync failed — continuing with existing data")
 
+    # Step 1a: Fetch fresh prices from Merolagani into data DB
+    run("Price ingestion", [PYTHON, "-m", "scripts.ingestion.deterministic_daily_ingestion", "--source", "both", "--backfill-days", "7", "--max-staleness-days", "3"], timeout=600)
+
+    # Step 1b: Sync data DB to root DB
+    DBSYNC = os.path.join(BASE_DIR, "db_sync.py")
+    run("DB Sync (data -> root)", [DBSYNC])
+
+
     # Step 2: Quick Pick (option 4)
     run("Quick Pick (option 4)", [SCANNER, '--quickpick', '--offline'])
 
@@ -110,3 +118,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

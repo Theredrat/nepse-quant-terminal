@@ -46,11 +46,13 @@ def fetch_broker_data(n):
             log.error('Available: ' + str(list(df.columns)))
             return None
         broker_data = {}
+        price_totals = {}
         for _, row in df.iterrows():
             sym = str(row.get('symbol','')).strip()
             buyer = str(row.get('buyer_broker','')).strip()
             seller = str(row.get('seller_broker','')).strip()
             amt = float(row.get('amount', 0) or 0)
+            qty = float(row.get('quantity', 0) or 0)
             if not sym: continue
             if sym not in broker_data:
                 broker_data[sym] = {}
@@ -58,8 +60,17 @@ def fetch_broker_data(n):
                 broker_data[sym][buyer] = broker_data[sym].get(buyer, 0) + amt
             if seller:
                 broker_data[sym][seller] = broker_data[sym].get(seller, 0) - amt
-        log.info('Processed ' + str(len(broker_data)) + ' symbols')
-        return broker_data
+            if sym not in price_totals:
+                price_totals[sym] = [0.0, 0.0]
+            price_totals[sym][0] += amt
+            price_totals[sym][1] += qty
+        fs_prices = []
+        for sym, (total_amt, total_qty) in price_totals.items():
+            if total_qty > 0:
+                vwap = round(total_amt / total_qty, 2)
+                fs_prices.append({'symbol': sym, 'open': vwap, 'high': vwap, 'low': vwap, 'close': vwap, 'volume': total_qty})
+        log.info('Processed ' + str(len(broker_data)) + ' symbols, ' + str(len(fs_prices)) + ' prices from floorsheet')
+        return broker_data, fs_prices
     except Exception as e:
         log.error('Fetch error: ' + str(e))
         import traceback; traceback.print_exc()
@@ -137,15 +148,20 @@ def main():
     today = datetime.date.today().isoformat()
     log.info("NEPSE Daily Scan CI - " + today)
     n = get_nepse()
-    broker_data = fetch_broker_data(n)
-    if broker_data is None:
+    result = fetch_broker_data(n)
+    if result is None:
         log.error("No broker data - market may be closed or API unavailable")
         return
+    broker_data, fs_prices = result
     path = save_broker_json(broker_data, today)
     log.info("Done: " + path)
     prices = fetch_price_data(n)
     if prices:
         save_price_json(prices, today)
+        log.info("Prices from getLiveMarket: " + str(len(prices)))
+    elif fs_prices:
+        save_price_json(fs_prices, today)
+        log.info("Prices from floorsheet VWAP fallback: " + str(len(fs_prices)))
     else:
         log.warning("No price data saved")
 
