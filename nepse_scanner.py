@@ -8285,6 +8285,68 @@ def analyze_broker_rs():
             f"({top_broker['symbols'][:50]})"
         )
 
+    # ── Bottom Line: stocks confirmed by BOTH RS and broker buying ────────────
+    console.rule("[bold white]Bottom Line — Confirmed Setups[/]")
+    console.print("[dim]Stocks with BOTH price momentum (RS) AND broker accumulation[/]\n")
+
+    # Multi-day consistency: check last 5 days from DB
+    _db2 = DB_PATH if "DB_PATH" in dir() else os.path.join(os.path.dirname(os.path.abspath(__file__)), "nepse_market_data.db")
+    try:
+        _conn2 = _sq.connect(_db2)
+        _dates = [r[0] for r in _conn2.execute("SELECT DISTINCT date FROM broker_activity ORDER BY date DESC LIMIT 5").fetchall()]
+        _consistency = {}
+        for _sym in top_symbols:
+            _days_accum = 0
+            for _d in _dates:
+                _row = _conn2.execute("SELECT SUM(net_qty) FROM broker_activity WHERE symbol=? AND date=? AND net_qty>0", (_sym, _d)).fetchone()
+                if _row and _row[0] is not None and float(_row[0]) > 0:
+                    _days_accum += 1
+            _consistency[_sym] = (_days_accum, len(_dates))
+        _conn2.close()
+    except Exception:
+        _consistency = {s: (0, 0) for s in top_symbols}
+
+    # Find stocks that appear in accumulation table
+    confirmed = (
+        rdf[rdf["net_qty"] > 0]
+        .groupby("symbol")
+        .agg(
+            broker_count=("broker", "nunique"),
+            total_net=("net_qty", "sum"),
+            top_brokers=("broker", lambda x: ", ".join(str(b) for b in sorted(x.unique())[:5]))
+        )
+        .reset_index()
+    )
+    confirmed = confirmed.merge(
+        pd.DataFrame([{"symbol": r["symbol"], "rs5": r["rs5"]} for r in top_rs]),
+        on="symbol"
+    ).sort_values(["broker_count", "total_net"], ascending=False).head(8)
+
+    if confirmed.empty:
+        console.print("  [yellow]No confirmed setups — RS leaders lack broker confirmation.[/]")
+    else:
+        for _, r in confirmed.iterrows():
+            rs_color = "green" if r["rs5"] >= 0 else "red"
+            days_on, days_total = _consistency.get(r["symbol"], (0, 0))
+            if days_total > 0:
+                consist_pct = days_on / days_total
+                if consist_pct >= 0.8:
+                    consist_str = f"[green]Consistent {days_on}/{days_total} days ✅[/]"
+                elif consist_pct >= 0.5:
+                    consist_str = f"[yellow]Moderate {days_on}/{days_total} days ⚠[/]"
+                else:
+                    consist_str = f"[red]Weak {days_on}/{days_total} days ❌[/]"
+            else:
+                consist_str = "[dim]N/A[/]"
+            console.print(
+                f"  [bold cyan]{r['symbol']}[/] "
+                f"RS [{rs_color}]+{r['rs5']:.1f}%[/] · "
+                f"[green]{int(r['broker_count'])} brokers[/] · "
+                f"Net qty: [green]{int(r['total_net']):+,}[/] · "
+                f"{consist_str}"
+            )
+    console.print()
+
 
 
 # ── 52-WEEK HIGH/LOW ALERTS ───────────────────────────────────────────────────
