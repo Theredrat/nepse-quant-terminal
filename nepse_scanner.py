@@ -8068,35 +8068,73 @@ def analyze_broker_rs():
     top_symbols = {r["symbol"] for r in top_rs}
     rs_lookup = {r["symbol"]: r for r in top_rs}
 
-    # ── Step 2: Get floorsheet ────────────────────────────────────────────────
-    n = Nepse()
-    n.setTLSVerification(False)
-    console.print("  [yellow]Fetching floorsheet for broker analysis — 30-60 seconds...[/yellow]")
-    raw = fetch_with_retry(lambda: n.getFloorSheet(show_progress=False), "floorsheet", retries=2, delay=3)
-    if raw is None or (hasattr(raw, "__len__") and len(raw) == 0):
-        console.print("[red]No floorsheet data available.[/]")
+    # ── Step 2: Get floorsheet (live or DB fallback) ─────────────────────────
+    import pandas as pd
+    import sqlite3 as _sq, datetime as _dt
+
+    df = None
+    data_label = ""
+
+    # Try live floorsheet first
+    try:
+        n = Nepse()
+        n.setTLSVerification(False)
+        console.print("  [yellow]Fetching floorsheet for broker analysis...[/yellow]")
+        raw = fetch_with_retry(lambda: n.getFloorSheet(show_progress=False), "floorsheet", retries=2, delay=3)
+        if raw is not None and not (hasattr(raw, "__len__") and len(raw) == 0):
+            _df = raw if isinstance(raw, pd.DataFrame) else pd.DataFrame(raw)
+            _broker_col = "buyerMemberId" if "buyerMemberId" in _df.columns else "buyerBrokerName"
+            if not _df.empty and len(_df) > 500 and _df[_broker_col].notna().sum() > 100:
+                df = _df
+                data_label = "live"
+    except Exception:
+        pass
+
+    # Fallback: use latest date from broker_activity DB
+    if df is None or df.empty:
+        try:
+            _db = DB_PATH if "DB_PATH" in dir() else os.path.join(os.path.dirname(os.path.abspath(__file__)), "nepse_market_data.db")
+            _conn = _sq.connect(_db)
+            _latest = _conn.execute("SELECT date FROM broker_activity GROUP BY date ORDER BY date DESC LIMIT 1").fetchone()
+            if _latest:
+                _date = _latest[0]
+                # Build df from broker_activity
+                _ba = _conn.execute(
+                    "SELECT symbol, broker_id, buy_qty, sell_qty, buy_val FROM broker_activity WHERE date=?",
+                    (_date,)
+                ).fetchall()
+                _conn.close()
+                if _ba:
+                    # Expand into buyer/seller rows
+                    _records = []
+                    for sym, bid, qb, qs, amt in _ba:
+                        if qb and float(qb) > 0:
+                            _records.append({"symbol": sym, "buyer_broker": str(bid), "seller_broker": "0", "quantity": float(qb), "amount": float(amt or 0)})
+                        if qs and float(qs) > 0:
+                            _records.append({"symbol": sym, "buyer_broker": "0", "seller_broker": str(bid), "quantity": float(qs), "amount": float(amt or 0)})
+                    if _records:
+                        df = pd.DataFrame(_records)
+                        data_label = f"DB ({_date})"
+        except Exception as _e:
+            console.print(f"  [red]DB fallback error: {_e}[/red]")
+
+    if df is None or df.empty:
+        console.print("[red]No floorsheet data available (live or DB).[/]")
         return
 
-    import pandas as pd
-    df = raw if isinstance(raw, pd.DataFrame) else pd.DataFrame(raw)
-    if df.empty:
-        console.print("[red]Floorsheet empty.[/]")
-        return
+    console.print(f"  [dim]Using: {data_label}[/dim]")
 
     # Normalize columns
-    # Map to standard column names
     if 'stockSymbol' in df.columns:
         df['symbol'] = df['stockSymbol']
     if 'contractQuantity' in df.columns:
         df['quantity'] = pd.to_numeric(df['contractQuantity'], errors='coerce').fillna(0)
     if 'contractAmount' in df.columns:
         df['amount'] = pd.to_numeric(df['contractAmount'], errors='coerce').fillna(0)
-    # Use broker IDs only
     if 'buyerMemberId' in df.columns:
         df['buyer_broker'] = df['buyerMemberId'].fillna('Unknown')
     elif 'buyerBrokerName' in df.columns:
         df['buyer_broker'] = df['buyerBrokerName'].fillna('Unknown')
-    # Use broker IDs only
     if 'sellerMemberId' in df.columns:
         df['seller_broker'] = df['sellerMemberId'].fillna('Unknown')
     elif 'sellerBrokerName' in df.columns:
@@ -8108,7 +8146,7 @@ def analyze_broker_rs():
     # Filter to top RS symbols only
     rs_floor = df[df['symbol'].isin(top_symbols)].copy()
     if rs_floor.empty:
-        console.print("[yellow]None of the top RS stocks traded in floorsheet today.[/]")
+        console.print("[yellow]None of the top RS stocks found in broker data.[/]")
         return
 
     # ── Step 3: Broker net activity per RS stock ──────────────────────────────
