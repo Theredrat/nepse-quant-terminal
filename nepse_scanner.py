@@ -2449,6 +2449,24 @@ def print_premarket_brief():
         console.print("  " + "   ".join(parts))
         console.print()
 
+    _leaders = _c.execute("SELECT symbol, sector, score, pos, vol_ratio, ret5 FROM regime_leaders WHERE date=(SELECT MAX(date) FROM regime_leaders) ORDER BY score DESC LIMIT 10").fetchall() if _c.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='regime_leaders'").fetchone()[0] else []
+    if _leaders:
+        console.print("[bold yellow]Option 43 Early Leaders -- Near Support + Volume Building[/bold yellow]")
+        tl = Table(box=box.SIMPLE, show_header=True, header_style="bold cyan", padding=(0,1))
+        tl.add_column("Symbol",  width=10, style="bold white")
+        tl.add_column("Sector",  width=22, style="dim")
+        tl.add_column("Score",   width=7,  justify="right", style="magenta")
+        tl.add_column("Pos%",    width=7,  justify="right")
+        tl.add_column("VolR",    width=7,  justify="right", style="cyan")
+        tl.add_column("5d%",     width=7,  justify="right")
+        for sym, sec, sc, pos, vol_r, ret5 in _leaders:
+            pc = "green" if ret5 >= 0 else "red"
+            tl.add_row(sym, (sec or "")[:20], str(sc), f"{pos:.0f}%", f"{vol_r:.1f}x", f"[{pc}]{ret5:+.1f}%[/{pc}]")
+        console.print(tl)
+        console.print()
+    else:
+        console.print("[dim]No regime leaders saved yet -- run option 43f first.[/dim]")
+        console.print()
     console.print("[dim]Run option 43 for full regime detail. Option 36 for entry/stop on any stock above.[/dim]")
     console.print()
     _c.close()
@@ -7646,7 +7664,16 @@ def analyze_market_regime(conn, console):
             if score >= 4:
                 scored.append((score, sym, sec, cur, pos*100, vol_r, ret5))
         scored.sort(reverse=True)
-        return scored[:20]
+        top = scored[:20]
+        try:
+            import datetime as _dt
+            conn.execute("CREATE TABLE IF NOT EXISTS regime_leaders (date TEXT, symbol TEXT, sector TEXT, score INTEGER, pos REAL, vol_ratio REAL, ret5 REAL, PRIMARY KEY(date,symbol))")
+            conn.execute("DELETE FROM regime_leaders WHERE date=?", (_dt.date.today().isoformat(),))
+            for sc, sym, sec, cur, pos, vol_r, ret5 in top:
+                conn.execute("INSERT OR REPLACE INTO regime_leaders VALUES (?,?,?,?,?,?,?)", (_dt.date.today().isoformat(), sym, sec, sc, pos, vol_r, ret5))
+            conn.commit()
+        except Exception: pass
+        return top
 
     # ── MENU ──
     console.print()
