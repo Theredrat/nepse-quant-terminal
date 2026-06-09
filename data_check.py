@@ -28,16 +28,8 @@ def data_health_check():
         flag = " <-- TODAY" if date == today else ""
         print(f"  {date}  {count:>6} rows  [{status}]{flag}")
 
-    # Daily data files
-    print("\n[3] DAILY DATA FILES")
-    files = sorted([f for f in os.listdir("daily_data") if f.endswith(".json")])
-    for f in files[-10:]:
-        size = os.path.getsize(os.path.join("daily_data", f))
-        status = "OK" if size > 100000 else "SMALL"
-        print(f"  {f}  {size:>8} bytes  [{status}]")
-
     # Last auto_daily run
-    print("\n[4] LAST PIPELINE RUN")
+    print("\n[3] LAST PIPELINE RUN")
     log = r"logs\auto_daily.log"
     if os.path.exists(log):
         lines = open(log, encoding="utf-8", errors="replace").readlines()
