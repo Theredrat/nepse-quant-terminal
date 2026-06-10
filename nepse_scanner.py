@@ -8317,10 +8317,13 @@ def analyze_ipo_tracker(db_path='nepse_market_data.db'):
         ORDER BY MIN(sp.date) DESC
     """).fetchall()
 
+    MERGER_EXCLUDE = {"MATRI", "SMPDA", "RBCL", "SICL", "NLG", "CORBL"}
+
     # Filter non-equity
     equity = []
     for r in stocks:
         sym = r[0]
+        if sym in MERGER_EXCLUDE: continue
         if re.search(r'(D8[0-9]|D9[0-9]|B8[0-9]|B9[0-9]|LD8|LD9|BD8|BD9)', sym): continue
         if re.search(r'(MF[0-9]?$|F[123]$)', sym): continue
         if re.search(r'(PO$|PNP$)', sym): continue
@@ -8360,8 +8363,8 @@ def analyze_ipo_tracker(db_path='nepse_market_data.db'):
 
         days_left = (ud - today).days
 
-        # Non-regulated past 3yr go to Section E; regulated stay in Section A
-        is_unlocked = days_left < 0 and sector not in REGULATED_SECTORS
+        # All unlocked stocks go to Section E regardless of sector
+        is_unlocked = days_left < 0
 
         # Broker analysis
         ba = get_broker_analysis(sym, conn)
