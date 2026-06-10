@@ -8287,7 +8287,6 @@ def analyze_ipo_tracker(db_path='nepse_market_data.db'):
     console.print()
 
     # Get all IPO stocks
-    cutoff = (today - datetime.timedelta(days=1095)).strftime('%Y-%m-%d')
     stocks = conn.execute("""
         SELECT
             sp.symbol,
@@ -8313,10 +8312,10 @@ def analyze_ipo_tracker(db_path='nepse_market_data.db'):
             'Microfinance','Non Life Insurance','Others','Tradings'
         )
         GROUP BY sp.symbol
-        HAVING MIN(sp.date) >= ?
+        HAVING MIN(sp.date) >= '2020-01-01'
         AND COUNT(DISTINCT sp.date) >= 5
         ORDER BY MIN(sp.date) DESC
-    """, (cutoff,)).fetchall()
+    """).fetchall()
 
     # Filter non-equity
     equity = []
