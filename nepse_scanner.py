@@ -10782,13 +10782,13 @@ def analyze_deployment_planner(db_path='nepse_market_data.db'):
                 if a > 0 and v > a * 1.5: _wl_scores[s] += 10
     except: pass
 
-    # Filter to stocks scoring 40+, sort by score, keep top 80
-    wl_syms = [s for s, sc in sorted(_wl_scores.items(), key=lambda x: -x[1]) if sc >= 40][:80]
+    # Filter to stocks scoring 35+, sort by score, keep top 80
+    wl_syms = [s for s, sc in sorted(_wl_scores.items(), key=lambda x: -x[1]) if sc >= 35][:80]
     if not wl_syms:
         wl_syms = [s for s, sc in sorted(_wl_scores.items(), key=lambda x: -x[1])][:50]
-        console.print(f'  [yellow]No stocks scored 40+, showing top 50[/yellow]')
+        console.print(f'  [yellow]No stocks scored 35+, showing top 50[/yellow]')
 
-    console.print(f'  Watchlist: [bold]{len(_all_wl)}[/bold] total → [bold green]{len(wl_syms)}[/bold green] scored 40+ | Scanning for readiness...')
+    console.print(f'  Watchlist: [bold]{len(_all_wl)}[/bold] total → [bold green]{len(wl_syms)}[/bold green] scored 35+ | Scanning for readiness...')
     console.print()
 
     # ── Sector phase map ──
@@ -10951,7 +10951,7 @@ def analyze_deployment_planner(db_path='nepse_market_data.db'):
             # HOT now: phase ACCUM/MARKUP + current seasonal BUY + RR>=2
             hot_now = phase in ('MARKUP','ACCUM') and curr_sig in ('S.BUY','BUY') and rr>=2.0
             # READY for July: good score + RR exists + not overbought
-            july_ready = july_score>=50 and rr>=1.5 and rsi<75
+            july_ready = july_score>=45 and rr>=1.5 and rsi<75
 
             if rr < 1.2: continue  # skip stocks with no R/R
 
