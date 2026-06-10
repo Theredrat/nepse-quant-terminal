@@ -1137,14 +1137,69 @@ def analyze_support_resistance(full_df, symbol):
     console.print(Rule(f"[bold yellow]Support / Resistance — {sym}[/bold yellow]", style="yellow"))
 
     df = get_floorsheet_of_symbol(full_df, sym)
+
+    # Normalize column names if live API returns raw names
+    if df is not None and not df.empty:
+        col_fix = {'contractRate': 'rate', 'contractQuantity': 'quantity', 'contractAmount': 'amount'}
+        df = df.rename(columns={k: v for k, v in col_fix.items() if k in df.columns})
+        df = df.loc[:, ~df.columns.duplicated(keep='first')]
+        # Check if rate column has real data
+        if 'rate' not in df.columns or pd.to_numeric(df['rate'], errors='coerce').fillna(0).sum() == 0:
+            df = None
+
+    # Fallback to stock_prices DB data if floorsheet unavailable or empty
     if df is None or df.empty:
-        console.print(f"  [red]No data for {sym}[/red]")
+        try:
+            import sqlite3 as _sr_sql
+            _conn = _sr_sql.connect('nepse_market_data.db')
+            _rows = _conn.execute(
+                "SELECT date, close as rate, volume as quantity FROM stock_prices WHERE symbol=? AND close>0 ORDER BY date DESC LIMIT 60",
+                (sym,)
+            ).fetchall()
+            _conn.close()
+            if _rows:
+                df = pd.DataFrame(_rows, columns=['date', 'rate', 'quantity'])
+                console.print(f"  [dim]Using 60-day price history (floorsheet unavailable)[/dim]")
+            else:
+                console.print(f"  [red]No data for {sym}[/red]")
+                return
+        except Exception as _e:
+            console.print(f"  [red]No data for {sym}: {_e}[/red]")
+            return
+
+    if 'rate' not in df.columns:
+        console.print(f"  [red]Price column not found for {sym}.[/red]")
         return
 
-    total_qty  = df['quantity'].sum()
-    mid_price  = df['rate'].median()
-    buckets    = pd.cut(df['rate'], bins=12)
-    vol_by_price = df.groupby(buckets, observed=True)['quantity'].sum().sort_values(ascending=False)
+    # Debug: print columns if something is wrong
+    console.print(f"  [dim]Columns: {df.columns.tolist()} | Shape: {df.shape}[/dim]")
+    df = df.loc[:, ~df.columns.duplicated()]  # drop duplicate columns
+    rate_col = 'rate' if 'rate' in df.columns else None
+    qty_col  = 'quantity' if 'quantity' in df.columns else None
+    if not rate_col or not qty_col:
+        console.print(f"  [red]Missing columns. Have: {df.columns.tolist()}[/red]")
+        return
+
+    df[rate_col] = pd.to_numeric(df[rate_col], errors='coerce')
+    df[qty_col]  = pd.to_numeric(df[qty_col],  errors='coerce')
+    df = df.dropna(subset=[rate_col, qty_col])
+    if df.empty:
+        console.print(f"  [red]No valid price/quantity data for {sym}[/red]")
+        return
+
+    total_qty  = df[qty_col].sum()
+    mid_price  = df[rate_col].median()
+    buckets    = pd.cut(df[rate_col], bins=12)
+    grp        = df.groupby(buckets, observed=True)[qty_col].sum()
+    import numpy as np
+    if isinstance(grp, pd.Series):
+        vol_by_price = grp.sort_values(ascending=False).dropna()
+    else:
+        vol_by_price = grp.squeeze() if not isinstance(grp.squeeze(), np.floating) else grp
+        if isinstance(vol_by_price, pd.Series):
+            vol_by_price = vol_by_price.sort_values(ascending=False).dropna()
+        else:
+            vol_by_price = grp.iloc[:, 0].sort_values(ascending=False).dropna()
 
     t = Table(title=f"Price Clusters — {sym}", box=box.ROUNDED, border_style="yellow", header_style="bold yellow")
     t.add_column("Price Zone",   width=24, style="white")
