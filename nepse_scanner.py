@@ -7732,7 +7732,7 @@ def analyze_market_regime(conn, console):
                 f'{d1}  →  {d2}',
                 f'{dur} months',
                 f'[{mc}]{move:+d}%[/{mc}]',
-                f'{avg_vol/1e6:.1f}M',
+                f'{_fmt_npr(avg_vol)}',
                 f'{ratio:.2f}x',
                 f'[dim]{chars[name]}[/dim]'
             )
@@ -10706,15 +10706,89 @@ def analyze_deployment_planner(db_path='nepse_market_data.db'):
 
     conn = sqlite3.connect(db_path)
 
-    # ── Load watchlist ──
-    wl_syms = [r[0] for r in conn.execute(
+    # ── Load watchlist with minimum score filter (bulk queries) ──
+    _all_wl = [r[0] for r in conn.execute(
         "SELECT symbol FROM watchlist_items ORDER BY symbol"
     ).fetchall()]
-    if not wl_syms:
-        console.print('  [red]No watchlist stocks found. Add stocks to watchlist first.[/red]')
+    if not _all_wl:
+        console.print('  [red]No watchlist stocks found.[/red]')
         conn.close(); return
 
-    console.print(f'  Watchlist: [bold]{len(wl_syms)}[/bold] stocks  |  Scanning for July readiness...')
+    _latest_p = conn.execute("SELECT MAX(date) FROM stock_prices").fetchone()[0]
+    _latest_b = conn.execute("SELECT MAX(date) FROM broker_activity").fetchone()[0]
+    _wl_scores = {s: 0 for s in _all_wl}
+
+    # RS score - bulk fetch current + 5d + 20d prices
+    try:
+        _dates_rs = [r[0] for r in conn.execute(
+            "SELECT DISTINCT date FROM stock_prices ORDER BY date DESC LIMIT 21"
+        ).fetchall()]
+        _d5  = _dates_rs[5]  if len(_dates_rs) > 5  else None
+        _d20 = _dates_rs[20] if len(_dates_rs) > 20 else None
+        _cur  = dict(conn.execute("SELECT symbol, close FROM stock_prices WHERE date=?", (_latest_p,)).fetchall())
+        _p5   = dict(conn.execute("SELECT symbol, close FROM stock_prices WHERE date=?", (_d5,)).fetchall()) if _d5 else {}
+        _p20  = dict(conn.execute("SELECT symbol, close FROM stock_prices WHERE date=?", (_d20,)).fetchall()) if _d20 else {}
+        for s in _all_wl:
+            c = _cur.get(s, 0)
+            if not c: continue
+            p5 = _p5.get(s, 0)
+            if p5 > 0:
+                rs5 = (c - p5) / p5 * 100
+                if rs5 > 5: _wl_scores[s] += 20
+                elif rs5 > 2: _wl_scores[s] += 10
+            p20 = _p20.get(s, 0)
+            if p20 > 0:
+                rs20 = (c - p20) / p20 * 100
+                if rs20 > 2: _wl_scores[s] += 5
+    except: pass
+
+    # Broker score - bulk fetch
+    try:
+        if _latest_b:
+            _b1 = dict(conn.execute(
+                "SELECT symbol, SUM(net_val) FROM broker_activity WHERE date=? GROUP BY symbol",
+                (_latest_b,)
+            ).fetchall())
+            for s in _all_wl:
+                if (_b1.get(s) or 0) > 0: _wl_scores[s] += 10
+            _dates5b = [r[0] for r in conn.execute(
+                "SELECT DISTINCT date FROM broker_activity ORDER BY date DESC LIMIT 5"
+            ).fetchall()]
+            _ph = ','.join('?'*len(_dates5b))
+            _btrend = {}
+            for s, d, nv in conn.execute(
+                f"SELECT symbol, date, SUM(net_val) FROM broker_activity WHERE date IN ({_ph}) GROUP BY symbol, date",
+                _dates5b
+            ).fetchall():
+                if (nv or 0) > 0: _btrend[s] = _btrend.get(s, 0) + 1
+            for s, td in _btrend.items():
+                if s in _wl_scores:
+                    if td >= 4: _wl_scores[s] += 10
+                    elif td >= 3: _wl_scores[s] += 7
+                    elif td >= 2: _wl_scores[s] += 3
+    except: pass
+
+    # Volume spike - bulk fetch
+    try:
+        if _latest_p:
+            _vols  = dict(conn.execute("SELECT symbol, volume FROM stock_prices WHERE date=?", (_latest_p,)).fetchall())
+            _avgvs = dict(conn.execute(
+                "SELECT symbol, AVG(volume) FROM stock_prices WHERE date >= date(?,'-20 days') GROUP BY symbol",
+                (_latest_p,)
+            ).fetchall())
+            for s in _all_wl:
+                v = _vols.get(s, 0) or 0
+                a = _avgvs.get(s, 0) or 0
+                if a > 0 and v > a * 1.5: _wl_scores[s] += 10
+    except: pass
+
+    # Filter to stocks scoring 40+, sort by score, keep top 80
+    wl_syms = [s for s, sc in sorted(_wl_scores.items(), key=lambda x: -x[1]) if sc >= 40][:80]
+    if not wl_syms:
+        wl_syms = [s for s, sc in sorted(_wl_scores.items(), key=lambda x: -x[1])][:50]
+        console.print(f'  [yellow]No stocks scored 40+, showing top 50[/yellow]')
+
+    console.print(f'  Watchlist: [bold]{len(_all_wl)}[/bold] total → [bold green]{len(wl_syms)}[/bold green] scored 40+ | Scanning for readiness...')
     console.print()
 
     # ── Sector phase map ──
