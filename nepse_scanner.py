@@ -7577,7 +7577,7 @@ def analyze_market_regime(conn, console):
     def _get_avg_volume(d1, d2):
         r = conn.execute("""
             SELECT AVG(volume) FROM stock_prices
-            WHERE date>=? AND date<=? AND close>0 AND volume>0
+            WHERE date>=? AND date<=? AND close>0 AND volume>100000000
         """, (d1, d2)).fetchone()
         return r[0] or 0
 
