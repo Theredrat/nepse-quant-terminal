@@ -8360,7 +8360,7 @@ def analyze_ipo_tracker(db_path='nepse_market_data.db'):
 
         days_left = (ud - today).days
 
-        # Skip unlocked non-regulated sectors
+        # Non-regulated past 3yr go to Section E; regulated stay in Section A
         is_unlocked = days_left < 0 and sector not in REGULATED_SECTORS
 
         # Broker analysis
@@ -8454,8 +8454,12 @@ def analyze_ipo_tracker(db_path='nepse_market_data.db'):
         prom_str = f"{e['prom_pct']:.0f}%" if e['prom_pct'] else 'N/A'
         ceil = SECTOR_CEILING.get(e['sector'], '?')
 
-        unlock_str = f"{e['days_left']}d" if e['days_left'] >= 0 else 'REG'
-        unlock_color = 'green' if e['days_left'] > 365 else 'yellow' if e['days_left'] > 90 else 'red'
+        if e['days_left'] >= 0:
+            unlock_str = f"{e['days_left']}d"
+            unlock_color = 'green' if e['days_left'] > 365 else 'yellow' if e['days_left'] > 90 else 'red'
+        else:
+            unlock_str = 'UNLOCKED'
+            unlock_color = 'dim'
 
         t.add_row(
             str(i),
