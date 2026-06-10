@@ -7928,7 +7928,7 @@ def analyze_market_regime(conn, console):
 
         console.print('[bold cyan]═══ TRIGGER SIGNALS TO WATCH ═══[/bold cyan]')
         console.print()
-        vol_trig = cc['vol_3m'] * 2.0
+        vol_trig = cc['vol_6m'] * 1.2  # 20% above 6m avg = healthier baseline than 2x inflated 3m
         console.print(f'  Volume trigger:    [yellow]{vol_trig/1e6:.1f}M+[/yellow] daily avg sustained 2 weeks  [dim](now {cc["vol_now"]/1e6:.2f}M)[/dim]')
         console.print(f'  Breadth trigger:   [yellow]55%+[/yellow] stocks above 20d avg  [dim](now {cc["breadth"]:.0f}%)[/dim]')
         console.print(f'  Seasonal trigger:  [yellow]Jul S.BUY[/yellow] signal  [dim](historically 5/5 up for index)[/dim]')
