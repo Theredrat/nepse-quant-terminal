@@ -8211,25 +8211,67 @@ def calc_score(pub_shares, sector, days_left, broker_score, phase, pct_from_list
     return min(total, 100), float_score, sec_score, runway_score, bscore, phase_score
 
 
-def detect_phase(list_price, cur_price, ath, days_listed, broker_score):
+def get_price_momentum(symbol, conn):
+    """Returns (price_mom_10d, price_mom_20d, vol_ratio) using only non-zero volume days."""
+    rows = conn.execute("""
+        SELECT close, volume FROM stock_prices
+        WHERE symbol=? AND volume > 0
+        ORDER BY date DESC LIMIT 30
+    """, (symbol,)).fetchall()
+    if len(rows) < 10:
+        return None, None, None
+    recent = rows[:10]
+    prior  = rows[10:20]
+    price_now = recent[0][0]
+    price_10d = recent[-1][0]
+    price_20d = prior[-1][0] if prior else price_10d
+    avg_vol_recent = sum(r[1] for r in recent) / len(recent)
+    avg_vol_prior  = sum(r[1] for r in prior) / len(prior) if prior else avg_vol_recent
+    mom_10d = (price_now - price_10d) / price_10d * 100 if price_10d else 0
+    mom_20d = (price_now - price_20d) / price_20d * 100 if price_20d else 0
+    vol_ratio = avg_vol_recent / avg_vol_prior if avg_vol_prior else 1.0
+    return mom_10d, mom_20d, vol_ratio
+
+
+def detect_phase(list_price, cur_price, ath, days_listed, broker_score,
+                 price_mom_10d=None, vol_ratio=None):
     if not list_price or not cur_price or list_price == 0:
         return 'UNKNOWN'
-
     pct_from_list = (cur_price - list_price) / list_price * 100
     pct_from_ath  = (cur_price - ath) / ath * 100 if ath else 0
 
-    if days_listed < 30:
+    if price_mom_10d is not None and vol_ratio is not None:
+        p  = price_mom_10d
+        vr = vol_ratio
+        if days_listed < 20:
+            return 'FRESH'
+        elif p < -8 and vr < 0.8:
+            return 'MARKDOWN'
+        elif p < -4 and vr >= 1.0:
+            return 'DISTRIBUTION'
+        elif p < -4 and vr < 0.8:
+            return 'MARKDOWN'
+        elif p < -2 and vr < 0.7:
+            return 'LATE DIST'
+        elif -2 <= p <= 3 and vr < 0.8:
+            return 'ACCUMULATION'
+        elif -2 <= p <= 3 and vr >= 1.5:
+            return 'MARKUP START'
+        elif p > 3 and vr >= 1.0:
+            return 'MARKUP RUN'
+        elif pct_from_ath > -10:
+            return 'NEAR ATH'
+        else:
+            return 'CONSOLIDATION'
+
+    if days_listed < 20:
         return 'FRESH'
-    elif pct_from_ath < -35 and broker_score and broker_score < 40:
-        return 'DISTRIBUTION'
-    elif pct_from_ath > -15:
+    elif pct_from_ath > -10:
         return 'NEAR ATH'
-    elif pct_from_list < 30 and pct_from_ath < -20:
+    elif pct_from_list < 20 and pct_from_ath < -20:
         return 'ACCUMULATION'
-    elif pct_from_list > 100 and pct_from_ath < -25:
-        return 'EARLY RUN'
     else:
-        return 'MID RUN'
+        return 'CONSOLIDATION'
 
 
 def analyze_ipo_tracker(db_path='nepse_market_data.db'):
@@ -8329,7 +8371,9 @@ def analyze_ipo_tracker(db_path='nepse_market_data.db'):
         # Phase
         pct_from_list = (cur - list_price) / list_price * 100 if list_price else 0
         pct_from_ath  = (cur - ath) / ath * 100 if ath else 0
-        phase = detect_phase(list_price, cur, ath, days, broker_score)
+        mom_10d, mom_20d, vol_ratio = get_price_momentum(sym, conn)
+        phase = detect_phase(list_price, cur, ath, days, broker_score,
+                             price_mom_10d=mom_10d, vol_ratio=vol_ratio)
 
         # Score
         score, fs, ss, rs, bs, ps = calc_score(
@@ -8385,9 +8429,15 @@ def analyze_ipo_tracker(db_path='nepse_market_data.db'):
     for i, e in enumerate(results[:25], 1):
         # Colors
         phase_color = {
-            'FRESH': 'cyan', 'ACCUMULATION': 'green',
-            'EARLY RUN': 'yellow', 'MID RUN': 'white',
-            'NEAR ATH': 'magenta', 'DISTRIBUTION': 'red'
+            'FRESH':        'cyan',
+            'ACCUMULATION': 'green',
+            'MARKUP START': 'green',
+            'MARKUP RUN':   'yellow',
+            'CONSOLIDATION':'white',
+            'LATE DIST':    'magenta',
+            'DISTRIBUTION': 'red',
+            'MARKDOWN':     'red',
+            'NEAR ATH':     'magenta',
         }.get(e['phase'], 'white')
 
         score_color = 'green' if e['score'] >= 70 else 'yellow' if e['score'] >= 50 else 'red'
