@@ -7574,6 +7574,21 @@ def analyze_market_regime(conn, console):
             ORDER BY ret """ + order + """ LIMIT ?
         """, (d1, d2, limit)).fetchall()
 
+    def _fmt_npr(n):
+        """Format number in Nepali units: Kharba/Arba/Crore/Lakh
+        1 Lakh   = 1e5  | 1 Crore = 1e7 | 1 Arba = 1e9 | 1 Kharba = 1e11
+        """
+        if n >= 1e11:
+            return f"{n/1e11:.2f} Kharba"
+        elif n >= 1e9:
+            return f"{n/1e9:.2f} Arba"
+        elif n >= 1e7:
+            return f"{n/1e7:.2f} Crore"
+        elif n >= 1e5:
+            return f"{n/1e5:.2f} Lakh"
+        else:
+            return f"{n:,.0f}"
+
     def _get_avg_volume(d1, d2):
         r = conn.execute("""
             SELECT AVG(volume) FROM stock_prices
@@ -7898,7 +7913,7 @@ def analyze_market_regime(conn, console):
             conn.execute("INSERT OR REPLACE INTO market_regime VALUES (?,?,?)", (_datetime.date.today().isoformat(), 'WEAK/DISTRIBUTION', _note))
             conn.commit()
         except Exception: pass
-        console.print(f'  Volume:       [{vc}]{cc["vol_now"]/1e6:.2f}M[/{vc}] now  vs  {cc["vol_3m"]/1e6:.2f}M 3m avg  =  [{vc}]{cc["vol_ratio_3m"]:.2f}x[/{vc}]')
+        console.print(f'  Volume:       [{vc}]{_fmt_npr(cc["vol_now"])}[/{vc}] now  vs  {_fmt_npr(cc["vol_3m"])} 3m avg  =  [{vc}]{cc["vol_ratio_3m"]:.2f}x[/{vc}]')
         console.print(f'  Breadth:      [{bc}]{cc["breadth"]:.0f}%[/{bc}] stocks above 20d avg')
         console.print(f'  Price 3m:     [{pc}]{cc["price_chg_3m"]:+.1f}%[/{pc}]')
         console.print()
@@ -7929,7 +7944,7 @@ def analyze_market_regime(conn, console):
         console.print('[bold cyan]═══ TRIGGER SIGNALS TO WATCH ═══[/bold cyan]')
         console.print()
         vol_trig = cc['vol_6m'] * 1.2  # 20% above 6m avg = healthier baseline than 2x inflated 3m
-        console.print(f'  Volume trigger:    [yellow]{vol_trig/1e6:.1f}M+[/yellow] daily avg sustained 2 weeks  [dim](now {cc["vol_now"]/1e6:.2f}M)[/dim]')
+        console.print(f'  Volume trigger:    [yellow]{_fmt_npr(vol_trig)}+[/yellow] daily avg sustained 2 weeks  [dim](now {_fmt_npr(cc["vol_now"])})[/dim]')
         console.print(f'  Breadth trigger:   [yellow]55%+[/yellow] stocks above 20d avg  [dim](now {cc["breadth"]:.0f}%)[/dim]')
         console.print(f'  Seasonal trigger:  [yellow]Jul S.BUY[/yellow] signal  [dim](historically 5/5 up for index)[/dim]')
         console.print(f'  Phase trigger:     [yellow]Option 37 score > 55[/yellow]  [dim](accumulation confirmed)[/dim]')
