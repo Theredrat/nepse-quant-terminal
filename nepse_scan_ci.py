@@ -106,7 +106,7 @@ def fetch_price_data(n):
             elif cl in ("openprice", "open"): col_map[c] = "open"
             elif cl in ("highprice", "high"): col_map[c] = "high"
             elif cl in ("lowprice", "low"): col_map[c] = "low"
-            elif cl in ("totaltradedquantity", "totaltradeQuantity", "volume", "qty"): col_map[c] = "volume"
+            elif cl in ("totaltradedquantity", "totaltradefquantity", "totaltradeQuantity", "volume", "qty"): col_map[c] = "volume"
         df = df.rename(columns=col_map)
         required = ["symbol", "close"]
         if not all(c in df.columns for c in required):
