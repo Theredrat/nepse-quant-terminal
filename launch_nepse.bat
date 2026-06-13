@@ -101,11 +101,12 @@ echo   --- FULL ANALYSIS ---
   echo   39. Nepali Seasonality     (Baisakh-based true Nepali month analysis)
   echo   40. Sector Seasonality     (best/worst months per sector)
   echo   41. Deployment Planner     (watchlist + next month readiness)
-
   echo   43. Market Regime Analyzer (regimes, leaders, pre-move detector)
   echo   44. Data Health Check  (what data do I have?)
   echo   45. Pre-Market Brief  (top picks + signals summary)
   echo   46. IPO Tracker + Unlock Calendar
+  echo   47. Pre-Move Alert Scanner (vol surge + range + RSI signals)
+  echo   48. High-Conviction Scanner (Regime + Signals + Broker + Season)
   echo.
   echo   --- HELP ---
 echo   21. Signal Legend / Help
@@ -144,18 +145,18 @@ if "%choice%"=="20" python nepse_scanner.py --powersell --report & goto AGAIN
 if "%choice%"=="21" python nepse_scanner.py --legend & goto AGAIN
 if "%choice%"=="21b" python nepse_scanner.py --guide & goto AGAIN
 if "%choice%"=="35" goto FULL_REPORT
-
 if "%choice%"=="36" goto BEST_RR
 if "%choice%"=="37" goto MARKET_PHASE
 if "%choice%"=="38" goto SEASONALITY
 if "%choice%"=="39" goto NEPALI_SEASON
 if "%choice%"=="40" goto SECTOR_SEASON
 if "%choice%"=="41" goto DEPLOYMENT_PLANNER
-
 if "%choice%"=="43" goto MARKET_REGIME
 if "%choice%"=="44" goto DATA_HEALTH
 if "%choice%"=="45" goto PREMARKET_BRIEF
 if "%choice%"=="46" goto IPO_TRACKER
+if "%choice%"=="47" goto PREMOVE_SCANNER
+if "%choice%"=="48" goto CONVICTION_SCANNER
 if "%choice%"=="22" start python nepse_alerts.py & goto AGAIN
 if "%choice%"=="23" python nepse_scanner.py --corr & goto AGAIN
 if "%choice%"=="24" python nepse_scanner.py --portfolio & goto AGAIN
@@ -332,15 +333,10 @@ goto AGAIN
 python nepse_scanner.py --deployment-planner
 goto AGAIN
 
-
-
 :MARKET_REGIME
-
-  python nepse_scanner.py --market-regime
-
-  pause
-
-  goto MENU
+python nepse_scanner.py --market-regime
+pause
+goto MENU
 
 :DATA_HEALTH
 python data_check.py
@@ -357,15 +353,80 @@ python nepse_scanner.py --ipo-tracker
 pause
 goto MENU
 
+:PREMOVE_SCANNER
+echo.
+echo  [47] Pre-Move Alert Scanner
+echo  -----------------------------------------
+echo   1. Top 30 stocks  (^>=2 signals)
+echo   2. High conviction (^>=3 signals, top 20)
+echo   3. Deep report - single stock
+echo   4. Export full scores to CSV
+echo.
+set /p subchoice=  Sub-choice: 
+if "%subchoice%"=="1" python nepse_premove_scanner.py
+if "%subchoice%"=="2" python nepse_premove_scanner.py --min-score 3 --top 20
+if "%subchoice%"=="3" goto PREMOVE_SYMBOL
+if "%subchoice%"=="4" python nepse_premove_scanner.py --export
+pause
+goto MENU
+
+:CONVICTION_SCANNER
+echo.
+echo  [48] High-Conviction Entry Scanner
+echo  -----------------------------------------
+echo   1. Full 4-filter  (Regime+Signals+Broker+Season)
+echo   2. Relax  (skip season filter)
+echo   3. Relax2 (signals only, skip broker+season)
+echo   4. Explain single stock
+echo   5. Export results to CSV
+echo.
+set /p subchoice=  Sub-choice: 
+if "%subchoice%"=="1" goto CONV_FULL
+if "%subchoice%"=="2" goto CONV_RELAX
+if "%subchoice%"=="3" goto CONV_RELAX2
+if "%subchoice%"=="4" goto CONVICTION_SYMBOL
+if "%subchoice%"=="5" goto CONV_EXPORT
+echo  Invalid sub-choice.
+pause
+goto MENU
+
+:CONV_FULL
+python nepse_conviction_scanner.py
+pause
+goto MENU
+
+:CONV_RELAX
+python nepse_conviction_scanner.py --relax
+pause
+goto MENU
+
+:CONV_RELAX2
+python nepse_conviction_scanner.py --relax2
+pause
+goto MENU
+
+:CONV_EXPORT
+python nepse_conviction_scanner.py --export
+pause
+goto MENU
+
+:CONVICTION_SYMBOL
+set /p sym=  Enter symbol: 
+python nepse_conviction_scanner.py --symbol %sym%
+pause
+goto MENU
+
+:PREMOVE_SYMBOL
+set /p sym=  Enter symbol: 
+python nepse_premove_scanner.py --symbol %sym%
+pause
+goto MENU
+
 :AGAIN
 echo.
 echo  ============================================
 pause
 goto MENU
-
-
-
-
 
 :RUN_QUICKPICK
 python _marketcheck.py
@@ -378,4 +439,3 @@ python _marketcheck.py
 if errorlevel 1 python nepse_scanner.py --smartpick --offline & goto AGAIN
 python nepse_scanner.py --smartpick
 goto AGAIN
-
