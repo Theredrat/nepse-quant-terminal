@@ -171,6 +171,7 @@ def get_sector(symbol):
 
 
 
+
 # ── NEPSE CLIENT ──────────────────────────────────────────────────────────────
 
 def init_nepse():
@@ -1740,7 +1741,7 @@ def analyze_floorsheet_symbol(df, symbol):
     console.print()
     console.print(Rule(f"[bold cyan]Floorsheet — {sym}[/bold cyan]", style="cyan"))
     if df is None or df.empty:
-        console.print(f"  [red]No data for {sym}. Available Sun-Thu 11am-3pm NST.[/red]")
+        console.print(f"  [red]No data for {sym}. Available Mon-Fri 11am-3pm NST.[/red]")
         return
     total_qty = df['quantity'].sum()
     total_amt = df['amount'].sum()
@@ -3890,10 +3891,38 @@ def analyze_full_stock_report(symbol=None, db_path='nepse_market_data.db'):
                 better_rr_note = '(GOOD -- worth waiting for)' if better_rr >= 2 else '(MARGINAL)' if better_rr >= 1.5 else '(still poor -- skip stock)'
                 console.print(f'  [cyan]  R/R:       [{better_rr_col}]1:{better_rr} {better_rr_note}[/{better_rr_col}][/cyan]')
                 console.print(f'  [cyan]  Set price alert at Rs {next_support:,.1f}[/cyan]')
+
+            # Trade Plan score — feeds Final Verdict like every other section.
+            # Built from R/R quality plus entry timing, so a poor setup
+            # (bad R/R or "wait, near resistance") drags the overall score down
+            # instead of being silently excluded from total_score/max_score.
+            if rr >= 2:
+                tp_score = 80
+            elif rr >= 1.5:
+                tp_score = 55
+            else:
+                tp_score = 25
+
+            if entry_action in ("BUY NOW", "BUY SMALL"):
+                tp_score += 15
+            elif entry_action == "WAIT":
+                tp_score -= 15
+            tp_score = max(0, min(100, tp_score))
+
+            tp_verdict = 'GOOD R/R' if tp_score >= 60 else 'MARGINAL' if tp_score >= 35 else 'POOR R/R'
+            tp_col = 'green' if tp_score >= 60 else 'yellow' if tp_score >= 35 else 'red'
+            console.print()
+            console.print(f'  Trade Plan Score: [{tp_col}]{tp_score}/100 — {tp_verdict}[/{tp_col}]')
+            section_verdicts.append(('Trade Plan', tp_score, tp_verdict, tp_col))
+            total_score += tp_score
+            max_score += 100
         else:
             console.print('  No price data for trade plan.', style='yellow')
+            section_verdicts.append(('Trade Plan', 0, 'NO DATA', 'dim'))
+            max_score += 100
     except Exception as e:
         console.print(f'  Error in Section 5: {e}', style='red')
+        max_score += 100
 
     conn.close()
 
